@@ -60,6 +60,12 @@ VARIABLE_DEFAULT_ITEMS = [
 ]
 
 
+DIRECT_WAGE_DEFAULT_ITEMS = [
+    ("Milking Crew", 0.6),
+    ("Herd Management", 0.4),
+]
+
+
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
     if "Period" not in core.columns or "Revenue" not in core.columns:
         return {}
@@ -128,6 +134,160 @@ def _ensure_cogs_schedule(
         table = pd.DataFrame({"Period": base_periods, "COGS": np.nan})
 
     return _sync_cogs_table(table, core, default_pct=default_pct)
+
+
+# ---------- Direct wages helpers ----------
+
+
+def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
+    totals = pd.to_numeric(core.get("Direct Wages"), errors="coerce")
+    total_values = totals.tolist() if totals is not None else []
+
+    rows: list[dict[str, object]] = []
+    if periods:
+        for idx, period in enumerate(periods):
+            total = total_values[idx] if idx < len(total_values) else np.nan
+            for role, share in DIRECT_WAGE_DEFAULT_ITEMS:
+                amount = (
+                    total * share if total is not None and not np.isnan(total) else np.nan
+                )
+                rows.append(
+                    {
+                        "Period": period,
+                        "Role": role,
+                        "Amount": amount,
+                    }
+                )
+
+    if not rows:
+        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        rows.append({"Period": today, "Role": "Direct Wage", "Amount": np.nan})
+
+    return pd.DataFrame(rows)
+
+
+def _ensure_direct_wage_table(
+    table: Optional[pd.DataFrame], core: pd.DataFrame
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        return _default_direct_wage_table(core)
+
+    work = table.copy()
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    work["Role"] = work.get("Role", "").astype(str).str.strip()
+    work.loc[work["Role"] == "", "Role"] = "Direct Wage"
+    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+
+    work = work.dropna(how="all")
+    work = work[(work["Role"].notna()) | (work["Amount"].notna())]
+    work = work.dropna(subset=["Period"], how="all")
+
+    if work.empty:
+        return _default_direct_wage_table(core)
+
+    return work.reset_index(drop=True)
+
+
+def _add_direct_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_direct_wage_table(table, core)
+    periods = work.get("Period", pd.Series(dtype=str))
+    default_period = None
+    if not periods.empty:
+        default_period = periods.iloc[-1]
+    else:
+        core_periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+        if not core_periods.empty:
+            default_period = core_periods.iloc[-1]
+    if default_period is None or pd.isna(default_period):
+        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+
+    new_row = {
+        "Period": default_period,
+        "Role": f"Direct Wage Item {len(work) + 1}",
+        "Amount": np.nan,
+    }
+    return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+
+
+def _remove_direct_wage_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
+    if table is None or table.empty:
+        return table
+    work = table.copy()
+    if 0 <= index < len(work):
+        work = work.drop(index=index).reset_index(drop=True)
+    return work
+
+
+def _apply_direct_wage_increment(
+    table: pd.DataFrame, increment_pct: float, target_role: Optional[str] = None
+) -> pd.DataFrame:
+    if table is None or table.empty or increment_pct == 0:
+        return table
+
+    work = table.copy()
+    work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
+    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+    work["Role"] = work.get("Role", "").astype(str).str.strip()
+
+    increment_factor = 1 + (increment_pct / 100.0)
+
+    def _should_update(role: str) -> bool:
+        if not target_role or target_role == "All roles":
+            return True
+        return role == target_role
+
+    for role, group in work.groupby("Role", dropna=False):
+        role_key = role if isinstance(role, str) else ""
+        if not _should_update(role_key):
+            continue
+        group = group.sort_values("Period_dt", kind="stable")
+        prev_amount = None
+        prev_year = None
+        for idx, row in group.iterrows():
+            period_dt = row["Period_dt"]
+            amount = row["Amount"]
+            if pd.isna(period_dt):
+                continue
+            year = int(period_dt.year)
+            if prev_amount is None and not pd.isna(amount):
+                prev_amount = amount
+                prev_year = year
+                continue
+            if prev_amount is None or prev_year is None:
+                continue
+            year_gap = year - prev_year
+            if year_gap <= 0:
+                if not pd.isna(amount):
+                    prev_amount = amount
+                    prev_year = year
+                continue
+            new_amount = prev_amount * (increment_factor ** year_gap)
+            work.at[idx, "Amount"] = new_amount
+            prev_amount = new_amount
+            prev_year = year
+
+    return work.drop(columns="Period_dt")
+
+
+def _aggregate_direct_wages(
+    table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    work = _ensure_direct_wage_table(table, core)
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+    summary = (
+        work.groupby("Period", as_index=False)["Amount"].sum(min_count=1)
+        if not work.empty
+        else pd.DataFrame(columns=["Period", "Amount"])
+    )
+    result = pd.DataFrame({"Period": periods})
+    summary_map = dict(zip(summary.get("Period", []), summary.get("Amount", [])))
+    result["Direct Wages"] = result["Period"].map(summary_map)
+    if result["Direct Wages"].notna().any():
+        result["Direct Wages"] = result["Direct Wages"].astype(float)
+    else:
+        result["Direct Wages"] = 0.0
+    return result
 
 
 # ---------- Variable expenses helpers ----------
@@ -862,6 +1022,9 @@ def _default_schedule_components(
         if name == "Variable Expenses Schedule":
             detail_tables[name] = _default_variable_expense_table(base)
             continue
+        if name == "Direct Wages Schedule":
+            detail_tables[name] = _default_direct_wage_table(base)
+            continue
         detail_cols = ["Period"] + [col for col in cols if col in base.columns]
         detail_tables[name] = base[detail_cols].copy()
 
@@ -1388,6 +1551,105 @@ def main() -> None:
 
                     st.markdown("##### Variable Expenses Summary")
                     st.dataframe(aggregated_variable)
+                elif name == "Direct Wages Schedule":
+                    st.markdown("#### Direct Wages Schedule")
+                    st.caption(
+                        "Capture individual direct labour cost items, manage rows, and escalate pay levels with yearly "
+                        "increments. Totals automatically feed into the model's EBITDA calculations."
+                    )
+
+                    direct_table = _ensure_direct_wage_table(
+                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        st.session_state.core_schedule,
+                    )
+
+                    st.session_state.setdefault("direct_wage_remove_choice", "-- Select Row --")
+                    st.session_state.setdefault("direct_wage_increment_target", "All roles")
+                    st.session_state.setdefault("direct_wage_increment_pct", 0.0)
+
+                    add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+                    if add_col.button("Add Row", key="direct_wage_add_row"):
+                        direct_table = _add_direct_wage_row(
+                            direct_table, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = direct_table
+
+                    option_labels: list[str] = []
+                    option_index: Dict[str, int] = {}
+                    for idx_row, row in direct_table.iterrows():
+                        label_period = row.get("Period") or "Unknown Period"
+                        label_role = row.get("Role") or "Role"
+                        label = f"{label_period} – {label_role}"
+                        option_labels.append(label)
+                        option_index[label] = idx_row
+
+                    remove_select_col.selectbox(
+                        "Select row",
+                        options=["-- Select Row --"] + option_labels,
+                        key="direct_wage_remove_choice",
+                    )
+                    if remove_btn_col.button("Remove Row", key="direct_wage_remove_row"):
+                        choice = st.session_state.get("direct_wage_remove_choice")
+                        if choice in option_index:
+                            direct_table = _remove_direct_wage_row(
+                                direct_table, option_index[choice]
+                            )
+                            st.session_state.detail_schedules[name] = direct_table
+                            st.session_state.direct_wage_remove_choice = "-- Select Row --"
+
+                    inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
+                    target_options = ["All roles"] + sorted(
+                        {
+                            str(role)
+                            for role in direct_table.get("Role", pd.Series(dtype=str))
+                            .dropna()
+                            .unique()
+                            .tolist()
+                            if str(role).strip()
+                        }
+                    )
+                    inc_target_col.selectbox(
+                        "Apply increment to",
+                        options=target_options,
+                        key="direct_wage_increment_target",
+                    )
+                    inc_pct_col.number_input(
+                        "Yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="direct_wage_increment_pct",
+                    )
+                    if inc_btn_col.button("Apply increment", key="direct_wage_apply_increment"):
+                        direct_table = _apply_direct_wage_increment(
+                            direct_table,
+                            st.session_state.get("direct_wage_increment_pct", 0.0),
+                            st.session_state.get("direct_wage_increment_target"),
+                        )
+                        st.session_state.detail_schedules[name] = direct_table
+
+                    editor = st.data_editor(
+                        direct_table,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key="schedule_direct_wages_schedule",
+                        column_config={
+                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
+                        },
+                    )
+                    direct_table = _ensure_direct_wage_table(
+                        editor, st.session_state.core_schedule
+                    )
+                    st.session_state.detail_schedules[name] = direct_table
+
+                    aggregated_direct = _aggregate_direct_wages(
+                        direct_table, st.session_state.core_schedule
+                    )
+                    detail_tables_for_run[name] = aggregated_direct
+
+                    st.markdown("##### Direct Wages Summary")
+                    st.dataframe(aggregated_direct)
                 else:
                     table = st.data_editor(
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
