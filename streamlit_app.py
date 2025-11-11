@@ -2,18 +2,176 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from io import BytesIO
+import re
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from pandas.tseries.offsets import MonthEnd
+from streamlit.delta_generator import DeltaGenerator
 
 from goat_financial_model import GoatModel, InputSchedule
 
 
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 
+
+AI_PROVIDER_OPTIONS = ("OpenAI", "Azure OpenAI", "Anthropic")
+
+ML_METHOD_LABELS = {
+    "linear_regression": "Linear Regression",
+    "random_forest": "Random Forest",
+    "gradient_boosting": "Gradient Boosting",
+}
+
+ML_LABEL_TO_CODE = {label: code for code, label in ML_METHOD_LABELS.items()}
+
+GEN_AI_FEATURE_LABELS = {
+    "summary": "Executive Summary",
+    "risk_analysis": "Risk Analysis",
+    "opportunity_analysis": "Opportunity Analysis",
+}
+
+GEN_AI_LABEL_TO_CODE = {label: code for code, label in GEN_AI_FEATURE_LABELS.items()}
+
+
+def _payload_to_ai_settings(payload: dict) -> Dict[str, Any]:
+    ai_payload = payload.get("ai") or {}
+    ml_methods = ai_payload.get("ml_methods") or ["linear_regression"]
+    features = ai_payload.get("generative_features") or ["summary"]
+    return {
+        "enabled": bool(ai_payload.get("enabled", False)),
+        "provider": ai_payload.get("provider", "OpenAI"),
+        "model": ai_payload.get("model", "gpt-4"),
+        "forecast_horizon": int(ai_payload.get("forecast_horizon", 3)),
+        "ml_methods": [str(method) for method in ml_methods],
+        "generative_features": [str(feature) for feature in features],
+        "api_key": ai_payload.get("api_key", ""),
+    }
+
+
+def _ai_settings_to_payload(settings: Dict[str, Any], payload: dict) -> None:
+    payload.setdefault("ai", {})
+    payload["ai"].update(
+        {
+            "enabled": bool(settings.get("enabled", False)),
+            "provider": settings.get("provider", "OpenAI"),
+            "model": settings.get("model", "gpt-4"),
+            "forecast_horizon": int(settings.get("forecast_horizon", 3)),
+            "ml_methods": list(settings.get("ml_methods", ["linear_regression"])),
+            "generative_features": list(
+                settings.get("generative_features", ["summary"])
+            ),
+            "api_key": settings.get("api_key", ""),
+        }
+    )
+
+
+def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = None) -> None:
+    target = container or st
+    settings = st.session_state.setdefault(
+        "ai_settings", _payload_to_ai_settings(payload)
+    )
+    st.session_state.setdefault("ai_api_key", settings.get("api_key", ""))
+
+    if st.session_state.pop("ai_settings_saved", False):
+        target.success("AI configuration updated. Rerunning the model with the new settings.")
+
+    provider_options = list(AI_PROVIDER_OPTIONS)
+    if settings.get("provider") and settings["provider"] not in provider_options:
+        provider_options.append(settings["provider"])
+
+    current_provider = settings.get("provider", provider_options[0])
+    try:
+        provider_index = provider_options.index(current_provider)
+    except ValueError:
+        provider_index = 0
+
+    ml_defaults = [
+        ML_METHOD_LABELS.get(code, code.replace("_", " ").title())
+        for code in settings.get("ml_methods", ["linear_regression"])
+    ]
+    feature_defaults = [
+        GEN_AI_FEATURE_LABELS.get(code, code.replace("_", " ").title())
+        for code in settings.get("generative_features", ["summary"])
+    ]
+
+    form = target.form("ai_settings_form")
+    with form:
+        enabled = form.checkbox(
+            "Enable AI Enhancements",
+            value=bool(settings.get("enabled", False)),
+            help="Toggle machine-learning forecasts and generative commentary.",
+        )
+        provider = form.selectbox(
+            "Provider",
+            provider_options,
+            index=provider_index,
+            help="Select the API provider powering generative insights.",
+        )
+        model = form.text_input(
+            "Model",
+            value=settings.get("model", "gpt-4"),
+            help="Name of the deployed model (for example `gpt-4o-mini`).",
+        )
+        horizon = form.number_input(
+            "Forecast Horizon (years)",
+            min_value=0,
+            max_value=20,
+            value=int(settings.get("forecast_horizon", 3)),
+            step=1,
+            help="Number of additional years used for machine-learning revenue forecasts.",
+        )
+
+        ml_selection = form.multiselect(
+            "Machine Learning Methods",
+            list(ML_METHOD_LABELS.values()),
+            default=ml_defaults,
+            help="Choose algorithms applied to projected net revenue.",
+        )
+        feature_selection = form.multiselect(
+            "Generative Features",
+            list(GEN_AI_FEATURE_LABELS.values()),
+            default=feature_defaults,
+            help="Pick the narrative focus areas generated by the AI summary.",
+        )
+        api_key = form.text_input(
+            "API Key",
+            value=st.session_state.get("ai_api_key", ""),
+            type="password",
+            help="Store your provider API key securely. Keys are retained only for the current session.",
+        )
+
+        submitted = form.form_submit_button("Save AI Configuration")
+
+    if submitted:
+        ml_codes = [
+            ML_LABEL_TO_CODE.get(label, label.replace(" ", "_").lower())
+            for label in ml_selection
+        ]
+        feature_codes = [
+            GEN_AI_LABEL_TO_CODE.get(label, label.replace(" ", "_").lower())
+            for label in feature_selection
+        ]
+
+        settings.update(
+            {
+                "enabled": enabled,
+                "provider": provider,
+                "model": model.strip() or "gpt-4",
+                "forecast_horizon": int(horizon),
+                "ml_methods": ml_codes or ["linear_regression"],
+                "generative_features": feature_codes or ["summary"],
+                "api_key": api_key.strip(),
+            }
+        )
+        st.session_state["ai_settings"] = settings
+        st.session_state["ai_api_key"] = settings.get("api_key", "")
+        _ai_settings_to_payload(settings, payload)
+        st.session_state["ai_settings_saved"] = True
+        st.experimental_rerun()
 
 DETAIL_SCHEDULE_COLUMNS = {
     "COGS Schedule": ["COGS"],
@@ -51,6 +209,157 @@ def _normalize_period(series: pd.Series) -> pd.Series:
     periods = pd.to_datetime(series, errors="coerce")
     formatted = periods.dt.strftime("%Y-%m-%d")
     return formatted.where(~periods.isna(), series.astype(str))
+
+
+def _format_scenario_label(milk_pct: int, feed_pct: int) -> str:
+    if milk_pct == 0 and feed_pct == 0:
+        return "Base Scenario"
+    return f"Milk {milk_pct:+d}%, Feed {feed_pct:+d}%"
+
+
+def _scenario_key_suffix(label: str) -> str:
+    normalized = re.sub(r"[^0-9a-zA-Z]+", "_", label).strip("_").lower()
+    return normalized or "scenario"
+
+
+def _sanitize_sheet_name(name: str, existing: set[str]) -> str:
+    invalid = set('[]:*?/\\')
+    cleaned = "".join("_" if ch in invalid else ch for ch in name).strip()
+    cleaned = cleaned or "Sheet"
+    if len(cleaned) > 31:
+        cleaned = cleaned[:31]
+    base = cleaned
+    suffix = 1
+    while cleaned in existing:
+        candidate = f"{base[:31 - len(str(suffix)) - 1]}_{suffix}" if len(base) >= 30 else f"{base}_{suffix}"
+        cleaned = candidate[:31]
+        suffix += 1
+    existing.add(cleaned)
+    return cleaned
+
+
+def _prepare_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+
+    frame = df.copy()
+    if isinstance(frame, pd.Series):
+        frame = frame.to_frame()
+
+    if isinstance(frame.columns, pd.MultiIndex):
+        frame.columns = [
+            " - ".join(str(part) for part in tup if str(part))
+            for tup in frame.columns.to_flat_index()
+        ]
+
+    index = frame.index
+    if isinstance(index, pd.MultiIndex):
+        frame = frame.reset_index()
+    elif isinstance(index, pd.DatetimeIndex):
+        frame = frame.reset_index()
+        first_col = frame.columns[0]
+        frame[first_col] = _normalize_period(frame[first_col])
+        if first_col == "index" or not first_col:
+            frame = frame.rename(columns={first_col: "Period"})
+    elif not isinstance(index, pd.RangeIndex) or index.name:
+        frame = frame.reset_index()
+        first_col = frame.columns[0]
+        if first_col == "index" and index.name:
+            frame = frame.rename(columns={first_col: index.name})
+
+    return frame
+
+
+def _generate_excel_bytes(
+    model: GoatModel,
+    results: Dict[str, Any],
+    scenario_name: str,
+) -> bytes:
+    buffer = BytesIO()
+
+    scenario_df = results.get("scenario")
+    base_df = results.get("base")
+    kpis = results.get("kpis")
+    break_even = results.get("break_even")
+    supplementary = results.get("supplementary", {})
+    scenario_inputs = results.get("scenario_inputs", {})
+
+    used_sheets: set[str] = set()
+
+    def write_sheet(name: str, df: Optional[pd.DataFrame]) -> None:
+        if df is None:
+            return
+        frame = _prepare_dataframe_for_excel(df)
+        if frame.empty and frame.columns.empty:
+            return
+        frame.to_excel(
+            writer,
+            sheet_name=_sanitize_sheet_name(name, used_sheets),
+            index=False,
+        )
+
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        if base_df is not None:
+            write_sheet("Input Schedule", base_df)
+
+        if scenario_df is not None:
+            write_sheet(f"{scenario_name} Timeline", scenario_df)
+            try:
+                annual = scenario_df.copy()
+                annual.index = pd.to_datetime(annual.index)
+                annual = annual.groupby(annual.index.year).sum(min_count=1)
+                annual.index.name = "Year"
+                write_sheet(f"{scenario_name} Annual", annual)
+            except Exception:
+                pass
+
+            try:
+                sop = model.statement_of_financial_performance(scenario_df, annual=True)
+                write_sheet("Statement of Financial Performance", sop)
+            except ValueError:
+                pass
+
+            try:
+                sofp = model.statement_of_financial_position(scenario_df, annual=True)
+                write_sheet("Statement of Financial Position", sofp)
+            except ValueError:
+                pass
+
+            try:
+                socf = model.statement_of_cash_flow(scenario_df, annual=True)
+                write_sheet("Statement of Cash Flows", socf)
+            except ValueError:
+                pass
+
+        if kpis is not None:
+            write_sheet("KPIs (Annual)", kpis.mul(100))
+
+        if break_even is not None:
+            write_sheet("Break-even Analysis", break_even)
+
+        if scenario_inputs:
+            inputs_df = pd.DataFrame(
+                {
+                    "Input": list(scenario_inputs.keys()),
+                    "Value": list(scenario_inputs.values()),
+                }
+            )
+            write_sheet("Scenario Inputs", inputs_df)
+
+        for name, table in supplementary.items():
+            if table is None:
+                continue
+            write_sheet(f"Supplementary - {name}", table)
+
+        metadata_df = pd.DataFrame(
+            {
+                "Scenario": [scenario_name],
+            }
+        )
+        write_sheet("Scenario Details", metadata_df)
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 VARIABLE_DEFAULT_ITEMS = [
@@ -1774,6 +2083,11 @@ def main() -> None:
     if "results" not in st.session_state:
         st.session_state.results = None
 
+    ai_payload = st.session_state.setdefault("ai_payload", {})
+    with st.sidebar:
+        st.header("AI & Machine Learning")
+        _render_ai_settings(ai_payload, st.sidebar)
+
     milk_price = 0
     feed_cost = 0
     valuation_inputs: Dict[str, float] = {}
@@ -3017,6 +3331,12 @@ def main() -> None:
 
         st.success("Scenario complete")
 
+        selected_scenario = _format_scenario_label(milk_price, feed_cost)
+        scenario_inputs = {
+            "Milk price change (%)": milk_price,
+            "Feed cost change (%)": feed_cost,
+        }
+
         st.session_state.results = {
             "model": model,
             "base": base,
@@ -3024,6 +3344,8 @@ def main() -> None:
             "kpis": kpis,
             "break_even": break_even,
             "supplementary": combined_supplementary,
+            "selected_scenario": selected_scenario,
+            "scenario_inputs": scenario_inputs,
         }
 
     results = st.session_state.results
@@ -3038,6 +3360,8 @@ def main() -> None:
         scenario = results["scenario"]
         kpis = results["kpis"]
         break_even = results["break_even"]
+        selected_scenario = results.get("selected_scenario", "Scenario")
+        model.scenario_name = selected_scenario
 
         valuation_metrics = {
             "WACC": model.wacc(),
@@ -3056,6 +3380,42 @@ def main() -> None:
                 else:
                     summary_cols[idx].metric(label, f"{value:,.2f}")
                 idx += 1
+
+        download_container = st.container()
+        excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
+        excel_bytes = excel_map.get(selected_scenario)
+        key_suffix = _scenario_key_suffix(selected_scenario)
+
+        with download_container:
+            st.markdown("#### Excel Model Download")
+            if not excel_bytes:
+                if st.button(
+                    "Prepare Excel Model",
+                    key=f"prepare_excel_{key_suffix}",
+                ):
+                    with st.spinner("Preparing Excel workbook..."):
+                        excel_bytes = _generate_excel_bytes(
+                            model, results, selected_scenario
+                        )
+                    excel_map[selected_scenario] = excel_bytes
+                    st.session_state.excel_bytes_map = excel_map
+            if excel_bytes:
+                st.download_button(
+                    "Download Excel Model",
+                    data=excel_bytes,
+                    file_name="Goat_Farm_Financial_Model.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_excel_{key_suffix}",
+                )
+                if st.button(
+                    "Clear Prepared Excel",
+                    key=f"clear_excel_{key_suffix}",
+                ):
+                    excel_map.pop(selected_scenario, None)
+                    st.session_state.excel_bytes_map = excel_map
+                    excel_bytes = None
+            if not excel_bytes:
+                st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
         st.subheader("KPIs (Annual)")
         st.dataframe(kpis.mul(100).round(2))

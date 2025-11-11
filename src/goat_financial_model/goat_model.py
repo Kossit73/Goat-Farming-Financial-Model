@@ -353,6 +353,30 @@ class GoatModel:
             "Admin Wages": self.admin_wages(),
             "Interest Expense": self.interest_expense(),
             "Tax Expense": self.tax_expense(),
+            "CFO": self.cfo(),
+            "CFI": self.cfi(),
+            "CFF": self.cff(),
+            "Capex": self.capex(),
+            "Net Cash Flow": self.net_cash_flow(),
+            "Opening Cash Balance": self._get_series(
+                ("Opening Cash Balance", "Opening Cash", "Cash at Beginning of Period")
+            ),
+            "Closing Cash Balance": self._get_series(
+                ("Closing Cash Balance", "Closing Cash", "Cash at End of Period")
+            ),
+            "Cash and Cash Equivalents": self._get_series(
+                (
+                    "Cash and Cash Equivalents",
+                    "Cash & Equivalents",
+                    "Cash",
+                    "Closing Cash",
+                )
+            ),
+            "Current Assets": self.current_assets(),
+            "Non-current Assets": self.non_current_assets(),
+            "Current Liabilities": self.current_liabilities(),
+            "Non-current Liabilities": self.non_current_liabilities(),
+            "Equity": self.equity(),
         }
         valid = {k: v for k, v in base_cols.items() if v is not None}
         if "Revenue" not in valid or "COGS" not in valid:
@@ -499,14 +523,24 @@ class GoatModel:
         npat_series = df.get(npat_col)
         _maybe_add("Net Profit", npat_series)
 
-        interest_series = df.get("Interest Expense") or df.get("Interest") or df.get("Finance Costs")
+        interest_series = None
+        for interest_col in ("Interest Expense", "Interest", "Finance Costs"):
+            candidate = df.get(interest_col)
+            if candidate is not None:
+                interest_series = candidate
+                break
         if interest_series is None and "EBIT" in work and npbt_series is not None:
             interest_series = pd.to_numeric(work["EBIT"], errors="coerce") - pd.to_numeric(
                 npbt_series, errors="coerce"
             )
         _maybe_add("Interest", interest_series)
 
-        tax_series = df.get("Tax Expense") or df.get("Income Tax Expense") or df.get("Tax")
+        tax_series = None
+        for tax_col in ("Tax Expense", "Income Tax Expense", "Tax"):
+            candidate = df.get(tax_col)
+            if candidate is not None:
+                tax_series = candidate
+                break
         if tax_series is None and npbt_series is not None and npat_series is not None:
             tax_series = pd.to_numeric(npbt_series, errors="coerce") - pd.to_numeric(
                 npat_series, errors="coerce"
@@ -683,9 +717,21 @@ class GoatModel:
                 return cleaned.groupby(cleaned.index.year).last()
             return cleaned
 
+        cash_candidates = (
+            "Cash and Cash Equivalents",
+            "Closing Cash Balance",
+            "Closing Cash",
+            "Cash at End of Period",
+        )
+        cash_series = None
+        for candidate in cash_candidates:
+            series = df.get(candidate)
+            if series is not None:
+                cash_series = series
+                break
+
         components = {
-            "Cash and Cash Equivalents": df.get("Cash and Cash Equivalents")
-            or df.get("Closing Cash Balance"),
+            "Cash and Cash Equivalents": cash_series,
             "Current Assets": df.get("Current Assets"),
             "Non-current Assets": df.get("Non-current Assets"),
             "Current Liabilities": df.get("Current Liabilities"),
