@@ -520,7 +520,6 @@ class GoatModel:
         if agg.empty:
             raise ValueError("No income-statement data available in the schedule.")
 
-        out = pd.DataFrame(index=agg.index)
         ordered = [
             "Revenue",
             "COGS",
@@ -538,20 +537,24 @@ class GoatModel:
             "Net Profit",
         ]
 
+        out = pd.DataFrame(index=agg.index)
         for column in ordered:
             if column == "Gross Profit Margin":
                 continue
             if column in agg:
                 out[column] = agg[column]
+            else:
+                out[column] = np.nan
 
         if "Gross Profit" in agg and "Revenue" in agg:
             with np.errstate(divide="ignore", invalid="ignore"):
                 margin = agg["Gross Profit"] / agg["Revenue"]
             margin = margin.replace({np.inf: np.nan, -np.inf: np.nan})
-            out["Gross Profit Margin"] = margin
+        else:
+            margin = pd.Series(np.nan, index=agg.index)
+        out["Gross Profit Margin"] = margin
 
-        available = [col for col in ordered if col in out.columns]
-        return out[available]
+        return out[ordered]
 
     def statement_of_cash_flow(
         self, df: Optional[pd.DataFrame] = None, annual: bool = True
