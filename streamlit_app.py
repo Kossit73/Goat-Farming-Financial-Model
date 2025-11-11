@@ -35,8 +35,10 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
     ebitda = gross_margin - variable - fixed - direct - admin
     depreciation = np.full(periods, 2000.0)
     ebit = ebitda - depreciation
-    npbt = ebit - 1500.0
-    npat = npbt * 0.72
+    interest_expense = np.full(periods, 1500.0)
+    npbt = ebit - interest_expense
+    tax_expense = npbt * 0.28
+    npat = npbt - tax_expense
     cfo = ebitda - 2500.0
     cfi = np.full(periods, -3000.0)
     cff = np.full(periods, 1500.0)
@@ -61,7 +63,9 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
             "EBITDA": ebitda,
             "Depreciation & Amortization": depreciation,
             "EBIT": ebit,
+            "Interest Expense": interest_expense,
             "NPBT": npbt,
+            "Tax Expense": tax_expense,
             "NPAT": npat,
             "CFO": cfo,
             "CFI": cfi,
@@ -89,7 +93,9 @@ def _default_schedule_components(
         "Fixed Expenses",
         "Depreciation & Amortization",
         "EBIT",
+        "Interest Expense",
         "NPBT",
+        "Tax Expense",
         "NPAT",
         "CFO",
         "CFI",
@@ -226,7 +232,9 @@ def _assemble_schedule(
         "EBITDA",
         "Depreciation & Amortization",
         "EBIT",
+        "Interest Expense",
         "NPBT",
+        "Tax Expense",
         "NPAT",
         "CFO",
         "CFI",
@@ -265,6 +273,16 @@ def _assemble_schedule(
     if {"EBITDA", "Depreciation & Amortization"}.issubset(combined.columns):
         combined["EBIT"] = combined["EBITDA"] - combined["Depreciation & Amortization"].fillna(0)
 
+    if "Interest Expense" not in combined.columns or combined["Interest Expense"].isna().all():
+        if {"EBIT", "NPBT"}.issubset(combined.columns):
+            combined["Interest Expense"] = (
+                combined["EBIT"] - combined["NPBT"]
+            )
+
+    if "Tax Expense" not in combined.columns or combined["Tax Expense"].isna().all():
+        if {"NPBT", "NPAT"}.issubset(combined.columns):
+            combined["Tax Expense"] = combined["NPBT"] - combined["NPAT"]
+
     if {"CFO", "CFI", "CFF"}.issubset(combined.columns):
         combined["Net Cash Flow"] = combined[["CFO", "CFI", "CFF"]].sum(
             axis=1, min_count=1
@@ -281,7 +299,9 @@ def _assemble_schedule(
         "EBITDA",
         "Depreciation & Amortization",
         "EBIT",
+        "Interest Expense",
         "NPBT",
+        "Tax Expense",
         "NPAT",
         "CFO",
         "CFI",

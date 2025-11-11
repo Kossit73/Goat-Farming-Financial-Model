@@ -170,6 +170,50 @@ class GoatModel:
     def npat(self) -> Optional[pd.Series]:
         return self._get_series(("Net Profit After Tax", "Net Income"))
 
+    def interest_expense(self) -> Optional[pd.Series]:
+        explicit = self._get_series(
+            (
+                "Interest Expense",
+                "Finance Costs",
+                "Interest",
+            )
+        )
+        if explicit is not None:
+            return explicit
+
+        ebit = self.ebit()
+        npbt = self.npbt()
+        if ebit is None or npbt is None:
+            return None
+        aligned = pd.concat([ebit, npbt], axis=1)
+        interest = aligned.iloc[:, 0] - aligned.iloc[:, 1]
+        interest.name = "Interest Expense"
+        if interest.isna().all():
+            return None
+        return interest
+
+    def tax_expense(self) -> Optional[pd.Series]:
+        explicit = self._get_series(
+            (
+                "Tax Expense",
+                "Income Tax Expense",
+                "Tax",
+            )
+        )
+        if explicit is not None:
+            return explicit
+
+        npbt = self.npbt()
+        npat = self.npat()
+        if npbt is None or npat is None:
+            return None
+        aligned = pd.concat([npbt, npat], axis=1)
+        tax = aligned.iloc[:, 0] - aligned.iloc[:, 1]
+        tax.name = "Tax Expense"
+        if tax.isna().all():
+            return None
+        return tax
+
     def cfo(self) -> Optional[pd.Series]:
         return self._get_series(("CFO", "Operating Cash Flow"))
 
@@ -307,6 +351,8 @@ class GoatModel:
             "Fixed Expenses": self.fixed_expenses(),
             "Direct Wages": self.direct_wages(),
             "Admin Wages": self.admin_wages(),
+            "Interest Expense": self.interest_expense(),
+            "Tax Expense": self.tax_expense(),
         }
         valid = {k: v for k, v in base_cols.items() if v is not None}
         if "Revenue" not in valid or "COGS" not in valid:
@@ -426,55 +472,90 @@ class GoatModel:
         ebit_col = "EBIT_adj" if "EBIT_adj" in df else "EBIT"
         npbt_col = "NPBT"
         npat_col = "NPAT_adj" if "NPAT_adj" in df else "NPAT"
+        work = pd.DataFrame(index=df.index)
 
-        columns = {
-            "Revenue": df.get(rev_col),
-            "COGS": df.get(cogs_col),
-            "Gross Margin": df.get(gm_col),
-            "Variable Expenses": df.get("Variable Expenses"),
-            "Fixed Expenses": df.get("Fixed Expenses"),
-            "Direct Wages": df.get("Direct Wages"),
-            "Admin Wages": df.get("Admin Wages"),
-            "EBITDA": df.get(ebitda_col),
-            "Depreciation & Amortization": df.get("Depreciation & Amortization"),
-            "EBIT": df.get(ebit_col),
-            "NPBT": df.get(npbt_col),
-            "NPAT": df.get(npat_col),
-        }
-        series = {name: col for name, col in columns.items() if col is not None}
-        if not series:
+        def _maybe_add(column: str, series: Optional[pd.Series]) -> None:
+            if series is None:
+                return
+            work[column] = pd.to_numeric(series, errors="coerce")
+
+        _maybe_add("Revenue", df.get(rev_col))
+        _maybe_add("COGS", df.get(cogs_col))
+
+        if "Revenue" in work and "COGS" in work:
+            work["Gross Profit"] = work["Revenue"] - work["COGS"]
+        else:
+            _maybe_add("Gross Profit", df.get(gm_col))
+
+        _maybe_add("Variable Expenses", df.get("Variable Expenses"))
+        _maybe_add("Direct Wages", df.get("Direct Wages"))
+        _maybe_add("EBITDA", df.get(ebitda_col))
+        _maybe_add("Fixed Expenses", df.get("Fixed Expenses"))
+        _maybe_add("Admin Wages", df.get("Admin Wages"))
+        _maybe_add("Depreciation", df.get("Depreciation & Amortization"))
+        _maybe_add("EBIT", df.get(ebit_col))
+
+        npbt_series = df.get(npbt_col)
+        npat_series = df.get(npat_col)
+        _maybe_add("Net Profit", npat_series)
+
+        interest_series = df.get("Interest Expense") or df.get("Interest") or df.get("Finance Costs")
+        if interest_series is None and "EBIT" in work and npbt_series is not None:
+            interest_series = pd.to_numeric(work["EBIT"], errors="coerce") - pd.to_numeric(
+                npbt_series, errors="coerce"
+            )
+        _maybe_add("Interest", interest_series)
+
+        tax_series = df.get("Tax Expense") or df.get("Income Tax Expense") or df.get("Tax")
+        if tax_series is None and npbt_series is not None and npat_series is not None:
+            tax_series = pd.to_numeric(npbt_series, errors="coerce") - pd.to_numeric(
+                npat_series, errors="coerce"
+            )
+        _maybe_add("Tax", tax_series)
+
+        if work.empty:
             raise ValueError("No income-statement data available in the schedule.")
 
-        agg = self._aggregate(pd.concat(series, axis=1), annual=annual)
+        agg = self._aggregate(work, annual=annual)
+        if agg.empty:
+            raise ValueError("No income-statement data available in the schedule.")
+
         out = pd.DataFrame(index=agg.index)
-        out["Revenue"] = agg.get("Revenue")
-        out["COGS"] = agg.get("COGS")
-        if "Revenue" in agg and "COGS" in agg:
-            out["Gross Margin"] = agg["Revenue"] - agg["COGS"]
-        elif "Gross Margin" in agg:
-            out["Gross Margin"] = agg["Gross Margin"]
+        ordered = [
+            "Revenue",
+            "COGS",
+            "Gross Profit",
+            "Gross Profit Margin",
+            "Variable Expenses",
+            "Direct Wages",
+            "EBITDA",
+            "Fixed Expenses",
+            "Admin Wages",
+            "Depreciation",
+            "EBIT",
+            "Interest",
+            "Tax",
+            "Net Profit",
+        ]
 
-        expense_cols = [col for col in ["Variable Expenses", "Fixed Expenses", "Direct Wages", "Admin Wages"] if col in agg]
-        if expense_cols:
-            out["Total Operating Expenses"] = agg[expense_cols].sum(axis=1, min_count=1)
+        for column in ordered:
+            if column == "Gross Profit Margin":
+                continue
+            if column in agg:
+                out[column] = agg[column]
+            else:
+                out[column] = np.nan
 
-        if "EBITDA" in agg:
-            out["EBITDA"] = agg["EBITDA"]
-        elif "Gross Margin" in out and "Total Operating Expenses" in out:
-            out["EBITDA"] = out["Gross Margin"] - out["Total Operating Expenses"]
+        if "Gross Profit" in agg and "Revenue" in agg:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                margin = agg["Gross Profit"] / agg["Revenue"]
+            margin = margin.replace({np.inf: np.nan, -np.inf: np.nan})
+            out["Gross Profit Margin"] = margin
+        else:
+            out["Gross Profit Margin"] = np.nan
 
-        if "Depreciation & Amortization" in agg:
-            out["Depreciation & Amortization"] = agg["Depreciation & Amortization"]
-        if "EBIT" in agg:
-            out["EBIT"] = agg["EBIT"]
-        elif "EBITDA" in out and "Depreciation & Amortization" in out:
-            out["EBIT"] = out["EBITDA"] - out["Depreciation & Amortization"]
-
-        if "NPBT" in agg:
-            out["NPBT"] = agg["NPBT"]
-        if "NPAT" in agg:
-            out["NPAT"] = agg["NPAT"]
-
+        # Ensure column order matches the IFRS presentation request.
+        out = out[ordered]
         return out
 
     def statement_of_cash_flow(
