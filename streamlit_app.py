@@ -228,7 +228,7 @@ def main() -> None:
     include_valuation = False
     run_clicked = False
 
-    tabs = st.tabs(["Input Schedule", "Assumptions", "Supplementary Tables"])
+    tabs = st.tabs(["Input Schedule", "Assumptions"])
 
     with tabs[0]:
         st.subheader("Input Schedule")
@@ -239,6 +239,21 @@ def main() -> None:
             key="income_schedule",
         )
         st.session_state.schedule = schedule_editor
+
+        st.markdown("### Supplementary Tables")
+        supplementary_tables: Dict[str, pd.DataFrame] = {}
+        for name, default_table in st.session_state.supplementary.items():
+            with st.expander(name, expanded=False):
+                table = st.data_editor(
+                    default_table,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"supp_{name}",
+                )
+            cleaned = _clean_editor_table(table)
+            if cleaned is not None:
+                supplementary_tables[name] = cleaned
+            st.session_state.supplementary[name] = table
 
     assumption_tables: Dict[str, pd.DataFrame] = {}
 
@@ -322,21 +337,8 @@ def main() -> None:
                     "Terminal Value": terminal_value,
                 }
 
-    supplementary_tables: Dict[str, pd.DataFrame] = {}
-    with tabs[2]:
-        st.subheader("Supplementary Tables")
-        for name, default_table in st.session_state.supplementary.items():
-            with st.expander(name, expanded=False):
-                table = st.data_editor(
-                    default_table,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key=f"supp_{name}",
-                )
-            cleaned = _clean_editor_table(table)
-            if cleaned is not None:
-                supplementary_tables[name] = cleaned
-            st.session_state.supplementary[name] = table
+    # ensure supplementary_tables defined even if tabs[0] not executed (Streamlit rerun)
+    supplementary_tables = locals().get("supplementary_tables", {})
 
     if run_clicked:
         try:
