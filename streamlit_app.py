@@ -73,6 +73,150 @@ ADMIN_WAGE_DEFAULT_ITEMS = [
 ]
 
 
+PRICING_DEFAULT_ROWS = [
+    (2024, "Milk", "Litre", 1.85, 3.0),
+    (2025, "Cheese", "Kg", 12.50, 2.5),
+]
+
+
+def _default_pricing_table() -> pd.DataFrame:
+    if not PRICING_DEFAULT_ROWS:
+        return pd.DataFrame(
+            {
+                "Year": [pd.Timestamp.today().year],
+                "Product": ["Product"],
+                "Unit": ["Unit"],
+                "Base Price": [np.nan],
+                "Price Growth %": [np.nan],
+            }
+        )
+
+    return pd.DataFrame(
+        {
+            "Year": [row[0] for row in PRICING_DEFAULT_ROWS],
+            "Product": [row[1] for row in PRICING_DEFAULT_ROWS],
+            "Unit": [row[2] for row in PRICING_DEFAULT_ROWS],
+            "Base Price": [row[3] for row in PRICING_DEFAULT_ROWS],
+            "Price Growth %": [row[4] for row in PRICING_DEFAULT_ROWS],
+        }
+    )
+
+
+def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        return _default_pricing_table()
+
+    work = table.copy()
+
+    if "Year" not in work.columns:
+        work["Year"] = np.nan
+
+    work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+    work["Product"] = work.get("Product", "").astype(str).str.strip()
+    work.loc[work["Product"] == "", "Product"] = "Product"
+    work["Unit"] = work.get("Unit", "").astype(str).str.strip()
+    work.loc[work["Unit"] == "", "Unit"] = "Unit"
+    work["Base Price"] = pd.to_numeric(work.get("Base Price"), errors="coerce")
+    work["Price Growth %"] = pd.to_numeric(
+        work.get("Price Growth %"), errors="coerce"
+    )
+
+    work = work.dropna(how="all")
+    if work.empty:
+        return _default_pricing_table()
+
+    required_cols = [
+        "Year",
+        "Product",
+        "Unit",
+        "Base Price",
+        "Price Growth %",
+    ]
+    for col in required_cols:
+        if col not in work.columns:
+            work[col] = np.nan
+
+    ordered = work[required_cols + [c for c in work.columns if c not in required_cols]]
+    return ordered.reset_index(drop=True)
+
+
+def _add_pricing_row(table: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_pricing_table(table)
+
+    years = pd.to_numeric(work.get("Year"), errors="coerce")
+    if years.notna().any():
+        default_year = int(years.dropna().max())
+        default_year += 1
+    else:
+        default_year = pd.Timestamp.today().year
+
+    new_row = {
+        "Year": default_year,
+        "Product": f"Product {len(work) + 1}",
+        "Unit": "Unit",
+        "Base Price": np.nan,
+        "Price Growth %": np.nan,
+    }
+
+    return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+
+
+def _remove_pricing_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
+    if table is None or table.empty:
+        return table
+
+    work = table.copy()
+    if 0 <= index < len(work):
+        work = work.drop(index=index).reset_index(drop=True)
+    return work
+
+
+def _apply_pricing_yearly_increment(
+    table: pd.DataFrame,
+    column: str,
+    increment_pct: float,
+    target_product: Optional[str] = None,
+) -> pd.DataFrame:
+    if table is None or table.empty or increment_pct == 0:
+        return table
+
+    work = _ensure_pricing_table(table)
+    if column not in work.columns:
+        return work
+
+    work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+    work["Product"] = work.get("Product", "").astype(str).str.strip()
+
+    increment_factor = 1 + (increment_pct / 100.0)
+    is_percent_column = column.endswith("%")
+
+    for product, group in work.groupby("Product", dropna=False):
+        product_key = product if isinstance(product, str) else ""
+        if target_product and target_product != "All products" and product_key != target_product:
+            continue
+
+        group_sorted = group.sort_values("Year", kind="stable")
+        last_value = None
+        for idx, row in group_sorted.iterrows():
+            current_value = pd.to_numeric(row.get(column), errors="coerce")
+            if last_value is None:
+                if not np.isnan(current_value):
+                    last_value = current_value
+                continue
+
+            if np.isnan(last_value):
+                continue
+
+            if is_percent_column:
+                last_value = last_value + increment_pct
+            else:
+                last_value = last_value * increment_factor
+
+            work.at[idx, column] = last_value
+
+    return work
+
+
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
     if "Period" not in core.columns or "Revenue" not in core.columns:
         return {}
@@ -1268,14 +1412,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
                 "End Year": [2030],
             }
         ),
-        "Pricing": pd.DataFrame(
-            {
-                "Product": ["Milk", "Cheese"],
-                "Unit": ["Litre", "Kg"],
-                "Base Price": [1.85, 12.50],
-                "Price Growth %": [3.0, 2.5],
-            }
-        ),
+        "Pricing": _default_pricing_table(),
         "Operating Costs": pd.DataFrame(
             {
                 "Category": ["Feed", "Healthcare", "Utilities"],
@@ -2356,14 +2493,110 @@ def main() -> None:
 
         with assumption_tabs[2]:
             st.markdown("#### Pricing Assumptions")
+            pricing_table = _ensure_pricing_table(
+                st.session_state.assumptions.get("Pricing", pd.DataFrame())
+            )
+            st.session_state.assumptions["Pricing"] = pricing_table
+
+            st.session_state.setdefault("pricing_remove_choice", "-- Select Row --")
+            st.session_state.setdefault("pricing_increment_target", "All products")
+            st.session_state.setdefault("pricing_increment_column", "Base Price")
+            st.session_state.setdefault("pricing_increment_pct", 0.0)
+
+            add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+            if add_col.button("Add Product", key="pricing_add_row"):
+                pricing_table = _add_pricing_row(pricing_table)
+                st.session_state.assumptions["Pricing"] = pricing_table
+
+            option_labels: list[str] = []
+            option_index: Dict[str, int] = {}
+            for idx_row, row in pricing_table.iterrows():
+                label_year = row.get("Year")
+                label_product = row.get("Product") or "Product"
+                if pd.notna(label_year):
+                    label = f"{int(label_year)} – {label_product}"
+                else:
+                    label = str(label_product)
+                option_labels.append(label)
+                option_index[label] = idx_row
+
+            remove_select_col.selectbox(
+                "Select row",
+                options=["-- Select Row --"] + option_labels,
+                key="pricing_remove_choice",
+            )
+
+            if remove_btn_col.button("Remove Row", key="pricing_remove_row"):
+                choice = st.session_state.get("pricing_remove_choice")
+                if choice in option_index:
+                    pricing_table = _remove_pricing_row(
+                        pricing_table, option_index[choice]
+                    )
+                    st.session_state.assumptions["Pricing"] = pricing_table
+                    st.session_state.pricing_remove_choice = "-- Select Row --"
+
+            inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
+                [2, 1.5, 1, 1]
+            )
+
+            target_options = ["All products"] + sorted(
+                {
+                    str(product)
+                    for product in pricing_table.get("Product", pd.Series(dtype=str))
+                    .dropna()
+                    .tolist()
+                    if str(product).strip()
+                }
+            )
+            inc_target_col.selectbox(
+                "Apply increment to",
+                options=target_options,
+                key="pricing_increment_target",
+            )
+
+            inc_column_col.selectbox(
+                "Column",
+                options=["Base Price", "Price Growth %"],
+                key="pricing_increment_column",
+            )
+
+            inc_pct_col.number_input(
+                "Yearly increment (%)",
+                min_value=-100.0,
+                max_value=100.0,
+                step=0.1,
+                key="pricing_increment_pct",
+            )
+
+            if inc_btn_col.button("Apply increment", key="pricing_apply_increment"):
+                pricing_table = _apply_pricing_yearly_increment(
+                    pricing_table,
+                    st.session_state.get("pricing_increment_column", "Base Price"),
+                    st.session_state.get("pricing_increment_pct", 0.0),
+                    st.session_state.get("pricing_increment_target"),
+                )
+                st.session_state.assumptions["Pricing"] = pricing_table
+
             pricing_editor = st.data_editor(
-                st.session_state.assumptions["Pricing"],
+                pricing_table,
                 num_rows="dynamic",
                 use_container_width=True,
                 key="assump_pricing",
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Base Price": st.column_config.NumberColumn(
+                        "Base Price", format="%.2f"
+                    ),
+                    "Price Growth %": st.column_config.NumberColumn(
+                        "Price Growth (%)", format="%.2f"
+                    ),
+                },
             )
-            st.session_state.assumptions["Pricing"] = pricing_editor
-            assumption_tables["Pricing"] = pricing_editor
+
+            pricing_table = _ensure_pricing_table(pricing_editor)
+            st.session_state.assumptions["Pricing"] = pricing_table
+            assumption_tables["Pricing"] = pricing_table
 
         with assumption_tabs[3]:
             st.markdown("#### Operating Cost Assumptions")
