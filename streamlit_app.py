@@ -219,6 +219,8 @@ def main() -> None:
         st.session_state.supplementary = _default_supplementary_tables()
     if "assumptions" not in st.session_state:
         st.session_state.assumptions = _default_assumption_tables()
+    if "results" not in st.session_state:
+        st.session_state.results = None
 
     milk_price = 0
     feed_cost = 0
@@ -395,6 +397,29 @@ def main() -> None:
 
         st.success("Scenario complete")
 
+        st.session_state.results = {
+            "model": model,
+            "base": base,
+            "scenario": scenario,
+            "kpis": kpis,
+            "break_even": break_even,
+            "supplementary": combined_supplementary,
+        }
+
+    results = st.session_state.results
+
+    if results is None:
+        st.info(
+            "Update the input schedule, adjust the sliders, and press *Run Scenario* "
+            "to evaluate alternative assumptions."
+        )
+    else:
+        model = results["model"]
+        base = results["base"]
+        scenario = results["scenario"]
+        kpis = results["kpis"]
+        break_even = results["break_even"]
+
         valuation_metrics = {
             "WACC": model.wacc(),
             "NPV": model.npv(),
@@ -416,113 +441,122 @@ def main() -> None:
         st.subheader("KPIs (Annual)")
         st.dataframe(kpis.mul(100).round(2))
 
-        display_tabs = st.tabs(
-            [
-                "Dashboard",
-                "Financial Statements",
-                "Advanced Analytics",
-                "Supplementary Schedules",
-            ]
-        )
+    display_tabs = st.tabs(
+        [
+            "Dashboard",
+            "Statement of Financial Performance",
+            "Statement of Financial Position",
+            "Statement of Cash Flow",
+            "Advanced Analytics",
+            "Supplementary Schedules",
+        ]
+    )
 
+    if results is None:
         with display_tabs[0]:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### Revenue vs NPAT")
-                st.line_chart(scenario[["Revenue_adj", "NPAT_adj"]])
-                st.markdown("#### Expense Breakdown")
-                expense_cols = [
-                    col
-                    for col in [
-                        "COGS_adj",
-                        "Variable Expenses",
-                        "Fixed Expenses",
-                        "Direct Wages",
-                        "Admin Wages",
-                    ]
-                    if col in scenario
-                ]
-                if expense_cols:
-                    st.area_chart(scenario[expense_cols])
-                else:
-                    st.info("Add expense series to the schedule to view this chart.")
-
-            with col2:
-                st.markdown("#### Gross Margin vs EBITDA")
-                st.line_chart(scenario[["Gross Margin_adj", "EBITDA_adj"]])
-                st.markdown("#### Break-even Revenue")
-                st.bar_chart(break_even["Break-even Revenue"])
-
+            st.info("Run the scenario to populate the dashboard charts.")
         with display_tabs[1]:
-            statement_tabs = st.tabs(
-                [
-                    "Statement of Financial Performance",
-                    "Statement of Financial Position",
-                    "Statement of Cash Flow",
-                ]
-            )
-
-            with statement_tabs[0]:
-                try:
-                    sop_base = model.statement_of_financial_performance(base, annual=True)
-                    sop_scenario = model.statement_of_financial_performance(
-                        scenario, annual=True
-                    )
-                    st.dataframe(
-                        pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
-                        .swaplevel(axis=1)
-                        .sort_index(axis=1, level=0)
-                    )
-                except ValueError as exc:
-                    st.info(str(exc))
-
-            with statement_tabs[1]:
-                try:
-                    sofp = model.statement_of_financial_position(base, annual=True)
-                    st.dataframe(sofp)
-                except ValueError as exc:
-                    st.info(str(exc))
-
-            with statement_tabs[2]:
-                try:
-                    socf = model.statement_of_cash_flow(base, annual=True)
-                    st.dataframe(socf)
-                except ValueError as exc:
-                    st.info(str(exc))
-
+            st.info("Run the scenario to generate the Statement of Financial Performance.")
         with display_tabs[2]:
-            try:
-                adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
-                adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
-                st.markdown("#### Monthly Advanced Analytics")
-                st.dataframe(adv_monthly)
-                st.markdown("#### Annual Advanced Analytics")
-                st.dataframe(adv_annual)
-            except ValueError as exc:
-                st.info(str(exc))
-
+            st.info("Run the scenario to generate the Statement of Financial Position.")
         with display_tabs[3]:
-            for name in [
-                "Capitalisation Table",
-                "Capex Schedule",
-                "Asset Schedules",
-                "Outputs",
-                "Benchmark KPIs",
-            ]:
-                _render_table(name, supplementary_tables.get(name))
+            st.info("Run the scenario to generate the Statement of Cash Flow.")
+        with display_tabs[4]:
+            st.info("Run the scenario to view advanced analytics.")
+        with display_tabs[5]:
+            st.info("Supplementary schedules will appear once a scenario has been run.")
+        return
 
-        st.download_button(
-            "Download Scenario CSV",
-            scenario.to_csv().encode("utf-8"),
-            file_name="scenario_timeseries.csv",
-            mime="text/csv",
-        )
+    # Results available for rendering
+    scenario = results["scenario"]
+    break_even = results["break_even"]
+    model = results["model"]
+    base = results["base"]
 
-    else:
-        st.info(
-            "Update the input schedule, adjust the sliders, and press *Run Scenario* "
-            "to evaluate alternative assumptions."
-        )
+    with display_tabs[0]:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### Revenue vs NPAT")
+            st.line_chart(scenario[["Revenue_adj", "NPAT_adj"]])
+            st.markdown("#### Expense Breakdown")
+            expense_cols = [
+                col
+                for col in [
+                    "COGS_adj",
+                    "Variable Expenses",
+                    "Fixed Expenses",
+                    "Direct Wages",
+                    "Admin Wages",
+                ]
+                if col in scenario
+            ]
+            if expense_cols:
+                st.area_chart(scenario[expense_cols])
+            else:
+                st.info("Add expense series to the schedule to view this chart.")
+
+        with col2:
+            st.markdown("#### Gross Margin vs EBITDA")
+            st.line_chart(scenario[["Gross Margin_adj", "EBITDA_adj"]])
+            st.markdown("#### Break-even Revenue")
+            st.bar_chart(break_even["Break-even Revenue"])
+
+    with display_tabs[1]:
+        try:
+            sop_base = model.statement_of_financial_performance(base, annual=True)
+            sop_scenario = model.statement_of_financial_performance(
+                scenario, annual=True
+            )
+            st.dataframe(
+                pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
+                .swaplevel(axis=1)
+                .sort_index(axis=1, level=0)
+            )
+        except ValueError as exc:
+            st.info(str(exc))
+
+    with display_tabs[2]:
+        try:
+            sofp = model.statement_of_financial_position(base, annual=True)
+            st.dataframe(sofp)
+        except ValueError as exc:
+            st.info(str(exc))
+
+    with display_tabs[3]:
+        try:
+            socf = model.statement_of_cash_flow(base, annual=True)
+            st.dataframe(socf)
+        except ValueError as exc:
+            st.info(str(exc))
+
+    with display_tabs[4]:
+        try:
+            adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
+            adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
+            st.markdown("#### Monthly Advanced Analytics")
+            st.dataframe(adv_monthly)
+            st.markdown("#### Annual Advanced Analytics")
+            st.dataframe(adv_annual)
+        except ValueError as exc:
+            st.info(str(exc))
+
+    with display_tabs[5]:
+        supplementary_render = results.get("supplementary", {})
+        for name in [
+            "Capitalisation Table",
+            "Capex Schedule",
+            "Asset Schedules",
+            "Outputs",
+            "Benchmark KPIs",
+        ]:
+            _render_table(name, supplementary_render.get(name))
+
+    st.download_button(
+        "Download Scenario CSV",
+        scenario.to_csv().encode("utf-8"),
+        file_name="scenario_timeseries.csv",
+        mime="text/csv",
+    )
 
 
 if __name__ == "__main__":
