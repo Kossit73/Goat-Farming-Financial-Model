@@ -14,6 +14,15 @@ from goat_financial_model import GoatModel, InputSchedule
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 
 
+DETAIL_SCHEDULE_COLUMNS = {
+    "COGS Schedule": ["COGS"],
+    "Variable Expenses Schedule": ["Variable Expenses"],
+    "Direct Wages Schedule": ["Direct Wages"],
+    "Admin Wages Schedule": ["Admin Wages"],
+    "Capex Schedule": ["Capex"],
+}
+
+
 def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
     dates = pd.date_range(start, periods=periods, freq="M")
     revenue = np.linspace(45000, 70000, periods)
@@ -67,6 +76,40 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
         }
     )
     return df
+
+
+def _default_schedule_components(
+    periods: int = 12, start: str = "2024-01-31"
+) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    base = _default_income_schedule(periods=periods, start=start)
+
+    core_columns = [
+        "Period",
+        "Revenue",
+        "Fixed Expenses",
+        "Depreciation & Amortization",
+        "EBIT",
+        "NPBT",
+        "NPAT",
+        "CFO",
+        "CFI",
+        "CFF",
+        "Net Cash Flow",
+        "Current Assets",
+        "Non-current Assets",
+        "Current Liabilities",
+        "Non-current Liabilities",
+        "Equity",
+    ]
+    core_columns = [col for col in core_columns if col in base.columns]
+    core = base[core_columns].copy()
+
+    detail_tables: Dict[str, pd.DataFrame] = {}
+    for name, cols in DETAIL_SCHEDULE_COLUMNS.items():
+        detail_cols = ["Period"] + [col for col in cols if col in base.columns]
+        detail_tables[name] = base[detail_cols].copy()
+
+    return core, detail_tables
 
 
 def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
@@ -142,7 +185,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
     }
 
 
-def _prepare_schedule(df: pd.DataFrame) -> pd.DataFrame:
+def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
     if "Period" not in df.columns:
         raise ValueError("The schedule must include a 'Period' column with dates.")
 
@@ -163,6 +206,100 @@ def _prepare_schedule(df: pd.DataFrame) -> pd.DataFrame:
     if values.index.has_duplicates:
         raise ValueError("Each period in the schedule must be unique.")
     return values.sort_index()
+
+
+def _assemble_schedule(
+    core: pd.DataFrame, detail_tables: Dict[str, pd.DataFrame]
+) -> pd.DataFrame:
+    combined = core.copy()
+    for table in detail_tables.values():
+        combined = combined.join(table, how="outer")
+
+    required_columns = [
+        "Revenue",
+        "COGS",
+        "Gross Margin",
+        "Variable Expenses",
+        "Fixed Expenses",
+        "Direct Wages",
+        "Admin Wages",
+        "EBITDA",
+        "Depreciation & Amortization",
+        "EBIT",
+        "NPBT",
+        "NPAT",
+        "CFO",
+        "CFI",
+        "CFF",
+        "Capex",
+        "Net Cash Flow",
+        "Current Assets",
+        "Non-current Assets",
+        "Current Liabilities",
+        "Non-current Liabilities",
+        "Equity",
+    ]
+
+    for col in required_columns:
+        if col not in combined.columns:
+            combined[col] = np.nan
+
+    if {"Revenue", "COGS"}.issubset(combined.columns):
+        combined["Gross Margin"] = combined["Revenue"] - combined["COGS"]
+
+    if {
+        "Gross Margin",
+        "Variable Expenses",
+        "Fixed Expenses",
+        "Direct Wages",
+        "Admin Wages",
+    }.issubset(combined.columns):
+        combined["EBITDA"] = (
+            combined["Gross Margin"]
+            - combined["Variable Expenses"].fillna(0)
+            - combined["Fixed Expenses"].fillna(0)
+            - combined["Direct Wages"].fillna(0)
+            - combined["Admin Wages"].fillna(0)
+        )
+
+    if {"EBITDA", "Depreciation & Amortization"}.issubset(combined.columns):
+        combined["EBIT"] = combined["EBITDA"] - combined["Depreciation & Amortization"].fillna(0)
+
+    if {"CFO", "CFI", "CFF"}.issubset(combined.columns):
+        combined["Net Cash Flow"] = combined[["CFO", "CFI", "CFF"]].sum(
+            axis=1, min_count=1
+        )
+
+    ordered_columns = [
+        "Revenue",
+        "COGS",
+        "Gross Margin",
+        "Variable Expenses",
+        "Fixed Expenses",
+        "Direct Wages",
+        "Admin Wages",
+        "EBITDA",
+        "Depreciation & Amortization",
+        "EBIT",
+        "NPBT",
+        "NPAT",
+        "CFO",
+        "CFI",
+        "CFF",
+        "Capex",
+        "Net Cash Flow",
+        "Current Assets",
+        "Non-current Assets",
+        "Current Liabilities",
+        "Non-current Liabilities",
+        "Equity",
+    ]
+
+    ordered = [col for col in ordered_columns if col in combined.columns]
+    remaining = [col for col in combined.columns if col not in ordered]
+
+    combined = combined[ordered + remaining]
+    return combined.sort_index()
 
 
 def _clean_editor_table(df: pd.DataFrame) -> Optional[pd.DataFrame]:
@@ -213,8 +350,15 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
 def main() -> None:
     st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
 
-    if "schedule" not in st.session_state:
-        st.session_state.schedule = _default_income_schedule()
+    if "schedule" in st.session_state:
+        st.session_state.pop("schedule")
+
+    if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
+        core_default, detail_defaults = _default_schedule_components()
+        if "core_schedule" not in st.session_state:
+            st.session_state.core_schedule = core_default
+        if "detail_schedules" not in st.session_state:
+            st.session_state.detail_schedules = detail_defaults
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
     if "assumptions" not in st.session_state:
@@ -229,6 +373,8 @@ def main() -> None:
     run_clicked = False
 
     supplementary_tables: Dict[str, pd.DataFrame] = {}
+    detail_tables_for_run: Dict[str, pd.DataFrame] = {}
+    core_editor: Optional[pd.DataFrame] = None
 
     tabs = st.tabs(
         [
@@ -243,13 +389,35 @@ def main() -> None:
 
     with tabs[0]:
         st.subheader("Input Schedule")
-        schedule_editor = st.data_editor(
-            st.session_state.schedule,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="income_schedule",
-        )
-        st.session_state.schedule = schedule_editor
+        schedule_tab_names = [
+            "Core Schedule",
+            "COGS Schedule",
+            "Variable Expenses Schedule",
+            "Direct Wages Schedule",
+            "Admin Wages Schedule",
+            "Capex Schedule",
+        ]
+        schedule_tabs = st.tabs(schedule_tab_names)
+
+        with schedule_tabs[0]:
+            core_editor = st.data_editor(
+                st.session_state.core_schedule,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="schedule_core",
+            )
+            st.session_state.core_schedule = core_editor
+
+        for idx, name in enumerate(schedule_tab_names[1:], start=1):
+            with schedule_tabs[idx]:
+                table = st.data_editor(
+                    st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"schedule_{name.lower().replace(' ', '_')}",
+                )
+                st.session_state.detail_schedules[name] = table
+                detail_tables_for_run[name] = table
 
         st.markdown("### Supplementary Tables")
         for name, default_table in st.session_state.supplementary.items():
@@ -264,6 +432,12 @@ def main() -> None:
             if cleaned is not None:
                 supplementary_tables[name] = cleaned
             st.session_state.supplementary[name] = table
+
+    if core_editor is None:
+        core_editor = st.session_state.core_schedule
+
+    for name, table in st.session_state.detail_schedules.items():
+        detail_tables_for_run.setdefault(name, table)
 
     assumption_tables: Dict[str, pd.DataFrame] = {}
 
@@ -396,10 +570,46 @@ def main() -> None:
                     st.info(str(exc))
 
     if run_clicked:
+        core_clean = _clean_editor_table(core_editor)
+        if core_clean is None:
+            st.error("Provide at least one period in the core schedule before running the scenario.")
+            return
+
         try:
-            schedule_df = _prepare_schedule(schedule_editor)
+            core_prepared = _prepare_timeline_table(core_clean)
         except ValueError as exc:
-            st.error(str(exc))
+            st.error(f"Core Schedule: {exc}")
+            return
+
+        prepared_details: Dict[str, pd.DataFrame] = {}
+        for name, table in detail_tables_for_run.items():
+            cleaned = _clean_editor_table(table)
+            if cleaned is None:
+                continue
+            try:
+                prepared = _prepare_timeline_table(cleaned)
+            except ValueError as exc:
+                st.error(f"{name}: {exc}")
+                return
+
+            expected_cols = DETAIL_SCHEDULE_COLUMNS.get(name)
+            if expected_cols:
+                missing = [col for col in expected_cols if col not in prepared.columns]
+                if missing:
+                    st.error(
+                        f"{name} is missing required column(s): {', '.join(missing)}"
+                    )
+                    return
+                prepared = prepared[expected_cols]
+            prepared_details[name] = prepared
+
+        schedule_df = _assemble_schedule(core_prepared, prepared_details)
+
+        if schedule_df["Revenue"].isna().all():
+            st.error("Core Schedule must include revenue values.")
+            return
+        if schedule_df["COGS"].isna().all():
+            st.error("COGS Schedule must include at least one value.")
             return
 
         production_horizon = assumption_tables.get("Production Horizon")
