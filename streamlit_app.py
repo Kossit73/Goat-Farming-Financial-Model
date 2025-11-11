@@ -108,6 +108,40 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
     }
 
 
+def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
+    return {
+        "Production Horizon": pd.DataFrame(
+            {
+                "Start Year": [2024],
+                "End Year": [2030],
+            }
+        ),
+        "Pricing": pd.DataFrame(
+            {
+                "Product": ["Milk", "Cheese"],
+                "Unit": ["Litre", "Kg"],
+                "Base Price": [1.85, 12.50],
+                "Price Growth %": [3.0, 2.5],
+            }
+        ),
+        "Operating Costs": pd.DataFrame(
+            {
+                "Category": ["Feed", "Healthcare", "Utilities"],
+                "Monthly Cost": [8500.0, 1800.0, 1200.0],
+                "Inflation %": [4.0, 3.5, 2.0],
+            }
+        ),
+        "Capital & Financing": pd.DataFrame(
+            {
+                "Source": ["Bank Loan", "Equity"],
+                "Amount": [250000.0, 150000.0],
+                "Interest/Return %": [6.5, 0.0],
+                "Term (years)": [7, None],
+            }
+        ),
+    }
+
+
 def _prepare_schedule(df: pd.DataFrame) -> pd.DataFrame:
     if "Period" not in df.columns:
         raise ValueError("The schedule must include a 'Period' column with dates.")
@@ -183,6 +217,8 @@ def main() -> None:
         st.session_state.schedule = _default_income_schedule()
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
+    if "assumptions" not in st.session_state:
+        st.session_state.assumptions = _default_assumption_tables()
 
     milk_price = 0
     feed_cost = 0
@@ -202,28 +238,87 @@ def main() -> None:
         )
         st.session_state.schedule = schedule_editor
 
+    assumption_tables: Dict[str, pd.DataFrame] = {}
+
     with tabs[1]:
         st.subheader("Assumptions")
-        milk_price = st.slider(
-            "Milk price change (%)", min_value=-50, max_value=50, value=0, step=1
-        )
-        feed_cost = st.slider(
-            "Feed cost change (%)", min_value=-50, max_value=50, value=0, step=1
+        assumption_tabs = st.tabs(
+            [
+                "Scenario Controls",
+                "Production Horizon",
+                "Pricing",
+                "Operating Costs",
+                "Capital & Financing",
+                "Valuation Inputs",
+            ]
         )
 
-        include_valuation = st.checkbox("Include valuation inputs", value=True)
-        if include_valuation:
-            wacc_pct = st.number_input("WACC (%)", value=12.0, step=0.1)
-            npv_value = st.number_input("NPV", value=750000.0, step=10000.0)
-            terminal_value = st.number_input(
-                "Terminal Value", value=1500000.0, step=10000.0
+        with assumption_tabs[0]:
+            milk_price = st.slider(
+                "Milk price change (%)", min_value=-50, max_value=50, value=0, step=1
             )
-            valuation_inputs = {
-                "WACC": wacc_pct / 100.0,
-                "NPV": npv_value,
-                "Terminal Value": terminal_value,
-            }
-        run_clicked = st.button("Run Scenario", type="primary")
+            feed_cost = st.slider(
+                "Feed cost change (%)", min_value=-50, max_value=50, value=0, step=1
+            )
+            run_clicked = st.button("Run Scenario", type="primary")
+
+        with assumption_tabs[1]:
+            st.markdown("#### Production Time Horizon")
+            production_editor = st.data_editor(
+                st.session_state.assumptions["Production Horizon"],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="assump_production",
+            )
+            st.session_state.assumptions["Production Horizon"] = production_editor
+            assumption_tables["Production Horizon"] = production_editor
+
+        with assumption_tabs[2]:
+            st.markdown("#### Pricing Assumptions")
+            pricing_editor = st.data_editor(
+                st.session_state.assumptions["Pricing"],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="assump_pricing",
+            )
+            st.session_state.assumptions["Pricing"] = pricing_editor
+            assumption_tables["Pricing"] = pricing_editor
+
+        with assumption_tabs[3]:
+            st.markdown("#### Operating Cost Assumptions")
+            op_cost_editor = st.data_editor(
+                st.session_state.assumptions["Operating Costs"],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="assump_operating",
+            )
+            st.session_state.assumptions["Operating Costs"] = op_cost_editor
+            assumption_tables["Operating Costs"] = op_cost_editor
+
+        with assumption_tabs[4]:
+            st.markdown("#### Capital & Financing Assumptions")
+            capital_editor = st.data_editor(
+                st.session_state.assumptions["Capital & Financing"],
+                num_rows="dynamic",
+                use_container_width=True,
+                key="assump_capital",
+            )
+            st.session_state.assumptions["Capital & Financing"] = capital_editor
+            assumption_tables["Capital & Financing"] = capital_editor
+
+        with assumption_tabs[5]:
+            include_valuation = st.checkbox("Include valuation inputs", value=True)
+            if include_valuation:
+                wacc_pct = st.number_input("WACC (%)", value=12.0, step=0.1)
+                npv_value = st.number_input("NPV", value=750000.0, step=10000.0)
+                terminal_value = st.number_input(
+                    "Terminal Value", value=1500000.0, step=10000.0
+                )
+                valuation_inputs = {
+                    "WACC": wacc_pct / 100.0,
+                    "NPV": npv_value,
+                    "Terminal Value": terminal_value,
+                }
 
     supplementary_tables: Dict[str, pd.DataFrame] = {}
     with tabs[2]:
@@ -248,6 +343,38 @@ def main() -> None:
             st.error(str(exc))
             return
 
+        production_horizon = assumption_tables.get("Production Horizon")
+        horizon_filtered = schedule_df
+        if production_horizon is not None and not production_horizon.empty:
+            start_year = pd.to_numeric(
+                production_horizon.get("Start Year"), errors="coerce"
+            ).dropna()
+            end_year = pd.to_numeric(
+                production_horizon.get("End Year"), errors="coerce"
+            ).dropna()
+            if not start_year.empty and not end_year.empty:
+                start = int(start_year.iloc[0])
+                end = int(end_year.iloc[0])
+                if start > end:
+                    st.error("Production start year must be before the end year.")
+                    return
+                mask = (horizon_filtered.index.year >= start) & (
+                    horizon_filtered.index.year <= end
+                )
+                horizon_filtered = horizon_filtered.loc[mask]
+                if horizon_filtered.empty:
+                    st.error(
+                        "No schedule periods fall within the selected production horizon."
+                    )
+                    return
+                schedule_df = horizon_filtered
+
+        combined_supplementary = dict(supplementary_tables)
+        for name, table in assumption_tables.items():
+            cleaned = _clean_editor_table(table)
+            if cleaned is not None:
+                combined_supplementary[f"Assumptions - {name}"] = cleaned
+
         try:
             (
                 model,
@@ -258,7 +385,7 @@ def main() -> None:
             ) = _run_model(
                 schedule_df,
                 valuation_inputs,
-                supplementary_tables,
+                combined_supplementary,
                 milk_price / 100.0,
                 feed_cost / 100.0,
             )
