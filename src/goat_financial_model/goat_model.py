@@ -1,10 +1,4 @@
-"""Tools for extracting a financial model from an Excel workbook.
-
-The :class:`GoatModel` reads the expected workbook structure from the three
-sheets ``IS`` (income statement), ``CF`` (cash flow), and ``Valuation`` to
-provide easy to consume pandas ``Series`` objects and a tidy combined frame for
-analytics.
-"""
+"""Utilities for reading and manipulating the goat farming financial model."""
 
 from __future__ import annotations
 
@@ -17,17 +11,6 @@ import pandas as pd
 
 @dataclass
 class GoatModel:
-    """Helper around the Excel-based goat farming model.
-
-    Parameters
-    ----------
-    excel_path:
-        Path to the workbook that contains the three sheets.
-    ref_sheet:
-        Sheet to use as the reference for inferring the timeline.  Defaults to
-        ``"IS"`` because that is the income statement sheet in the template.
-    """
-
     excel_path: str
     ref_sheet: str = "IS"
     _df_is: Optional[pd.DataFrame] = None
@@ -35,9 +18,8 @@ class GoatModel:
     _df_val: Optional[pd.DataFrame] = None
     _dates: Optional[pd.DatetimeIndex] = None
 
+    # ---------- Internal loading & helpers ----------
     def _load(self) -> None:
-        """Lazily load the workbook sheets only when they are required."""
-
         if self._df_is is None:
             self._df_is = pd.read_excel(self.excel_path, sheet_name="IS", header=None)
         if self._df_cf is None:
@@ -47,18 +29,16 @@ class GoatModel:
 
     @property
     def dates(self) -> pd.DatetimeIndex:
-        """Monthly period end dates inferred from the reference sheet."""
-
+        """Monthly period end dates inferred from the reference sheet's header (row 6, columns 8+)."""
         self._load()
         if self._dates is None:
-            hdr_row = 6  # "Month" row with period end
+            hdr_row = 6
             date_cells = pd.to_datetime(self._df_is.iloc[hdr_row, 8:], errors="coerce").dropna()
             self._dates = pd.DatetimeIndex(date_cells.values)
         return self._dates
 
     def _extract_series(self, df: pd.DataFrame, label: str) -> Optional[pd.Series]:
-        """Return a numeric series for the first row that matches ``label``."""
-
+        """Return numeric series across timeline columns by matching a row containing `label`."""
         idxs = df.index[(df == label).any(axis=1)].tolist()
         if not idxs:
             idxs = [
@@ -66,7 +46,7 @@ class GoatModel:
                 for i in range(len(df))
                 if any(
                     str(x).strip().lower().startswith(label.lower())
-                    for x in df.iloc[i, :5].tolist()
+                    for x in df.iloc[i, :6].tolist()
                 )
             ]
         if not idxs:
@@ -76,7 +56,7 @@ class GoatModel:
         values = pd.to_numeric(row.iloc[8 : 8 + n_dates], errors="coerce")
         return pd.Series(values.values, index=self.dates, name=label)
 
-    # Income Statement series
+    # ---------- Base series ----------
     def revenue(self) -> Optional[pd.Series]:
         self._load()
         return self._extract_series(self._df_is, "Revenue")
@@ -112,24 +92,17 @@ class GoatModel:
         self._load()
         return self._extract_series(self._df_is, "Net Profit After Tax")
 
-    # Cash Flow categories
     def cfo(self) -> Optional[pd.Series]:
         self._load()
-        return self._extract_series(
-            self._df_cf, "Net Cash Flow from Operating Activities"
-        )
+        return self._extract_series(self._df_cf, "Net Cash Flow from Operating Activities")
 
     def cfi(self) -> Optional[pd.Series]:
         self._load()
-        return self._extract_series(
-            self._df_cf, "Net Cash Flow from Investing Activities"
-        )
+        return self._extract_series(self._df_cf, "Net Cash Flow from Investing Activities")
 
     def cff(self) -> Optional[pd.Series]:
         self._load()
-        return self._extract_series(
-            self._df_cf, "Net Cash Flow from Financing Activities"
-        )
+        return self._extract_series(self._df_cf, "Net Cash Flow from Financing Activities")
 
     def net_cash_flow(self) -> Optional[pd.Series]:
         cfo = self.cfo()
@@ -138,20 +111,16 @@ class GoatModel:
         parts = [s for s in (cfo, cfi, cff) if s is not None]
         if not parts:
             return None
-        return (
-            pd.concat(parts, axis=1)
-            .sum(axis=1, min_count=1)
-            .rename("Net Cash Flow")
-        )
+        return pd.concat(parts, axis=1).sum(axis=1, min_count=1).rename("Net Cash Flow")
 
-    # Valuation metrics
+    # ---------- Valuation ----------
     def wacc(self) -> Optional[float]:
         self._load()
         row_idx = None
         for i in range(len(self._df_val)):
             if any(
                 isinstance(v, str) and "weighted avg cost of capital" in v.lower()
-                for v in self._df_val.iloc[i, :5].tolist()
+                for v in self._df_val.iloc[i, :6].tolist()
             ):
                 row_idx = i
                 break
@@ -162,46 +131,145 @@ class GoatModel:
 
     def ufcf(self) -> Optional[pd.Series]:
         self._load()
-        idxs = self._df_val.index[
-            (self._df_val == "Unlevered Free Cash Flow").any(axis=1)
-        ].tolist()
+        idxs = self._df_val.index[(self._df_val == "Unlevered Free Cash Flow").any(axis=1)].tolist()
         if not idxs:
             return None
         row = self._df_val.loc[idxs[0]]
         values = pd.to_numeric(row, errors="coerce").dropna()
-        if values.empty:
-            return None
         years = sorted(set(pd.DatetimeIndex(self.dates).year))
         n = min(len(years), len(values))
+        if n == 0:
+            return None
         return pd.Series(
             values.iloc[:n].values,
             index=pd.to_datetime([f"{y}-12-31" for y in years[:n]]),
             name="Unlevered Free Cash Flow",
         )
 
-    def terminal_value(self) -> Optional[float]:
-        self._load()
-        idxs = self._df_val.index[(self._df_val == "Terminal Value").any(axis=1)].tolist()
-        if not idxs:
-            return None
-        row = self._df_val.loc[idxs[0]]
-        nums = pd.to_numeric(row, errors="coerce").dropna()
-        return float(nums.iloc[-1]) if len(nums) else None
-
     def npv(self) -> Optional[float]:
         self._load()
-        idxs = self._df_val.index[
-            (self._df_val == "NPV based on year 5").any(axis=1)
-        ].tolist()
+        idxs = self._df_val.index[(self._df_val == "NPV based on year 5").any(axis=1)].tolist()
         if not idxs:
             return None
         row = self._df_val.loc[idxs[0]]
         nums = pd.to_numeric(row, errors="coerce").dropna()
         return float(nums.iloc[-1]) if len(nums) else None
 
-    def to_tidy(self) -> pd.DataFrame:
-        """Return a tidy dataframe with the key extracted series stacked."""
+    # ---------- Scenario toggles ----------
+    def scenario(self, milk_price_pct: float = 0.0, feed_cost_pct: float = 0.0) -> pd.DataFrame:
+        """Apply shocks to milk price (+/-) and feed cost (+/-), recompute IS metrics."""
+        rev = self.revenue()
+        cogs = self.cogs()
+        gm = self.gross_margin()
+        ebitda = self.ebitda()
+        dep = self.depreciation()
+        ebit = self.ebit()
+        npbt = self.npbt()
+        npat = self.npat()
 
+        series_map: Dict[str, Optional[pd.Series]] = {
+            "Revenue": rev,
+            "COGS": cogs,
+            "Gross Margin": gm,
+            "EBITDA": ebitda,
+            "Depreciation & Amortization": dep,
+            "EBIT": ebit,
+            "NPBT": npbt,
+            "NPAT": npat,
+        }
+        valid_series = {k: v for k, v in series_map.items() if v is not None}
+        if not valid_series:
+            raise ValueError("Scenario analysis requires base income statement series.")
+
+        base = pd.concat(valid_series, axis=1)
+
+        if "Revenue" not in base or "COGS" not in base:
+            raise ValueError("Scenario analysis requires both Revenue and COGS series.")
+
+        base["Revenue_adj"] = base["Revenue"] * (1 + milk_price_pct)
+        base["COGS_adj"] = base["COGS"] * (1 + feed_cost_pct)
+        base["Gross Margin_adj"] = base["Revenue_adj"] - base["COGS_adj"]
+
+        if "Gross Margin" in base:
+            opex_ex_da = base["Gross Margin"] - base.get("EBITDA", 0)
+        else:
+            opex_ex_da = base["Revenue"] - base["COGS"] - base.get("EBITDA", 0)
+
+        base["EBITDA_adj"] = base["Gross Margin_adj"] - opex_ex_da
+        base["EBIT_adj"] = base["EBITDA_adj"] - base.get("Depreciation & Amortization", 0)
+
+        if npbt is not None and npat is not None and npbt.notna().any() and npat.notna().any():
+            idx = npbt.notna() & npat.notna()
+            eff_tax = 1 - (npat[idx] / npbt[idx]).median()
+            eff_tax = float(np.clip(eff_tax, 0.0, 0.5))
+        else:
+            eff_tax = 0.28
+        base["NPAT_adj"] = base["EBIT_adj"] * (1 - eff_tax)
+        return base
+
+    # ---------- KPIs ----------
+    def kpis(self, df: Optional[pd.DataFrame] = None, annual: bool = True) -> pd.DataFrame:
+        """Compute Gross Margin %, EBITDA Margin %, Net Margin %, YoY growth."""
+        if df is None:
+            df = self.to_tidy()
+
+        rev_col = "Revenue_adj" if "Revenue_adj" in df else "Revenue"
+        gm_col = "Gross Margin_adj" if "Gross Margin_adj" in df else "Gross Margin"
+        ebitda_col = "EBITDA_adj" if "EBITDA_adj" in df else "EBITDA"
+        npat_col = "NPAT_adj" if "NPAT_adj" in df else "NPAT"
+        cogs_col = "COGS_adj" if "COGS_adj" in df else "COGS"
+
+        work = df[[rev_col, gm_col, ebitda_col, npat_col, cogs_col]].rename(
+            columns={
+                rev_col: "Revenue",
+                gm_col: "Gross Margin",
+                ebitda_col: "EBITDA",
+                npat_col: "NPAT",
+                cogs_col: "COGS",
+            }
+        )
+
+        if annual:
+            grp = work.groupby(work.index.year).sum(min_count=1)
+        else:
+            grp = work.copy()
+
+        out = pd.DataFrame(index=grp.index)
+        out["Gross Margin %"] = grp["Gross Margin"] / grp["Revenue"]
+        out["EBITDA Margin %"] = grp["EBITDA"] / grp["Revenue"]
+        out["Net Margin %"] = grp["NPAT"] / grp["Revenue"]
+        out["COGS % of Revenue"] = grp["COGS"] / grp["Revenue"]
+        out["Revenue YoY %"] = grp["Revenue"].pct_change()
+        return out
+
+    # ---------- Break-even ----------
+    def break_even(self, df: Optional[pd.DataFrame] = None, annual: bool = True) -> pd.DataFrame:
+        """Compute break-even revenue per period."""
+        if df is None:
+            df = self.to_tidy()
+
+        rev = df["Revenue_adj"] if "Revenue_adj" in df else df["Revenue"]
+        gm = df["Gross Margin_adj"] if "Gross Margin_adj" in df else df["Gross Margin"]
+        ebitda = df["EBITDA_adj"] if "EBITDA_adj" in df else df["EBITDA"]
+
+        cm_ratio = gm / rev
+        fixed_costs = gm - ebitda
+
+        if annual:
+            idx = rev.index.year
+            cm_ratio = (gm.groupby(idx).sum(min_count=1) / rev.groupby(idx).sum(min_count=1))
+            fixed_costs = fixed_costs.groupby(idx).sum(min_count=1)
+
+        be_rev = fixed_costs / cm_ratio
+        return pd.DataFrame(
+            {
+                "Contribution Margin %": cm_ratio,
+                "Fixed Costs (approx)": fixed_costs,
+                "Break-even Revenue": be_rev,
+            }
+        )
+
+    def to_tidy(self) -> pd.DataFrame:
         series: Dict[str, Optional[pd.Series]] = {
             "Revenue": self.revenue(),
             "COGS": self.cogs(),
@@ -216,144 +284,7 @@ class GoatModel:
             "CFF": self.cff(),
             "Net Cash Flow": self.net_cash_flow(),
         }
-
-        valid = {key: value for key, value in series.items() if value is not None}
+        valid = {k: v for k, v in series.items() if v is not None}
         if not valid:
             raise ValueError("No financial series could be extracted from the workbook.")
-
         return pd.concat(valid, axis=1)
-
-    # ------------------------------------------------------------------
-    # Scenario and KPI helpers used by the Streamlit dashboard
-    # ------------------------------------------------------------------
-    def scenario(
-        self,
-        milk_price_pct: float = 0.0,
-        feed_cost_pct: float = 0.0,
-        base: Optional[pd.DataFrame] = None,
-    ) -> pd.DataFrame:
-        """Apply simple revenue and feed cost shocks to the model.
-
-        Parameters
-        ----------
-        milk_price_pct:
-            Percentage change applied to revenue.  ``0.05`` corresponds to a
-            +5% increase, ``-0.1`` to a -10% decrease.
-        feed_cost_pct:
-            Percentage change applied to COGS which acts as a proxy for feed
-            costs in the simplified model.
-        base:
-            Optional tidy dataframe to start from.  When omitted the workbook is
-            loaded through :meth:`to_tidy`.
-
-        Returns
-        -------
-        pandas.DataFrame
-            Copy of the tidy dataframe including ``*_adj`` columns with the
-            adjusted values.
-        """
-
-        df = self.to_tidy() if base is None else base.copy()
-
-        required_cols = {"Revenue", "COGS"}
-        missing = required_cols - set(df.columns)
-        if missing:
-            raise ValueError(
-                "Scenario analysis requires the following columns: "
-                + ", ".join(sorted(missing))
-            )
-
-        # Base gross margin is either supplied by the sheet or recomputed.
-        if "Gross Margin" in df:
-            gross_base = df["Gross Margin"].copy()
-        else:
-            gross_base = df["Revenue"] - df["COGS"]
-
-        df["Revenue_adj"] = df["Revenue"] * (1.0 + float(milk_price_pct))
-        df["COGS_adj"] = df["COGS"] * (1.0 + float(feed_cost_pct))
-
-        df["Gross Margin_adj"] = df["Revenue_adj"] - df["COGS_adj"]
-        delta_gross = (df["Gross Margin_adj"] - gross_base).fillna(0.0)
-
-        for col in ["EBITDA", "EBIT", "NPBT", "NPAT"]:
-            if col in df:
-                df[f"{col}_adj"] = df[col] + delta_gross
-
-        return df
-
-    def _maybe_annualise(self, df: pd.DataFrame, annual: bool) -> pd.DataFrame:
-        if not annual:
-            return df
-        if not isinstance(df.index, pd.DatetimeIndex):
-            raise TypeError("Annual aggregation requires a DatetimeIndex.")
-        aggregated = df.resample("A").sum(numeric_only=True)
-        # Label with the period end for clearer display.
-        aggregated.index = aggregated.index.to_period("A").to_timestamp("A")
-        return aggregated
-
-    def kpis(self, df: pd.DataFrame, annual: bool = False) -> pd.DataFrame:
-        """Compute headline KPIs for the supplied (scenario) dataframe."""
-
-        data = self._maybe_annualise(df, annual)
-
-        required_cols = {"Revenue_adj", "COGS_adj", "Gross Margin_adj"}
-        missing = required_cols - set(data.columns)
-        if missing:
-            raise ValueError(
-                "KPI calculation requires scenario adjusted columns: "
-                + ", ".join(sorted(missing))
-            )
-
-        revenue = data["Revenue_adj"]
-        gross_margin = data["Gross Margin_adj"]
-
-        kpis = pd.DataFrame(index=data.index)
-        kpis["Revenue YoY"] = revenue.pct_change()
-        kpis["Gross Margin"] = (gross_margin / revenue).replace([np.inf, -np.inf], np.nan)
-
-        if "EBITDA_adj" in data:
-            kpis["EBITDA Margin"] = (
-                data["EBITDA_adj"] / revenue
-            ).replace([np.inf, -np.inf], np.nan)
-        if "NPAT_adj" in data:
-            kpis["NPAT Margin"] = (
-                data["NPAT_adj"] / revenue
-            ).replace([np.inf, -np.inf], np.nan)
-        if "CFO" in data:
-            kpis["CFO Conversion"] = (
-                data["CFO"] / revenue
-            ).replace([np.inf, -np.inf], np.nan)
-
-        return kpis
-
-    def break_even(self, df: pd.DataFrame, annual: bool = False) -> pd.DataFrame:
-        """Estimate break-even revenue based on contribution margin analysis."""
-
-        data = self._maybe_annualise(df, annual)
-
-        required_cols = {"Revenue_adj", "COGS_adj", "Gross Margin_adj"}
-        missing = required_cols - set(data.columns)
-        if missing:
-            raise ValueError(
-                "Break-even analysis requires scenario adjusted columns: "
-                + ", ".join(sorted(missing))
-            )
-
-        revenue = data["Revenue_adj"]
-        contribution = data["Gross Margin_adj"]
-        contribution_ratio = (contribution / revenue).replace([np.inf, -np.inf], np.nan)
-
-        if "EBITDA_adj" not in data:
-            raise ValueError("Break-even analysis requires EBITDA_adj to approximate fixed costs.")
-
-        operating_costs = contribution - data["EBITDA_adj"]
-        breakeven_revenue = operating_costs / contribution_ratio
-        breakeven_revenue = breakeven_revenue.mask(contribution_ratio <= 0)
-
-        result = pd.DataFrame(index=data.index)
-        result["Contribution Margin"] = contribution_ratio
-        result["Operating Costs (approx)"] = operating_costs
-        result["Break-even Revenue"] = breakeven_revenue
-        result["Margin of Safety"] = revenue - breakeven_revenue
-
-        return result
