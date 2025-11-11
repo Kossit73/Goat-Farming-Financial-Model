@@ -26,3 +26,17 @@ python -m goat_financial_model.cli path/to/model.xlsx --output tidy.csv
 
 You can also use the :class:`goat_financial_model.GoatModel` directly in Python
 for custom analysis.
+
+## Interactive dashboard
+
+Install the optional dependencies and launch the Streamlit dashboard to explore
+scenarios interactively:
+
+```bash
+pip install -e .[app]
+streamlit run streamlit_app.py
+```
+
+The dashboard lets you flex the milk price and feed cost assumptions, monitor
+how the adjusted scenario impacts profitability, and export the resulting time
+series for further analysis.

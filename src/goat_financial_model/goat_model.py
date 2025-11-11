@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 
 
@@ -221,3 +222,138 @@ class GoatModel:
             raise ValueError("No financial series could be extracted from the workbook.")
 
         return pd.concat(valid, axis=1)
+
+    # ------------------------------------------------------------------
+    # Scenario and KPI helpers used by the Streamlit dashboard
+    # ------------------------------------------------------------------
+    def scenario(
+        self,
+        milk_price_pct: float = 0.0,
+        feed_cost_pct: float = 0.0,
+        base: Optional[pd.DataFrame] = None,
+    ) -> pd.DataFrame:
+        """Apply simple revenue and feed cost shocks to the model.
+
+        Parameters
+        ----------
+        milk_price_pct:
+            Percentage change applied to revenue.  ``0.05`` corresponds to a
+            +5% increase, ``-0.1`` to a -10% decrease.
+        feed_cost_pct:
+            Percentage change applied to COGS which acts as a proxy for feed
+            costs in the simplified model.
+        base:
+            Optional tidy dataframe to start from.  When omitted the workbook is
+            loaded through :meth:`to_tidy`.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Copy of the tidy dataframe including ``*_adj`` columns with the
+            adjusted values.
+        """
+
+        df = self.to_tidy() if base is None else base.copy()
+
+        required_cols = {"Revenue", "COGS"}
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise ValueError(
+                "Scenario analysis requires the following columns: "
+                + ", ".join(sorted(missing))
+            )
+
+        # Base gross margin is either supplied by the sheet or recomputed.
+        if "Gross Margin" in df:
+            gross_base = df["Gross Margin"].copy()
+        else:
+            gross_base = df["Revenue"] - df["COGS"]
+
+        df["Revenue_adj"] = df["Revenue"] * (1.0 + float(milk_price_pct))
+        df["COGS_adj"] = df["COGS"] * (1.0 + float(feed_cost_pct))
+
+        df["Gross Margin_adj"] = df["Revenue_adj"] - df["COGS_adj"]
+        delta_gross = (df["Gross Margin_adj"] - gross_base).fillna(0.0)
+
+        for col in ["EBITDA", "EBIT", "NPBT", "NPAT"]:
+            if col in df:
+                df[f"{col}_adj"] = df[col] + delta_gross
+
+        return df
+
+    def _maybe_annualise(self, df: pd.DataFrame, annual: bool) -> pd.DataFrame:
+        if not annual:
+            return df
+        if not isinstance(df.index, pd.DatetimeIndex):
+            raise TypeError("Annual aggregation requires a DatetimeIndex.")
+        aggregated = df.resample("A").sum(numeric_only=True)
+        # Label with the period end for clearer display.
+        aggregated.index = aggregated.index.to_period("A").to_timestamp("A")
+        return aggregated
+
+    def kpis(self, df: pd.DataFrame, annual: bool = False) -> pd.DataFrame:
+        """Compute headline KPIs for the supplied (scenario) dataframe."""
+
+        data = self._maybe_annualise(df, annual)
+
+        required_cols = {"Revenue_adj", "COGS_adj", "Gross Margin_adj"}
+        missing = required_cols - set(data.columns)
+        if missing:
+            raise ValueError(
+                "KPI calculation requires scenario adjusted columns: "
+                + ", ".join(sorted(missing))
+            )
+
+        revenue = data["Revenue_adj"]
+        gross_margin = data["Gross Margin_adj"]
+
+        kpis = pd.DataFrame(index=data.index)
+        kpis["Revenue YoY"] = revenue.pct_change()
+        kpis["Gross Margin"] = (gross_margin / revenue).replace([np.inf, -np.inf], np.nan)
+
+        if "EBITDA_adj" in data:
+            kpis["EBITDA Margin"] = (
+                data["EBITDA_adj"] / revenue
+            ).replace([np.inf, -np.inf], np.nan)
+        if "NPAT_adj" in data:
+            kpis["NPAT Margin"] = (
+                data["NPAT_adj"] / revenue
+            ).replace([np.inf, -np.inf], np.nan)
+        if "CFO" in data:
+            kpis["CFO Conversion"] = (
+                data["CFO"] / revenue
+            ).replace([np.inf, -np.inf], np.nan)
+
+        return kpis
+
+    def break_even(self, df: pd.DataFrame, annual: bool = False) -> pd.DataFrame:
+        """Estimate break-even revenue based on contribution margin analysis."""
+
+        data = self._maybe_annualise(df, annual)
+
+        required_cols = {"Revenue_adj", "COGS_adj", "Gross Margin_adj"}
+        missing = required_cols - set(data.columns)
+        if missing:
+            raise ValueError(
+                "Break-even analysis requires scenario adjusted columns: "
+                + ", ".join(sorted(missing))
+            )
+
+        revenue = data["Revenue_adj"]
+        contribution = data["Gross Margin_adj"]
+        contribution_ratio = (contribution / revenue).replace([np.inf, -np.inf], np.nan)
+
+        if "EBITDA_adj" not in data:
+            raise ValueError("Break-even analysis requires EBITDA_adj to approximate fixed costs.")
+
+        operating_costs = contribution - data["EBITDA_adj"]
+        breakeven_revenue = operating_costs / contribution_ratio
+        breakeven_revenue = breakeven_revenue.mask(contribution_ratio <= 0)
+
+        result = pd.DataFrame(index=data.index)
+        result["Contribution Margin"] = contribution_ratio
+        result["Operating Costs (approx)"] = operating_costs
+        result["Break-even Revenue"] = breakeven_revenue
+        result["Margin of Safety"] = revenue - breakeven_revenue
+
+        return result
