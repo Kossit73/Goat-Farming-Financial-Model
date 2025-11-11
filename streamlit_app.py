@@ -24,6 +24,9 @@ DETAIL_SCHEDULE_COLUMNS = {
 }
 
 
+CAP_TABLE_COLUMNS = ["Year", "Shareholder", "Ownership %", "Investment"]
+
+
 def _normalize_period(series: pd.Series) -> pd.Series:
     periods = pd.to_datetime(series, errors="coerce")
     formatted = periods.dt.strftime("%Y-%m-%d")
@@ -183,6 +186,111 @@ def _remove_cogs_row(table: pd.DataFrame, period: str) -> pd.DataFrame:
         return table
     mask = table["Period"].astype(str) != str(period)
     return table.loc[mask].reset_index(drop=True)
+
+
+def _ensure_capitalisation_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        return pd.DataFrame({col: [] for col in CAP_TABLE_COLUMNS})
+
+    work = table.copy()
+    for column in CAP_TABLE_COLUMNS:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    work["Year"] = pd.to_numeric(work["Year"], errors="coerce").astype("Int64")
+    shareholders = work.get("Shareholder")
+    if shareholders is None:
+        shareholders = pd.Series(["" for _ in range(len(work))])
+    else:
+        shareholders = shareholders.astype("string")
+    work["Shareholder"] = shareholders.fillna("").replace({pd.NA: "", "<NA>": "", "nan": ""})
+    work["Ownership %"] = pd.to_numeric(work["Ownership %"], errors="coerce")
+    work["Investment"] = pd.to_numeric(work["Investment"], errors="coerce")
+
+    ordered = CAP_TABLE_COLUMNS + [col for col in work.columns if col not in CAP_TABLE_COLUMNS]
+    return work[ordered].reset_index(drop=True)
+
+
+def _add_capitalisation_row(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    work = _ensure_capitalisation_table(table)
+
+    years = pd.to_numeric(work.get("Year"), errors="coerce")
+    if years.notna().any():
+        next_year = int(years.max()) + 1
+    else:
+        next_year = pd.Timestamp.today().year
+
+    new_row = {
+        "Year": next_year,
+        "Shareholder": "New Investor",
+        "Ownership %": np.nan,
+        "Investment": np.nan,
+    }
+
+    combined = pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+    return _ensure_capitalisation_table(combined)
+
+
+def _remove_capitalisation_row(table: Optional[pd.DataFrame], index: int) -> pd.DataFrame:
+    work = _ensure_capitalisation_table(table)
+    if work.empty or index not in work.index:
+        return work
+    reduced = work.drop(index=index)
+    return _ensure_capitalisation_table(reduced)
+
+
+def _apply_capitalisation_increment(
+    table: Optional[pd.DataFrame], column: str, increment_pct: float
+) -> pd.DataFrame:
+    if column not in {"Ownership %", "Investment"}:
+        return _ensure_capitalisation_table(table)
+
+    work = _ensure_capitalisation_table(table)
+    if work.empty or increment_pct == 0:
+        return work
+
+    temp = work.copy()
+    temp["__year"] = pd.to_numeric(temp["Year"], errors="coerce")
+    temp = temp.sort_values(["Shareholder", "__year"], kind="stable")
+
+    increment_factor = 1 + (increment_pct / 100.0)
+
+    last_values: Dict[str, tuple[Optional[float], Optional[float]]] = {}
+    for idx, row in temp.iterrows():
+        shareholder = row["Shareholder"] or "Unnamed"
+        year = row["__year"]
+        if pd.isna(year):
+            continue
+
+        previous_value, previous_year = last_values.get(shareholder, (None, None))
+        current_value = row[column]
+
+        if previous_year is None or pd.isna(previous_year):
+            if pd.notna(current_value):
+                last_values[shareholder] = (float(current_value), float(year))
+            else:
+                last_values[shareholder] = (None, float(year))
+            continue
+
+        years_elapsed = int(float(year) - previous_year)
+        if years_elapsed <= 0:
+            if pd.notna(current_value):
+                last_values[shareholder] = (float(current_value), float(year))
+            continue
+
+        base_value = previous_value
+        if base_value is None:
+            if pd.isna(current_value):
+                continue
+            base_value = float(current_value)
+
+        new_value = float(base_value) * (increment_factor ** years_elapsed)
+        temp.at[idx, column] = new_value
+        last_values[shareholder] = (new_value, float(year))
+
+    temp = temp.drop(columns="__year")
+    work.loc[temp.index, column] = temp[column]
+    return _ensure_capitalisation_table(work)
 
 
 def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
@@ -725,10 +833,99 @@ def main() -> None:
                     detail_tables_for_run[name] = table
 
         st.markdown("### Supplementary Tables")
-        for name, default_table in st.session_state.supplementary.items():
+        for name in list(st.session_state.supplementary.keys()):
+            if name == "Capitalisation Table":
+                st.markdown("#### Capitalisation Table Schedule")
+                cap_table = _ensure_capitalisation_table(
+                    st.session_state.supplementary.get(name)
+                )
+
+                add_col, remove_select_col, remove_btn_col, inc_col_col, inc_pct_col = st.columns(
+                    [1, 2, 1, 2, 2]
+                )
+
+                with add_col:
+                    if st.button("Add Row", key="cap_table_add_row"):
+                        cap_table = _add_capitalisation_row(cap_table)
+
+                option_labels = []
+                option_map: Dict[str, int] = {}
+                for idx, row in cap_table.iterrows():
+                    year = row.get("Year")
+                    shareholder = row.get("Shareholder") or "Unnamed"
+                    if pd.isna(year):
+                        label = f"{shareholder}"
+                    else:
+                        label = f"{int(year)} – {shareholder}"
+                    option_labels.append(label)
+                    option_map[label] = idx
+
+                remove_choice = None
+                with remove_select_col:
+                    if option_labels:
+                        remove_choice = st.selectbox(
+                            "Select row",
+                            options=["-- Select Row --"] + option_labels,
+                            key="cap_table_remove_choice",
+                        )
+                    else:
+                        st.write("No rows available to remove.")
+
+                with remove_btn_col:
+                    if (
+                        st.button("Remove Row", key="cap_table_remove_button")
+                        and remove_choice
+                        and remove_choice in option_map
+                    ):
+                        cap_table = _remove_capitalisation_row(
+                            cap_table, option_map[remove_choice]
+                        )
+
+                with inc_col_col:
+                    increment_column = st.selectbox(
+                        "Increment column",
+                        options=["Ownership %", "Investment"],
+                        key="cap_table_increment_column",
+                    )
+
+                with inc_pct_col:
+                    increment_pct = st.number_input(
+                        "Yearly increment (%)",
+                        value=0.0,
+                        step=0.5,
+                        key="cap_table_increment_pct",
+                    )
+                    if st.button("Apply", key="cap_table_increment_button"):
+                        cap_table = _apply_capitalisation_increment(
+                            cap_table, increment_column, increment_pct
+                        )
+
+                cap_editor = st.data_editor(
+                    cap_table,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="supp_capitalisation_table",
+                    column_config={
+                        "Ownership %": st.column_config.NumberColumn(
+                            "Ownership %", format="%.2f", step=0.1
+                        ),
+                        "Investment": st.column_config.NumberColumn(
+                            "Investment", format="%.2f"
+                        ),
+                    },
+                )
+
+                cap_table = _ensure_capitalisation_table(cap_editor)
+                st.session_state.supplementary[name] = cap_table
+
+                cleaned_cap = _clean_editor_table(cap_table)
+                if cleaned_cap is not None:
+                    supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
+                continue
+
             with st.expander(name, expanded=False):
                 table = st.data_editor(
-                    default_table,
+                    st.session_state.supplementary.get(name, pd.DataFrame()),
                     num_rows="dynamic",
                     use_container_width=True,
                     key=f"supp_{name}",
