@@ -53,6 +53,13 @@ def _normalize_period(series: pd.Series) -> pd.Series:
     return formatted.where(~periods.isna(), series.astype(str))
 
 
+VARIABLE_DEFAULT_ITEMS = [
+    ("Feed & Supplements", 0.05),
+    ("Veterinary & Healthcare", 0.04),
+    ("Distribution & Logistics", 0.03),
+]
+
+
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
     if "Period" not in core.columns or "Revenue" not in core.columns:
         return {}
@@ -121,6 +128,155 @@ def _ensure_cogs_schedule(
         table = pd.DataFrame({"Period": base_periods, "COGS": np.nan})
 
     return _sync_cogs_table(table, core, default_pct=default_pct)
+
+
+# ---------- Variable expenses helpers ----------
+
+
+def _default_variable_expense_table(core: pd.DataFrame) -> pd.DataFrame:
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
+    revenue = pd.to_numeric(core.get("Revenue"), errors="coerce")
+    revenue_values = revenue.tolist() if revenue is not None else []
+
+    rows: list[dict[str, object]] = []
+    if periods:
+        for idx, period in enumerate(periods):
+            rev = revenue_values[idx] if idx < len(revenue_values) else np.nan
+            for item, pct in VARIABLE_DEFAULT_ITEMS:
+                amount = rev * pct if rev is not None and not np.isnan(rev) else np.nan
+                rows.append({
+                    "Period": period,
+                    "Item": item,
+                    "Amount": amount,
+                })
+
+    if not rows:
+        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        rows.append({"Period": today, "Item": "Variable Expense", "Amount": np.nan})
+
+    return pd.DataFrame(rows)
+
+
+def _ensure_variable_expense_table(
+    table: Optional[pd.DataFrame], core: pd.DataFrame
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        return _default_variable_expense_table(core)
+
+    work = table.copy()
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    work["Item"] = work.get("Item", "").astype(str).str.strip()
+    work.loc[work["Item"] == "", "Item"] = "Variable Expense"
+    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+
+    work = work.dropna(how="all")
+    work = work[(work["Item"].notna()) | (work["Amount"].notna())]
+    work = work.dropna(subset=["Period"], how="all")
+
+    if work.empty:
+        return _default_variable_expense_table(core)
+
+    return work.reset_index(drop=True)
+
+
+def _add_variable_expense_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_variable_expense_table(table, core)
+    periods = work.get("Period", pd.Series(dtype=str))
+    default_period = None
+    if not periods.empty:
+        default_period = periods.iloc[-1]
+    else:
+        core_periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+        if not core_periods.empty:
+            default_period = core_periods.iloc[-1]
+    if default_period is None or pd.isna(default_period):
+        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+
+    new_row = {
+        "Period": default_period,
+        "Item": f"Variable Item {len(work) + 1}",
+        "Amount": np.nan,
+    }
+    return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+
+
+def _remove_variable_expense_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
+    if table is None or table.empty:
+        return table
+    work = table.copy()
+    if 0 <= index < len(work):
+        work = work.drop(index=index).reset_index(drop=True)
+    return work
+
+
+def _apply_variable_expense_increment(
+    table: pd.DataFrame, increment_pct: float, target_item: Optional[str] = None
+) -> pd.DataFrame:
+    if table is None or table.empty or increment_pct == 0:
+        return table
+
+    work = table.copy()
+    work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
+    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+    work["Item"] = work.get("Item", "").astype(str).str.strip()
+
+    increment_factor = 1 + (increment_pct / 100.0)
+
+    def _should_update(item: str) -> bool:
+        if not target_item or target_item == "All items":
+            return True
+        return item == target_item
+
+    for item, group in work.groupby("Item", dropna=False):
+        if not _should_update(item if isinstance(item, str) else ""):
+            continue
+        group = group.sort_values("Period_dt", kind="stable")
+        prev_amount = None
+        prev_year = None
+        for idx, row in group.iterrows():
+            period_dt = row["Period_dt"]
+            amount = row["Amount"]
+            if pd.isna(period_dt):
+                continue
+            year = int(period_dt.year)
+            if prev_amount is None and not pd.isna(amount):
+                prev_amount = amount
+                prev_year = year
+                continue
+            if prev_amount is None or prev_year is None:
+                continue
+            year_gap = year - prev_year
+            if year_gap <= 0:
+                if not pd.isna(amount):
+                    prev_amount = amount
+                    prev_year = year
+                continue
+            new_amount = prev_amount * (increment_factor ** year_gap)
+            work.at[idx, "Amount"] = new_amount
+            prev_amount = new_amount
+            prev_year = year
+
+    return work.drop(columns="Period_dt")
+
+
+def _aggregate_variable_expenses(
+    table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    work = _ensure_variable_expense_table(table, core)
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+    summary = (
+        work.groupby("Period", as_index=False)["Amount"].sum(min_count=1)
+        if not work.empty
+        else pd.DataFrame(columns=["Period", "Amount"])
+    )
+    result = pd.DataFrame({"Period": periods})
+    summary_map = dict(zip(summary.get("Period", []), summary.get("Amount", [])))
+    result["Variable Expenses"] = result["Period"].map(summary_map)
+    if result["Variable Expenses"].notna().any():
+        result["Variable Expenses"] = result["Variable Expenses"].astype(float)
+    else:
+        result["Variable Expenses"] = 0.0
+    return result
 
 
 def _apply_cogs_percentage(
@@ -703,6 +859,9 @@ def _default_schedule_components(
 
     detail_tables: Dict[str, pd.DataFrame] = {}
     for name, cols in DETAIL_SCHEDULE_COLUMNS.items():
+        if name == "Variable Expenses Schedule":
+            detail_tables[name] = _default_variable_expense_table(base)
+            continue
         detail_cols = ["Period"] + [col for col in cols if col in base.columns]
         detail_tables[name] = base[detail_cols].copy()
 
@@ -1137,6 +1296,98 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = synced_editor
                     detail_tables_for_run[name] = synced_editor
+                elif name == "Variable Expenses Schedule":
+                    st.markdown("#### Variable Expenses Schedule")
+                    st.caption(
+                        "Manage individual variable cost items, add or remove rows, and apply yearly increments "
+                        "to quickly escalate recurring expenses. Amounts roll up into the income statement automatically."
+                    )
+
+                    variable_table = _ensure_variable_expense_table(
+                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        st.session_state.core_schedule,
+                    )
+
+                    st.session_state.setdefault("var_exp_remove_choice", "-- Select Row --")
+                    st.session_state.setdefault("var_exp_increment_target", "All items")
+                    st.session_state.setdefault("var_exp_increment_pct", 0.0)
+
+                    add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+                    if add_col.button("Add Row", key="var_exp_add_row"):
+                        variable_table = _add_variable_expense_row(
+                            variable_table, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = variable_table
+
+                    option_labels: list[str] = []
+                    option_index: Dict[str, int] = {}
+                    for idx_row, row in variable_table.iterrows():
+                        label_period = row.get("Period") or "Unknown Period"
+                        label_item = row.get("Item") or "Item"
+                        label = f"{label_period} – {label_item}"
+                        option_labels.append(label)
+                        option_index[label] = idx_row
+
+                    remove_select_col.selectbox(
+                        "Select row", options=["-- Select Row --"] + option_labels, key="var_exp_remove_choice"
+                    )
+                    if remove_btn_col.button("Remove Row", key="var_exp_remove_row"):
+                        choice = st.session_state.get("var_exp_remove_choice")
+                        if choice in option_index:
+                            variable_table = _remove_variable_expense_row(
+                                variable_table, option_index[choice]
+                            )
+                            st.session_state.detail_schedules[name] = variable_table
+                            st.session_state.var_exp_remove_choice = "-- Select Row --"
+
+                    inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
+                    target_options = ["All items"] + sorted(
+                        {
+                            str(item)
+                            for item in variable_table.get("Item", pd.Series(dtype=str)).dropna().unique().tolist()
+                            if str(item).strip()
+                        }
+                    )
+                    inc_target_col.selectbox(
+                        "Apply increment to", options=target_options, key="var_exp_increment_target"
+                    )
+                    inc_pct_col.number_input(
+                        "Yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="var_exp_increment_pct",
+                    )
+                    if inc_btn_col.button("Apply increment", key="var_exp_apply_increment"):
+                        variable_table = _apply_variable_expense_increment(
+                            variable_table,
+                            st.session_state.get("var_exp_increment_pct", 0.0),
+                            st.session_state.get("var_exp_increment_target"),
+                        )
+                        st.session_state.detail_schedules[name] = variable_table
+
+                    editor = st.data_editor(
+                        variable_table,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key="schedule_variable_expenses_schedule",
+                        column_config={
+                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
+                        },
+                    )
+                    variable_table = _ensure_variable_expense_table(
+                        editor, st.session_state.core_schedule
+                    )
+                    st.session_state.detail_schedules[name] = variable_table
+
+                    aggregated_variable = _aggregate_variable_expenses(
+                        variable_table, st.session_state.core_schedule
+                    )
+                    detail_tables_for_run[name] = aggregated_variable
+
+                    st.markdown("##### Variable Expenses Summary")
+                    st.dataframe(aggregated_variable)
                 else:
                     table = st.data_editor(
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
