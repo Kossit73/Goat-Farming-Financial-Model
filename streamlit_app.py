@@ -174,53 +174,62 @@ def main() -> None:
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
 
-    st.sidebar.header("Assumptions")
-    milk_price = st.sidebar.slider(
-        "Milk price change (%)", min_value=-50, max_value=50, value=0, step=1
-    )
-    feed_cost = st.sidebar.slider(
-        "Feed cost change (%)", min_value=-50, max_value=50, value=0, step=1
-    )
-
-    include_valuation = st.sidebar.checkbox("Include valuation inputs", value=True)
+    milk_price = 0
+    feed_cost = 0
     valuation_inputs: Dict[str, float] = {}
-    if include_valuation:
-        wacc_pct = st.sidebar.number_input("WACC (%)", value=12.0, step=0.1)
-        npv_value = st.sidebar.number_input("NPV", value=750000.0, step=10000.0)
-        terminal_value = st.sidebar.number_input(
-            "Terminal Value", value=1500000.0, step=10000.0
+    include_valuation = False
+    run_clicked = False
+
+    tabs = st.tabs(["Input Schedule", "Assumptions", "Supplementary Tables"])
+
+    with tabs[0]:
+        st.subheader("Input Schedule")
+        schedule_editor = st.data_editor(
+            st.session_state.schedule,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="income_schedule",
         )
-        valuation_inputs = {
-            "WACC": wacc_pct / 100.0,
-            "NPV": npv_value,
-            "Terminal Value": terminal_value,
-        }
+        st.session_state.schedule = schedule_editor
 
-    st.subheader("Input Schedule")
-    schedule_editor = st.data_editor(
-        st.session_state.schedule,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="income_schedule",
-    )
-    st.session_state.schedule = schedule_editor
+    with tabs[1]:
+        st.subheader("Assumptions")
+        milk_price = st.slider(
+            "Milk price change (%)", min_value=-50, max_value=50, value=0, step=1
+        )
+        feed_cost = st.slider(
+            "Feed cost change (%)", min_value=-50, max_value=50, value=0, step=1
+        )
 
-    st.subheader("Supplementary Tables")
-    supplementary_tables: Dict[str, pd.DataFrame] = {}
-    for name, default_table in st.session_state.supplementary.items():
-        with st.expander(name, expanded=False):
-            table = st.data_editor(
-                default_table,
-                num_rows="dynamic",
-                use_container_width=True,
-                key=f"supp_{name}",
+        include_valuation = st.checkbox("Include valuation inputs", value=True)
+        if include_valuation:
+            wacc_pct = st.number_input("WACC (%)", value=12.0, step=0.1)
+            npv_value = st.number_input("NPV", value=750000.0, step=10000.0)
+            terminal_value = st.number_input(
+                "Terminal Value", value=1500000.0, step=10000.0
             )
-        cleaned = _clean_editor_table(table)
-        if cleaned is not None:
-            supplementary_tables[name] = cleaned
-        st.session_state.supplementary[name] = table
+            valuation_inputs = {
+                "WACC": wacc_pct / 100.0,
+                "NPV": npv_value,
+                "Terminal Value": terminal_value,
+            }
+        run_clicked = st.button("Run Scenario", type="primary")
 
-    run_clicked = st.sidebar.button("Run Scenario", type="primary")
+    supplementary_tables: Dict[str, pd.DataFrame] = {}
+    with tabs[2]:
+        st.subheader("Supplementary Tables")
+        for name, default_table in st.session_state.supplementary.items():
+            with st.expander(name, expanded=False):
+                table = st.data_editor(
+                    default_table,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"supp_{name}",
+                )
+            cleaned = _clean_editor_table(table)
+            if cleaned is not None:
+                supplementary_tables[name] = cleaned
+            st.session_state.supplementary[name] = table
 
     if run_clicked:
         try:
