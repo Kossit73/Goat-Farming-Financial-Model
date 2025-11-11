@@ -27,6 +27,15 @@ DETAIL_SCHEDULE_COLUMNS = {
 CAP_TABLE_COLUMNS = ["Year", "Shareholder", "Ownership %", "Investment"]
 
 
+CAPEX_TABLE_COLUMNS = [
+    "Year",
+    "Category",
+    "Spend",
+    "Depreciation Rate %",
+    "Depreciation",
+]
+
+
 ASSET_SCHEDULE_COLUMNS = [
     "Asset",
     "Year",
@@ -468,6 +477,132 @@ def _apply_capitalisation_increment(
     return _ensure_capitalisation_table(work)
 
 
+def _ensure_capex_schedule(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = pd.DataFrame(columns=CAPEX_TABLE_COLUMNS)
+    else:
+        work = table.copy()
+
+    for column in CAPEX_TABLE_COLUMNS:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    work["Category"] = work["Category"].fillna("").astype(str)
+    work["Year"] = pd.to_numeric(work["Year"], errors="coerce").astype("Int64")
+
+    work["Spend"] = pd.to_numeric(work["Spend"], errors="coerce")
+    rate = pd.to_numeric(work["Depreciation Rate %"], errors="coerce")
+
+    fraction_mask = rate.notna() & (rate.abs() <= 1.0)
+    rate.loc[fraction_mask] = rate.loc[fraction_mask] * 100.0
+
+    work["Depreciation Rate %"] = rate
+    work["Depreciation"] = pd.to_numeric(work["Depreciation"], errors="coerce")
+
+    ordered = [col for col in CAPEX_TABLE_COLUMNS if col in work.columns]
+    remaining = [col for col in work.columns if col not in ordered]
+
+    return _recalculate_capex_schedule(work[ordered + remaining].reset_index(drop=True))
+
+
+def _recalculate_capex_schedule(table: pd.DataFrame) -> pd.DataFrame:
+    if table is None or table.empty:
+        return pd.DataFrame(columns=CAPEX_TABLE_COLUMNS)
+
+    work = table.copy()
+
+    spend = pd.to_numeric(work.get("Spend"), errors="coerce")
+    rate = pd.to_numeric(work.get("Depreciation Rate %"), errors="coerce").fillna(0.0)
+
+    depreciation = spend * (rate / 100.0)
+    override = pd.to_numeric(work.get("Depreciation"), errors="coerce")
+    depreciation = depreciation.where(override.isna(), override)
+
+    work["Spend"] = spend
+    work["Depreciation Rate %"] = rate
+    work["Depreciation"] = depreciation
+
+    return work
+
+
+def _apply_capex_rate(table: Optional[pd.DataFrame], rate: float) -> pd.DataFrame:
+    work = _ensure_capex_schedule(table)
+    if work.empty:
+        return work
+    work["Depreciation Rate %"] = rate
+    return _recalculate_capex_schedule(work)
+
+
+def _apply_capex_yearly_increment(
+    table: Optional[pd.DataFrame], column: str, increment_pct: float
+) -> pd.DataFrame:
+    work = _ensure_capex_schedule(table)
+    if work.empty or column not in work.columns or increment_pct == 0:
+        return work
+
+    temp = work.copy()
+    temp["__year"] = pd.to_numeric(temp["Year"], errors="coerce")
+    temp = temp.sort_values(["__year"], kind="stable")
+
+    factor = 1 + (increment_pct / 100.0)
+    base_value = None
+    last_year = None
+
+    for idx, row in temp.iterrows():
+        year = row["__year"]
+        if pd.isna(year):
+            continue
+
+        current_value = pd.to_numeric(row[column], errors="coerce")
+        if base_value is None:
+            base_value = 0.0 if pd.isna(current_value) else float(current_value)
+            last_year = int(year)
+            temp.at[idx, column] = base_value
+            continue
+
+        year_gap = int(year) - int(last_year)
+        if year_gap > 0:
+            base_value = base_value * (factor ** year_gap)
+            last_year = int(year)
+
+        temp.at[idx, column] = base_value
+
+    temp = temp.drop(columns="__year")
+    work.loc[temp.index, column] = temp[column]
+    return _recalculate_capex_schedule(work)
+
+
+def _add_capex_row(
+    table: Optional[pd.DataFrame], default_rate: float = 10.0, default_spend: float = 0.0
+) -> pd.DataFrame:
+    work = _ensure_capex_schedule(table)
+
+    years = pd.to_numeric(work.get("Year"), errors="coerce")
+    if years.notna().any():
+        next_year = int(years.max()) + 1
+    else:
+        next_year = pd.Timestamp.today().year
+
+    new_row = {
+        "Year": next_year,
+        "Category": "New Capex",
+        "Spend": default_spend,
+        "Depreciation Rate %": default_rate,
+        "Depreciation": np.nan,
+    }
+
+    combined = pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+    return _recalculate_capex_schedule(combined)
+
+
+def _remove_capex_row(table: Optional[pd.DataFrame], index: int) -> pd.DataFrame:
+    work = _ensure_capex_schedule(table)
+    if work.empty or index not in work.index:
+        return work
+    reduced = work.drop(index=index).reset_index(drop=True)
+    return _recalculate_capex_schedule(reduced)
+
+
 def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
     dates = pd.date_range(start, periods=periods, freq="M")
     revenue = np.linspace(45000, 70000, periods)
@@ -588,6 +723,8 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
                 "Year": [2024, 2025],
                 "Category": ["Milking Equipment", "Housing Upgrades"],
                 "Spend": [45000.0, 38000.0],
+                "Depreciation Rate %": [8.0, 6.5],
+                "Depreciation": [3600.0, 2470.0],
             }
         ),
         "Asset Schedules": pd.DataFrame(
@@ -1099,6 +1236,125 @@ def main() -> None:
                 cleaned_cap = _clean_editor_table(cap_table)
                 if cleaned_cap is not None:
                     supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
+                continue
+            if name == "Capex Schedule":
+                st.markdown("#### Capex Schedule")
+                capex_table = _ensure_capex_schedule(
+                    st.session_state.supplementary.get(name)
+                )
+
+                rate_series = pd.to_numeric(
+                    capex_table.get("Depreciation Rate %"), errors="coerce"
+                ).dropna()
+                spend_series = pd.to_numeric(
+                    capex_table.get("Spend"), errors="coerce"
+                ).dropna()
+
+                default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 10.0
+                default_spend = float(spend_series.iloc[0]) if not spend_series.empty else 0.0
+
+                st.session_state.setdefault("capex_rate_default", round(default_rate, 2))
+                st.session_state.setdefault("capex_default_spend", default_spend)
+                st.session_state.setdefault("capex_remove_choice", "-- Select Row --")
+                st.session_state.setdefault("capex_increment_column", "Spend")
+                st.session_state.setdefault("capex_increment_pct", 0.0)
+
+                rate_col, rate_btn_col, spend_col = st.columns([1, 1, 1])
+
+                rate_value = rate_col.number_input(
+                    "Default depreciation rate (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.1,
+                    key="capex_rate_default",
+                )
+                if rate_btn_col.button("Apply rate to all", key="capex_apply_rate"):
+                    capex_table = _apply_capex_rate(capex_table, rate_value)
+
+                spend_default = spend_col.number_input(
+                    "Default spend for new row",
+                    min_value=0.0,
+                    step=100.0,
+                    key="capex_default_spend",
+                )
+
+                add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+                if add_col.button("Add Row", key="capex_add_row"):
+                    capex_table = _add_capex_row(
+                        capex_table,
+                        default_rate=rate_value,
+                        default_spend=spend_default,
+                    )
+
+                option_labels: list[str] = []
+                option_map: Dict[str, int] = {}
+                for idx, row in capex_table.iterrows():
+                    label_year = row.get("Year")
+                    label_category = row.get("Category") or "Unnamed"
+                    if pd.notna(label_year):
+                        label = f"{int(label_year)} – {label_category}"
+                    else:
+                        label = str(label_category)
+                    option_labels.append(label)
+                    option_map[label] = idx
+
+                remove_choice = remove_select_col.selectbox(
+                    "Select row",
+                    options=["-- Select Row --"] + option_labels,
+                    key="capex_remove_choice",
+                )
+                if remove_btn_col.button("Remove Row", key="capex_remove_row"):
+                    if remove_choice in option_map:
+                        capex_table = _remove_capex_row(
+                            capex_table, option_map[remove_choice]
+                        )
+                        st.session_state.capex_remove_choice = "-- Select Row --"
+
+                inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
+
+                increment_column = inc_col.selectbox(
+                    "Increment column",
+                    options=["Spend", "Depreciation Rate %"],
+                    key="capex_increment_column",
+                )
+                increment_pct = inc_pct_col.number_input(
+                    "Yearly increment (%)",
+                    min_value=-100.0,
+                    max_value=100.0,
+                    step=0.1,
+                    key="capex_increment_pct",
+                )
+                if inc_btn_col.button("Apply increment", key="capex_apply_increment"):
+                    capex_table = _apply_capex_yearly_increment(
+                        capex_table, increment_column, increment_pct
+                    )
+
+                capex_editor = st.data_editor(
+                    capex_table,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="supp_capex_schedule",
+                    column_config={
+                        "Year": st.column_config.NumberColumn("Year", step=1),
+                        "Depreciation Rate %": st.column_config.NumberColumn(
+                            "Depreciation Rate (%)", format="%.2f", step=0.1
+                        ),
+                        "Spend": st.column_config.NumberColumn(
+                            "Spend", format="%.2f"
+                        ),
+                        "Depreciation": st.column_config.NumberColumn(
+                            "Depreciation", format="%.2f"
+                        ),
+                    },
+                )
+
+                synced_capex = _ensure_capex_schedule(capex_editor)
+                st.session_state.supplementary[name] = synced_capex
+
+                cleaned_capex = _clean_editor_table(synced_capex)
+                if cleaned_capex is not None:
+                    supplementary_tables[name] = _ensure_capex_schedule(cleaned_capex)
                 continue
             if name == "Asset Schedules":
                 st.markdown("#### Asset Schedule")
