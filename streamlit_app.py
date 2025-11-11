@@ -80,9 +80,12 @@ PRICING_DEFAULT_ROWS = [
 
 
 OPERATING_COST_DEFAULT_ROWS = [
-    ("Feed", 8500.0, 4.0),
-    ("Healthcare", 1800.0, 3.5),
-    ("Utilities", 1200.0, 2.0),
+    (2024, "Feed", 8500.0, 4.0),
+    (2025, "Feed", 8840.0, 4.0),
+    (2024, "Healthcare", 1800.0, 3.5),
+    (2025, "Healthcare", 1863.0, 3.5),
+    (2024, "Utilities", 1200.0, 2.0),
+    (2025, "Utilities", 1224.0, 2.0),
 ]
 
 
@@ -228,6 +231,7 @@ def _default_operating_cost_table() -> pd.DataFrame:
     if not OPERATING_COST_DEFAULT_ROWS:
         return pd.DataFrame(
             {
+                "Year": [pd.Timestamp.today().year],
                 "Category": ["Operating Item"],
                 "Monthly Cost": [np.nan],
                 "Inflation %": [np.nan],
@@ -236,9 +240,10 @@ def _default_operating_cost_table() -> pd.DataFrame:
 
     return pd.DataFrame(
         {
-            "Category": [row[0] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Monthly Cost": [row[1] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Inflation %": [row[2] for row in OPERATING_COST_DEFAULT_ROWS],
+            "Year": [row[0] for row in OPERATING_COST_DEFAULT_ROWS],
+            "Category": [row[1] for row in OPERATING_COST_DEFAULT_ROWS],
+            "Monthly Cost": [row[2] for row in OPERATING_COST_DEFAULT_ROWS],
+            "Inflation %": [row[3] for row in OPERATING_COST_DEFAULT_ROWS],
         }
     )
 
@@ -250,6 +255,7 @@ def _ensure_operating_cost_table(
         return _default_operating_cost_table()
 
     work = table.copy()
+    work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
     work["Category"] = work.get("Category", "").astype(str).str.strip()
     work.loc[work["Category"] == "", "Category"] = np.nan
     work["Monthly Cost"] = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
@@ -265,18 +271,34 @@ def _ensure_operating_cost_table(
             if pd.isna(work.at[idx, "Category"]):
                 work.at[idx, "Category"] = f"Operating Item {idx + 1}"
 
-    required_cols = ["Category", "Monthly Cost", "Inflation %"]
+    if work["Year"].isna().all():
+        work["Year"] = pd.Timestamp.today().year
+    else:
+        work["Year"] = work["Year"].fillna(method="ffill").fillna(
+            work["Year"].dropna().min()
+        )
+        work["Year"] = work["Year"].fillna(pd.Timestamp.today().year)
+    work["Year"] = work["Year"].round().astype("Int64")
+
+    required_cols = ["Year", "Category", "Monthly Cost", "Inflation %"]
     for col in required_cols:
         if col not in work.columns:
             work[col] = np.nan
 
     ordered = work[required_cols + [c for c in work.columns if c not in required_cols]]
-    return ordered.reset_index(drop=True)
+    return ordered.sort_values(["Category", "Year"], kind="stable").reset_index(drop=True)
 
 
 def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
     work = _ensure_operating_cost_table(table)
+    years = pd.to_numeric(work.get("Year"), errors="coerce")
+    if years.notna().any():
+        default_year = int(years.dropna().max())
+        default_year += 1
+    else:
+        default_year = pd.Timestamp.today().year
     new_row = {
+        "Year": default_year,
         "Category": f"Operating Item {len(work) + 1}",
         "Monthly Cost": np.nan,
         "Inflation %": np.nan,
@@ -303,24 +325,44 @@ def _apply_operating_cost_increment(
         return table
 
     work = _ensure_operating_cost_table(table)
-    categories = work.get("Category", pd.Series(dtype=str)).astype(str).str.strip()
+    if column not in work.columns:
+        return work
 
-    if target_category and target_category != "All categories":
-        mask = categories == target_category
-    else:
-        mask = pd.Series(True, index=work.index)
+    work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+    work["Category"] = work.get("Category", "").astype(str).str.strip()
 
-    if column == "Monthly Cost":
-        factor = 1 + (increment_pct / 100.0)
-        work.loc[mask, "Monthly Cost"] = work.loc[mask, "Monthly Cost"].apply(
-            lambda x: x * factor if pd.notna(x) else x
-        )
-    elif column == "Inflation %":
-        work.loc[mask, "Inflation %"] = work.loc[mask, "Inflation %"].apply(
-            lambda x: x + increment_pct if pd.notna(x) else x
-        )
+    increment_factor = 1 + (increment_pct / 100.0)
+    is_percent_column = column.endswith("%")
 
-    return work
+    for category, group in work.groupby("Category", dropna=False):
+        category_key = category if isinstance(category, str) else ""
+        if (
+            target_category
+            and target_category != "All categories"
+            and category_key != target_category
+        ):
+            continue
+
+        group_sorted = group.sort_values("Year", kind="stable")
+        last_value = None
+        for idx, row in group_sorted.iterrows():
+            current_value = pd.to_numeric(row.get(column), errors="coerce")
+            if last_value is None:
+                if not np.isnan(current_value):
+                    last_value = current_value
+                continue
+
+            if np.isnan(last_value):
+                continue
+
+            if is_percent_column:
+                last_value = last_value + increment_pct
+            else:
+                last_value = last_value * increment_factor
+
+            work.at[idx, column] = last_value
+
+    return work.sort_values(["Category", "Year"], kind="stable").reset_index(drop=True)
 
 
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
@@ -2720,8 +2762,13 @@ def main() -> None:
             option_index: Dict[str, int] = {}
             for idx_row, row in operating_table.iterrows():
                 category = str(row.get("Category", "")).strip() or f"Item {idx_row + 1}"
-                option_labels.append(category)
-                option_index[category] = idx_row
+                year_value = row.get("Year")
+                if pd.notna(year_value):
+                    label = f"{category} ({int(year_value)})"
+                else:
+                    label = category
+                option_labels.append(label)
+                option_index[label] = idx_row
 
             remove_select_col.selectbox(
                 "Select item",
@@ -2786,6 +2833,9 @@ def main() -> None:
                 use_container_width=True,
                 key="assump_operating",
                 column_config={
+                    "Year": st.column_config.NumberColumn(
+                        "Year", format="%d", step=1, min_value=1900
+                    ),
                     "Monthly Cost": st.column_config.NumberColumn(
                         "Monthly Cost", format="%.2f"
                     ),
