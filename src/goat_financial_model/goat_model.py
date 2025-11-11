@@ -543,20 +543,15 @@ class GoatModel:
                 continue
             if column in agg:
                 out[column] = agg[column]
-            else:
-                out[column] = np.nan
 
         if "Gross Profit" in agg and "Revenue" in agg:
             with np.errstate(divide="ignore", invalid="ignore"):
                 margin = agg["Gross Profit"] / agg["Revenue"]
             margin = margin.replace({np.inf: np.nan, -np.inf: np.nan})
             out["Gross Profit Margin"] = margin
-        else:
-            out["Gross Profit Margin"] = np.nan
 
-        # Ensure column order matches the IFRS presentation request.
-        out = out[ordered]
-        return out
+        available = [col for col in ordered if col in out.columns]
+        return out[available]
 
     def statement_of_cash_flow(
         self, df: Optional[pd.DataFrame] = None, annual: bool = True
@@ -564,31 +559,112 @@ class GoatModel:
         if df is None:
             df = self.to_tidy()
 
-        cols = {
-            "Cash Flow from Operations": df.get("CFO"),
-            "Cash Flow from Investing": df.get("CFI"),
-            "Cash Flow from Financing": df.get("CFF"),
-            "Capital Expenditure": df.get("Capex"),
-            "Net Cash Flow": df.get("Net Cash Flow"),
+        def _aggregate_sum(series: Optional[pd.Series]) -> Optional[pd.Series]:
+            if series is None:
+                return None
+            cleaned = pd.to_numeric(series, errors="coerce")
+            if annual:
+                return cleaned.groupby(cleaned.index.year).sum(min_count=1)
+            return cleaned
+
+        def _aggregate_first(series: Optional[pd.Series]) -> Optional[pd.Series]:
+            if series is None:
+                return None
+            cleaned = pd.to_numeric(series, errors="coerce")
+            if annual:
+                return cleaned.groupby(cleaned.index.year).first()
+            return cleaned
+
+        def _aggregate_last(series: Optional[pd.Series]) -> Optional[pd.Series]:
+            if series is None:
+                return None
+            cleaned = pd.to_numeric(series, errors="coerce")
+            if annual:
+                return cleaned.groupby(cleaned.index.year).last()
+            return cleaned
+
+        flows = {
+            "Net cash from operating activities": _aggregate_sum(df.get("CFO")),
+            "Net cash used in investing activities": _aggregate_sum(df.get("CFI")),
+            "Capital expenditure (included in investing activities)": _aggregate_sum(df.get("Capex")),
+            "Net cash from financing activities": _aggregate_sum(df.get("CFF")),
         }
-        series = {name: col for name, col in cols.items() if col is not None}
-        if not series:
+        flows = {name: series for name, series in flows.items() if series is not None}
+        if not flows:
             raise ValueError("No cash-flow data available in the schedule.")
 
-        agg = self._aggregate(pd.concat(series, axis=1), annual=annual)
-        out = pd.DataFrame(index=agg.index)
-        for col in series:
-            if col in agg:
-                out[col] = agg[col]
+        out = pd.concat(flows, axis=1)
 
-        if "Net Cash Flow" not in out and {"Cash Flow from Operations", "Cash Flow from Investing", "Cash Flow from Financing"}.issubset(out.columns):
-            out["Net Cash Flow"] = (
-                out["Cash Flow from Operations"]
-                + out["Cash Flow from Investing"]
-                + out["Cash Flow from Financing"]
+        net_cash_series = _aggregate_sum(df.get("Net Cash Flow"))
+        if net_cash_series is None and {"Net cash from operating activities", "Net cash used in investing activities", "Net cash from financing activities"}.issubset(out.columns):
+            net_cash_series = (
+                out["Net cash from operating activities"]
+                + out.get("Net cash used in investing activities", 0)
+                + out.get("Net cash from financing activities", 0)
+            )
+        if net_cash_series is not None:
+            out["Net increase/(decrease) in cash and cash equivalents"] = net_cash_series
+
+        opening_candidates = [
+            "Opening Cash Balance",
+            "Opening Cash",
+            "Cash at Beginning of Period",
+        ]
+        closing_candidates = [
+            "Closing Cash Balance",
+            "Closing Cash",
+            "Cash and Cash Equivalents",
+            "Cash at End of Period",
+        ]
+
+        opening_series = None
+        for candidate in opening_candidates:
+            if candidate in df:
+                opening_series = _aggregate_first(df.get(candidate))
+                break
+
+        closing_series = None
+        for candidate in closing_candidates:
+            if candidate in df:
+                closing_series = _aggregate_last(df.get(candidate))
+                break
+
+        if opening_series is not None:
+            out = out.reindex(out.index.union(opening_series.index)).sort_index()
+            out["Opening cash and cash equivalents"] = opening_series
+
+        if closing_series is not None:
+            out = out.reindex(out.index.union(closing_series.index)).sort_index()
+            out["Closing cash and cash equivalents"] = closing_series
+        elif opening_series is not None and net_cash_series is not None:
+            out["Closing cash and cash equivalents"] = opening_series.add(
+                net_cash_series, fill_value=np.nan
             )
 
-        return out
+        if (
+            "Closing cash and cash equivalents" not in out
+            and closing_series is None
+            and "Net increase/(decrease) in cash and cash equivalents" in out
+        ):
+            out["Closing cash and cash equivalents"] = out[
+                "Net increase/(decrease) in cash and cash equivalents"
+            ].cumsum()
+
+        order = [
+            "Net cash from operating activities",
+            "Net cash used in investing activities",
+            "Capital expenditure (included in investing activities)",
+            "Net cash from financing activities",
+            "Net increase/(decrease) in cash and cash equivalents",
+            "Opening cash and cash equivalents",
+            "Closing cash and cash equivalents",
+        ]
+
+        available = [col for col in order if col in out.columns]
+        if not available:
+            raise ValueError("No cash-flow data available in the schedule.")
+
+        return out[available]
 
     def statement_of_financial_position(
         self, df: Optional[pd.DataFrame] = None, annual: bool = True
@@ -596,33 +672,72 @@ class GoatModel:
         if df is None:
             df = self.to_tidy()
 
-        cols = {
+        def _aggregate_balance(series: Optional[pd.Series]) -> Optional[pd.Series]:
+            if series is None:
+                return None
+            cleaned = pd.to_numeric(series, errors="coerce")
+            if annual:
+                return cleaned.groupby(cleaned.index.year).last()
+            return cleaned
+
+        components = {
+            "Cash and Cash Equivalents": df.get("Cash and Cash Equivalents")
+            or df.get("Closing Cash Balance"),
             "Current Assets": df.get("Current Assets"),
             "Non-current Assets": df.get("Non-current Assets"),
             "Current Liabilities": df.get("Current Liabilities"),
             "Non-current Liabilities": df.get("Non-current Liabilities"),
             "Equity": df.get("Equity"),
         }
-        series = {name: col for name, col in cols.items() if col is not None}
-        if not series:
+
+        aggregated = {
+            name: _aggregate_balance(series) for name, series in components.items() if series is not None
+        }
+
+        if not aggregated:
             raise ValueError("No balance sheet data available in the schedule.")
 
-        agg = self._aggregate(pd.concat(series, axis=1), annual=annual)
-        out = pd.DataFrame(index=agg.index)
-        for col in series:
-            if col in agg:
-                out[col] = agg[col]
+        out = pd.concat(aggregated, axis=1)
 
         if {"Current Assets", "Non-current Assets"}.issubset(out.columns):
             out["Total Assets"] = out["Current Assets"] + out["Non-current Assets"]
-        if {"Current Liabilities", "Non-current Liabilities", "Equity"}.issubset(out.columns):
-            out["Total Liabilities & Equity"] = (
-                out["Current Liabilities"]
-                + out["Non-current Liabilities"]
-                + out["Equity"]
+
+        if {"Current Liabilities", "Non-current Liabilities"}.issubset(out.columns):
+            out["Total Liabilities"] = (
+                out["Current Liabilities"] + out["Non-current Liabilities"]
             )
 
-        return out
+        if "Equity" in out:
+            out["Total Equity"] = out["Equity"]
+
+        if {"Total Assets", "Total Liabilities"}.issubset(out.columns):
+            out["Net Assets"] = out["Total Assets"] - out["Total Liabilities"]
+
+        if {"Current Assets", "Current Liabilities"}.issubset(out.columns):
+            out["Net Current Assets"] = out["Current Assets"] - out["Current Liabilities"]
+
+        if {"Total Liabilities", "Total Equity"}.issubset(out.columns):
+            out["Total Liabilities & Equity"] = (
+                out["Total Liabilities"] + out["Total Equity"]
+            )
+
+        order = [
+            "Cash and Cash Equivalents",
+            "Current Assets",
+            "Non-current Assets",
+            "Total Assets",
+            "Current Liabilities",
+            "Non-current Liabilities",
+            "Total Liabilities",
+            "Equity",
+            "Total Equity",
+            "Net Assets",
+            "Net Current Assets",
+            "Total Liabilities & Equity",
+        ]
+
+        available = [col for col in order if col in out.columns]
+        return out[available]
 
     def advanced_analytics(
         self,

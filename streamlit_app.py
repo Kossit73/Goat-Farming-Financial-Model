@@ -44,6 +44,11 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
     cff = np.full(periods, 1500.0)
     capex = np.full(periods, 2500.0)
     net_cf = cfo + cfi + cff
+    opening_cash = np.empty(periods)
+    opening_cash[0] = 25000.0
+    for i in range(1, periods):
+        opening_cash[i] = opening_cash[i - 1] + net_cf[i - 1]
+    closing_cash = opening_cash + net_cf
     current_assets = np.linspace(95000, 120000, periods)
     non_current_assets = np.linspace(210000, 245000, periods)
     current_liabilities = np.linspace(40000, 45000, periods)
@@ -72,6 +77,9 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
             "CFF": cff,
             "Capex": capex,
             "Net Cash Flow": net_cf,
+            "Opening Cash Balance": opening_cash,
+            "Closing Cash Balance": closing_cash,
+            "Cash and Cash Equivalents": closing_cash,
             "Current Assets": current_assets,
             "Non-current Assets": non_current_assets,
             "Current Liabilities": current_liabilities,
@@ -101,6 +109,9 @@ def _default_schedule_components(
         "CFI",
         "CFF",
         "Net Cash Flow",
+        "Opening Cash Balance",
+        "Closing Cash Balance",
+        "Cash and Cash Equivalents",
         "Current Assets",
         "Non-current Assets",
         "Current Liabilities",
@@ -241,6 +252,9 @@ def _assemble_schedule(
         "CFF",
         "Capex",
         "Net Cash Flow",
+        "Opening Cash Balance",
+        "Closing Cash Balance",
+        "Cash and Cash Equivalents",
         "Current Assets",
         "Non-current Assets",
         "Current Liabilities",
@@ -308,6 +322,9 @@ def _assemble_schedule(
         "CFF",
         "Capex",
         "Net Cash Flow",
+        "Opening Cash Balance",
+        "Closing Cash Balance",
+        "Cash and Cash Equivalents",
         "Current Assets",
         "Non-current Assets",
         "Current Liabilities",
