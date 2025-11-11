@@ -44,4 +44,6 @@ streamlit run streamlit_app.py
 
 The dashboard exposes editable schedules so you can enter revenue, cost and
 expense assumptions, adjust milk price and feed cost shocks, view KPI trends,
-and export the resulting time series for further analysis.
+review automatically assembled Statements of Financial Performance, Position
+and Cash Flow, explore an analytics dashboard, and export the resulting time
+series for further analysis.

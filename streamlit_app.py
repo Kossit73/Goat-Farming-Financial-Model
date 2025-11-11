@@ -33,6 +33,11 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
     cff = np.full(periods, 1500.0)
     capex = np.full(periods, 2500.0)
     net_cf = cfo + cfi + cff
+    current_assets = np.linspace(95000, 120000, periods)
+    non_current_assets = np.linspace(210000, 245000, periods)
+    current_liabilities = np.linspace(40000, 45000, periods)
+    non_current_liabilities = np.linspace(85000, 90000, periods)
+    equity = current_assets + non_current_assets - current_liabilities - non_current_liabilities
 
     df = pd.DataFrame(
         {
@@ -54,6 +59,11 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
             "CFF": cff,
             "Capex": capex,
             "Net Cash Flow": net_cf,
+            "Current Assets": current_assets,
+            "Non-current Assets": non_current_assets,
+            "Current Liabilities": current_liabilities,
+            "Non-current Liabilities": non_current_liabilities,
+            "Equity": equity,
         }
     )
     return df
@@ -279,16 +289,16 @@ def main() -> None:
         st.subheader("KPIs (Annual)")
         st.dataframe(kpis.mul(100).round(2))
 
-        tabs = st.tabs(
+        display_tabs = st.tabs(
             [
-                "Scenario Charts",
-                "Income Statement",
-                "Cash Flow",
+                "Dashboard",
+                "Financial Statements",
+                "Advanced Analytics",
                 "Supplementary Schedules",
             ]
         )
 
-        with tabs[0]:
+        with display_tabs[0]:
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("#### Revenue vs NPAT")
@@ -316,32 +326,55 @@ def main() -> None:
                 st.markdown("#### Break-even Revenue")
                 st.bar_chart(break_even["Break-even Revenue"])
 
-        with tabs[1]:
-            st.markdown("#### Base vs Scenario (Income Statement)")
-            st.dataframe(
-                pd.concat(
-                    {
-                        "Base": base,
-                        "Scenario": scenario,
-                    },
-                    axis=1,
-                ).swaplevel(axis=1)
+        with display_tabs[1]:
+            statement_tabs = st.tabs(
+                [
+                    "Statement of Financial Performance",
+                    "Statement of Financial Position",
+                    "Statement of Cash Flow",
+                ]
             )
 
-        with tabs[2]:
-            cash_cols = [
-                col
-                for col in ["CFO", "CFI", "CFF", "Net Cash Flow", "Capex"]
-                if col in base
-            ]
-            if cash_cols:
-                st.markdown("#### Cash Flow Series")
-                st.line_chart(base[cash_cols])
-                st.dataframe(base[cash_cols])
-            else:
-                st.info("Add cash flow series to the schedule to unlock this view.")
+            with statement_tabs[0]:
+                try:
+                    sop_base = model.statement_of_financial_performance(base, annual=True)
+                    sop_scenario = model.statement_of_financial_performance(
+                        scenario, annual=True
+                    )
+                    st.dataframe(
+                        pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
+                        .swaplevel(axis=1)
+                        .sort_index(axis=1, level=0)
+                    )
+                except ValueError as exc:
+                    st.info(str(exc))
 
-        with tabs[3]:
+            with statement_tabs[1]:
+                try:
+                    sofp = model.statement_of_financial_position(base, annual=True)
+                    st.dataframe(sofp)
+                except ValueError as exc:
+                    st.info(str(exc))
+
+            with statement_tabs[2]:
+                try:
+                    socf = model.statement_of_cash_flow(base, annual=True)
+                    st.dataframe(socf)
+                except ValueError as exc:
+                    st.info(str(exc))
+
+        with display_tabs[2]:
+            try:
+                adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
+                adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
+                st.markdown("#### Monthly Advanced Analytics")
+                st.dataframe(adv_monthly)
+                st.markdown("#### Annual Advanced Analytics")
+                st.dataframe(adv_annual)
+            except ValueError as exc:
+                st.info(str(exc))
+
+        with display_tabs[3]:
             for name in [
                 "Capitalisation Table",
                 "Capex Schedule",

@@ -194,6 +194,45 @@ class GoatModel:
             return None
         return pd.concat(parts, axis=1).sum(axis=1, min_count=1).rename("Net Cash Flow")
 
+    def current_assets(self) -> Optional[pd.Series]:
+        return self._get_series(
+            (
+                "Current Assets",
+                "Working Capital Assets",
+                "Short-term Assets",
+            )
+        )
+
+    def non_current_assets(self) -> Optional[pd.Series]:
+        return self._get_series(
+            (
+                "Non-current Assets",
+                "Long-term Assets",
+                "Fixed Assets",
+            )
+        )
+
+    def current_liabilities(self) -> Optional[pd.Series]:
+        return self._get_series(
+            (
+                "Current Liabilities",
+                "Short-term Liabilities",
+                "Working Capital Liabilities",
+            )
+        )
+
+    def non_current_liabilities(self) -> Optional[pd.Series]:
+        return self._get_series(
+            (
+                "Non-current Liabilities",
+                "Long-term Liabilities",
+                "Term Debt",
+            )
+        )
+
+    def equity(self) -> Optional[pd.Series]:
+        return self._get_series(("Equity", "Shareholders' Equity", "Owner Equity"))
+
     # ---------- Valuation ----------
     def wacc(self) -> Optional[float]:
         value = self.valuation_inputs.get("WACC")
@@ -363,6 +402,194 @@ class GoatModel:
                 "Break-even Revenue": be_rev,
             }
         )
+
+    # ---------- Financial statements ----------
+    def _aggregate(self, df: pd.DataFrame, annual: bool) -> pd.DataFrame:
+        if df.empty:
+            return df
+        if annual:
+            return df.groupby(df.index.year).sum(min_count=1)
+        return df
+
+    def statement_of_financial_performance(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        annual: bool = True,
+    ) -> pd.DataFrame:
+        if df is None:
+            df = self.to_tidy()
+
+        rev_col = "Revenue_adj" if "Revenue_adj" in df else "Revenue"
+        cogs_col = "COGS_adj" if "COGS_adj" in df else "COGS"
+        gm_col = "Gross Margin_adj" if "Gross Margin_adj" in df else "Gross Margin"
+        ebitda_col = "EBITDA_adj" if "EBITDA_adj" in df else "EBITDA"
+        ebit_col = "EBIT_adj" if "EBIT_adj" in df else "EBIT"
+        npbt_col = "NPBT"
+        npat_col = "NPAT_adj" if "NPAT_adj" in df else "NPAT"
+
+        columns = {
+            "Revenue": df.get(rev_col),
+            "COGS": df.get(cogs_col),
+            "Gross Margin": df.get(gm_col),
+            "Variable Expenses": df.get("Variable Expenses"),
+            "Fixed Expenses": df.get("Fixed Expenses"),
+            "Direct Wages": df.get("Direct Wages"),
+            "Admin Wages": df.get("Admin Wages"),
+            "EBITDA": df.get(ebitda_col),
+            "Depreciation & Amortization": df.get("Depreciation & Amortization"),
+            "EBIT": df.get(ebit_col),
+            "NPBT": df.get(npbt_col),
+            "NPAT": df.get(npat_col),
+        }
+        series = {name: col for name, col in columns.items() if col is not None}
+        if not series:
+            raise ValueError("No income-statement data available in the schedule.")
+
+        agg = self._aggregate(pd.concat(series, axis=1), annual=annual)
+        out = pd.DataFrame(index=agg.index)
+        out["Revenue"] = agg.get("Revenue")
+        out["COGS"] = agg.get("COGS")
+        if "Revenue" in agg and "COGS" in agg:
+            out["Gross Margin"] = agg["Revenue"] - agg["COGS"]
+        elif "Gross Margin" in agg:
+            out["Gross Margin"] = agg["Gross Margin"]
+
+        expense_cols = [col for col in ["Variable Expenses", "Fixed Expenses", "Direct Wages", "Admin Wages"] if col in agg]
+        if expense_cols:
+            out["Total Operating Expenses"] = agg[expense_cols].sum(axis=1, min_count=1)
+
+        if "EBITDA" in agg:
+            out["EBITDA"] = agg["EBITDA"]
+        elif "Gross Margin" in out and "Total Operating Expenses" in out:
+            out["EBITDA"] = out["Gross Margin"] - out["Total Operating Expenses"]
+
+        if "Depreciation & Amortization" in agg:
+            out["Depreciation & Amortization"] = agg["Depreciation & Amortization"]
+        if "EBIT" in agg:
+            out["EBIT"] = agg["EBIT"]
+        elif "EBITDA" in out and "Depreciation & Amortization" in out:
+            out["EBIT"] = out["EBITDA"] - out["Depreciation & Amortization"]
+
+        if "NPBT" in agg:
+            out["NPBT"] = agg["NPBT"]
+        if "NPAT" in agg:
+            out["NPAT"] = agg["NPAT"]
+
+        return out
+
+    def statement_of_cash_flow(
+        self, df: Optional[pd.DataFrame] = None, annual: bool = True
+    ) -> pd.DataFrame:
+        if df is None:
+            df = self.to_tidy()
+
+        cols = {
+            "Cash Flow from Operations": df.get("CFO"),
+            "Cash Flow from Investing": df.get("CFI"),
+            "Cash Flow from Financing": df.get("CFF"),
+            "Capital Expenditure": df.get("Capex"),
+            "Net Cash Flow": df.get("Net Cash Flow"),
+        }
+        series = {name: col for name, col in cols.items() if col is not None}
+        if not series:
+            raise ValueError("No cash-flow data available in the schedule.")
+
+        agg = self._aggregate(pd.concat(series, axis=1), annual=annual)
+        out = pd.DataFrame(index=agg.index)
+        for col in series:
+            if col in agg:
+                out[col] = agg[col]
+
+        if "Net Cash Flow" not in out and {"Cash Flow from Operations", "Cash Flow from Investing", "Cash Flow from Financing"}.issubset(out.columns):
+            out["Net Cash Flow"] = (
+                out["Cash Flow from Operations"]
+                + out["Cash Flow from Investing"]
+                + out["Cash Flow from Financing"]
+            )
+
+        return out
+
+    def statement_of_financial_position(
+        self, df: Optional[pd.DataFrame] = None, annual: bool = True
+    ) -> pd.DataFrame:
+        if df is None:
+            df = self.to_tidy()
+
+        cols = {
+            "Current Assets": df.get("Current Assets"),
+            "Non-current Assets": df.get("Non-current Assets"),
+            "Current Liabilities": df.get("Current Liabilities"),
+            "Non-current Liabilities": df.get("Non-current Liabilities"),
+            "Equity": df.get("Equity"),
+        }
+        series = {name: col for name, col in cols.items() if col is not None}
+        if not series:
+            raise ValueError("No balance sheet data available in the schedule.")
+
+        agg = self._aggregate(pd.concat(series, axis=1), annual=annual)
+        out = pd.DataFrame(index=agg.index)
+        for col in series:
+            if col in agg:
+                out[col] = agg[col]
+
+        if {"Current Assets", "Non-current Assets"}.issubset(out.columns):
+            out["Total Assets"] = out["Current Assets"] + out["Non-current Assets"]
+        if {"Current Liabilities", "Non-current Liabilities", "Equity"}.issubset(out.columns):
+            out["Total Liabilities & Equity"] = (
+                out["Current Liabilities"]
+                + out["Non-current Liabilities"]
+                + out["Equity"]
+            )
+
+        return out
+
+    def advanced_analytics(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        window: int = 3,
+        annual: bool = False,
+    ) -> pd.DataFrame:
+        if df is None:
+            df = self.to_tidy()
+
+        rev_col = "Revenue_adj" if "Revenue_adj" in df else "Revenue"
+        gm_col = "Gross Margin_adj" if "Gross Margin_adj" in df else "Gross Margin"
+        ebitda_col = "EBITDA_adj" if "EBITDA_adj" in df else "EBITDA"
+        npat_col = "NPAT_adj" if "NPAT_adj" in df else "NPAT"
+
+        required = [col for col in [rev_col, gm_col, ebitda_col, npat_col] if col in df]
+        if not required:
+            raise ValueError("Insufficient data to compute advanced analytics.")
+
+        work = df[required].rename(
+            columns={
+                rev_col: "Revenue",
+                gm_col: "Gross Margin",
+                ebitda_col: "EBITDA",
+                npat_col: "NPAT",
+            }
+        )
+
+        if annual:
+            work = work.groupby(work.index.year).sum(min_count=1)
+
+        out = pd.DataFrame(index=work.index)
+        out["Revenue Growth %"] = work["Revenue"].pct_change()
+        out["Rolling Revenue (window)"] = work["Revenue"].rolling(window, min_periods=1).mean()
+        out["Gross Margin %"] = work["Gross Margin"] / work["Revenue"]
+        out["EBITDA Margin %"] = work["EBITDA"] / work["Revenue"]
+        out["Net Margin %"] = work["NPAT"] / work["Revenue"]
+        if "Variable Expenses" in df:
+            var = df["Variable Expenses"]
+            var = var.groupby(var.index.year).sum(min_count=1) if annual else var
+            out["Variable Cost %"] = var / work["Revenue"]
+        if "Fixed Expenses" in df:
+            fixed = df["Fixed Expenses"]
+            fixed = fixed.groupby(fixed.index.year).sum(min_count=1) if annual else fixed
+            out["Fixed Cost %"] = fixed / work["Revenue"]
+        if "EBITDA" in work:
+            out["EBITDA Conversion"] = work["EBITDA"] / work["Gross Margin"]
+        return out
 
     def to_tidy(self) -> pd.DataFrame:
         return self.data.copy()
