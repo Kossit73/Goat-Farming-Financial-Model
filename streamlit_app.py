@@ -27,6 +27,17 @@ DETAIL_SCHEDULE_COLUMNS = {
 CAP_TABLE_COLUMNS = ["Year", "Shareholder", "Ownership %", "Investment"]
 
 
+ASSET_SCHEDULE_COLUMNS = [
+    "Asset",
+    "Year",
+    "Opening NBV",
+    "Additions",
+    "Depreciation Rate %",
+    "Depreciation",
+    "Closing NBV",
+]
+
+
 def _normalize_period(series: pd.Series) -> pd.Series:
     periods = pd.to_datetime(series, errors="coerce")
     formatted = periods.dt.strftime("%Y-%m-%d")
@@ -186,6 +197,170 @@ def _remove_cogs_row(table: pd.DataFrame, period: str) -> pd.DataFrame:
         return table
     mask = table["Period"].astype(str) != str(period)
     return table.loc[mask].reset_index(drop=True)
+
+
+def _ensure_asset_schedule(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = pd.DataFrame(columns=ASSET_SCHEDULE_COLUMNS)
+    else:
+        work = table.copy()
+
+    for column in ASSET_SCHEDULE_COLUMNS:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    work["Asset"] = work["Asset"].fillna("").astype(str)
+    work["Year"] = pd.to_numeric(work["Year"], errors="coerce")
+
+    numeric_cols = [
+        "Opening NBV",
+        "Additions",
+        "Depreciation Rate %",
+        "Depreciation",
+        "Closing NBV",
+    ]
+    for column in numeric_cols:
+        work[column] = pd.to_numeric(work[column], errors="coerce")
+
+    ordered = [col for col in ASSET_SCHEDULE_COLUMNS if col in work.columns]
+    remaining = [col for col in work.columns if col not in ordered]
+
+    work = work[ordered + remaining].reset_index(drop=True)
+    return _recalculate_asset_schedule(work)
+
+
+def _recalculate_asset_schedule(table: pd.DataFrame) -> pd.DataFrame:
+    if table is None or table.empty:
+        return pd.DataFrame(columns=ASSET_SCHEDULE_COLUMNS)
+
+    work = table.copy()
+
+    opening = pd.to_numeric(work.get("Opening NBV"), errors="coerce").fillna(0.0)
+    additions = pd.to_numeric(work.get("Additions"), errors="coerce").fillna(0.0)
+    rate = pd.to_numeric(work.get("Depreciation Rate %"), errors="coerce")
+    depreciation = pd.to_numeric(work.get("Depreciation"), errors="coerce")
+
+    total_basis = opening + additions
+
+    if not rate.isna().all():
+        calc_dep = total_basis * (rate.fillna(0.0) / 100.0)
+        dep_mask = depreciation.isna() & rate.notna()
+        depreciation.loc[dep_mask] = calc_dep.loc[dep_mask]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rate_mask = rate.isna() & depreciation.notna() & (total_basis != 0)
+        rate.loc[rate_mask] = (depreciation.loc[rate_mask] / total_basis.loc[rate_mask]) * 100.0
+
+    closing = opening + additions - depreciation.fillna(0.0)
+
+    work["Depreciation Rate %"] = rate
+    work["Depreciation"] = depreciation
+    work["Closing NBV"] = closing
+
+    return work
+
+
+def _apply_asset_rate(table: pd.DataFrame, rate: float) -> pd.DataFrame:
+    work = _ensure_asset_schedule(table)
+    work["Depreciation Rate %"] = rate
+    return _recalculate_asset_schedule(work)
+
+
+def _apply_asset_additions_pattern(
+    table: pd.DataFrame, base_amount: float, increment_pct: float
+) -> pd.DataFrame:
+    work = _ensure_asset_schedule(table)
+    if work.empty:
+        return work
+
+    temp = work.copy()
+    temp["__year"] = pd.to_numeric(temp["Year"], errors="coerce")
+    temp = temp.sort_values("__year", kind="stable")
+
+    factor = 1 + (increment_pct / 100.0)
+    position = 0
+    for idx, row in temp.iterrows():
+        year = row["__year"]
+        if pd.isna(year):
+            continue
+        temp.at[idx, "Additions"] = base_amount * (factor ** position)
+        position += 1
+
+    temp = temp.drop(columns="__year")
+    work.loc[temp.index, "Additions"] = temp["Additions"]
+    return _recalculate_asset_schedule(work)
+
+
+def _apply_asset_yearly_increment(
+    table: pd.DataFrame, column: str, increment_pct: float
+) -> pd.DataFrame:
+    work = _ensure_asset_schedule(table)
+    if work.empty or column not in work.columns or increment_pct == 0:
+        return work
+
+    temp = work.copy()
+    temp["__year"] = pd.to_numeric(temp["Year"], errors="coerce")
+    temp = temp.sort_values("__year", kind="stable")
+
+    factor = 1 + (increment_pct / 100.0)
+    base_value = None
+    last_year = None
+
+    for idx, row in temp.iterrows():
+        year = row["__year"]
+        if pd.isna(year):
+            continue
+
+        current = pd.to_numeric(row[column], errors="coerce")
+        if base_value is None:
+            base_value = 0.0 if pd.isna(current) else float(current)
+            last_year = int(year)
+            temp.at[idx, column] = base_value
+            continue
+
+        year_gap = int(year) - int(last_year)
+        if year_gap > 0:
+            base_value = base_value * (factor ** year_gap)
+            last_year = int(year)
+
+        temp.at[idx, column] = base_value
+
+    temp = temp.drop(columns="__year")
+    work.loc[temp.index, column] = temp[column]
+    return _recalculate_asset_schedule(work)
+
+
+def _add_asset_row(
+    table: pd.DataFrame, default_rate: float = 5.0, default_additions: float = 0.0
+) -> pd.DataFrame:
+    work = _ensure_asset_schedule(table)
+
+    if work.empty:
+        next_year = pd.Timestamp.today().year
+    else:
+        years = pd.to_numeric(work["Year"], errors="coerce")
+        next_year = int(years.dropna().max()) + 1 if years.notna().any() else pd.Timestamp.today().year
+
+    new_row = {
+        "Asset": "New Asset",
+        "Year": next_year,
+        "Opening NBV": 0.0,
+        "Additions": default_additions,
+        "Depreciation Rate %": default_rate,
+        "Depreciation": np.nan,
+        "Closing NBV": np.nan,
+    }
+
+    work = pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+    return _recalculate_asset_schedule(work)
+
+
+def _remove_asset_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
+    work = _ensure_asset_schedule(table)
+    if index not in work.index:
+        return work
+    reduced = work.drop(index=index).reset_index(drop=True)
+    return _recalculate_asset_schedule(reduced)
 
 
 def _ensure_capitalisation_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -418,9 +593,12 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
         "Asset Schedules": pd.DataFrame(
             {
                 "Asset": ["Barn", "Parlour"],
+                "Year": [2024, 2025],
                 "Opening NBV": [120000.0, 65000.0],
                 "Additions": [10000.0, 5000.0],
-                "Depreciation": [8000.0, 4200.0],
+                "Depreciation Rate %": [6.0, 5.5],
+                "Depreciation": [8000.0, 3600.0],
+                "Closing NBV": [122000.0, 66400.0],
             }
         ),
         "Outputs": pd.DataFrame(
@@ -921,6 +1099,153 @@ def main() -> None:
                 cleaned_cap = _clean_editor_table(cap_table)
                 if cleaned_cap is not None:
                     supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
+                continue
+            if name == "Asset Schedules":
+                st.markdown("#### Asset Schedule")
+                asset_table = _ensure_asset_schedule(
+                    st.session_state.supplementary.get(name)
+                )
+
+                rate_series = pd.to_numeric(
+                    asset_table.get("Depreciation Rate %"), errors="coerce"
+                ).dropna()
+                addition_series = pd.to_numeric(
+                    asset_table.get("Additions"), errors="coerce"
+                ).dropna()
+
+                default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 5.0
+                default_addition = (
+                    float(addition_series.iloc[0]) if not addition_series.empty else 0.0
+                )
+
+                st.session_state.setdefault("asset_rate_default", round(default_rate, 2))
+                st.session_state.setdefault("asset_add_base", default_addition)
+                st.session_state.setdefault("asset_add_increment", 0.0)
+                st.session_state.setdefault("asset_increment_column", "Depreciation Rate %")
+                st.session_state.setdefault("asset_increment_pct", 0.0)
+                st.session_state.setdefault("asset_remove_choice", "-- Select Row --")
+
+                rate_col, rate_btn_col, add_base_col, add_inc_col, add_btn_col = st.columns(
+                    [1, 1, 1, 1, 1]
+                )
+
+                rate_value = rate_col.number_input(
+                    "Default depreciation rate (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=0.1,
+                    key="asset_rate_default",
+                )
+                if rate_btn_col.button("Apply rate to all", key="asset_apply_rate"):
+                    asset_table = _apply_asset_rate(asset_table, rate_value)
+
+                base_add_value = add_base_col.number_input(
+                    "Base additions",
+                    min_value=0.0,
+                    step=100.0,
+                    key="asset_add_base",
+                )
+                add_increment = add_inc_col.number_input(
+                    "Additions yearly increment (%)",
+                    min_value=-100.0,
+                    max_value=100.0,
+                    step=0.1,
+                    key="asset_add_increment",
+                )
+                if add_btn_col.button(
+                    "Apply additions pattern", key="asset_apply_additions"
+                ):
+                    asset_table = _apply_asset_additions_pattern(
+                        asset_table, base_add_value, add_increment
+                    )
+
+                (
+                    add_row_col,
+                    remove_select_col,
+                    remove_btn_col,
+                    inc_column_col,
+                    inc_pct_col,
+                    inc_btn_col,
+                ) = st.columns([1, 2, 1, 1.5, 1, 1])
+
+                if add_row_col.button("Add Asset", key="asset_add_row"):
+                    asset_table = _add_asset_row(
+                        asset_table,
+                        default_rate=rate_value,
+                        default_additions=base_add_value,
+                    )
+
+                option_labels: list[str] = []
+                option_map: Dict[str, int] = {}
+                for idx, row in asset_table.iterrows():
+                    label_year = row.get("Year")
+                    label_asset = row.get("Asset") or "Unnamed"
+                    if pd.notna(label_year):
+                        label = f"{int(label_year)} – {label_asset}"
+                    else:
+                        label = str(label_asset)
+                    option_labels.append(label)
+                    option_map[label] = idx
+
+                remove_choice = remove_select_col.selectbox(
+                    "Select asset",
+                    options=["-- Select Row --"] + option_labels,
+                    key="asset_remove_choice",
+                )
+                if remove_btn_col.button("Remove Asset", key="asset_remove_row"):
+                    if remove_choice in option_map:
+                        asset_table = _remove_asset_row(
+                            asset_table, option_map[remove_choice]
+                        )
+                        st.session_state.asset_remove_choice = "-- Select Row --"
+
+                increment_column = inc_column_col.selectbox(
+                    "Increment column",
+                    options=[
+                        "Depreciation Rate %",
+                        "Additions",
+                        "Opening NBV",
+                        "Depreciation",
+                    ],
+                    key="asset_increment_column",
+                )
+                increment_pct = inc_pct_col.number_input(
+                    "Yearly increment (%)",
+                    min_value=-100.0,
+                    max_value=100.0,
+                    step=0.1,
+                    key="asset_increment_pct",
+                )
+                if inc_btn_col.button("Apply increment", key="asset_apply_increment"):
+                    asset_table = _apply_asset_yearly_increment(
+                        asset_table, increment_column, increment_pct
+                    )
+
+                asset_editor = st.data_editor(
+                    asset_table,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="supp_asset_schedule",
+                    column_config={
+                        "Year": st.column_config.NumberColumn("Year", step=1),
+                        "Depreciation Rate %": st.column_config.NumberColumn(
+                            "Depreciation Rate (%)", format="%.2f", step=0.1
+                        ),
+                        "Depreciation": st.column_config.NumberColumn(
+                            "Depreciation", format="%.2f"
+                        ),
+                        "Closing NBV": st.column_config.NumberColumn(
+                            "Closing NBV", format="%.2f"
+                        ),
+                    },
+                )
+
+                synced_asset = _ensure_asset_schedule(asset_editor)
+                st.session_state.supplementary[name] = synced_asset
+
+                cleaned_asset = _clean_editor_table(synced_asset)
+                if cleaned_asset is not None:
+                    supplementary_tables[name] = _ensure_asset_schedule(cleaned_asset)
                 continue
 
             with st.expander(name, expanded=False):
