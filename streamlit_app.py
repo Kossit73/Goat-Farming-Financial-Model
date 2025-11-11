@@ -228,7 +228,18 @@ def main() -> None:
     include_valuation = False
     run_clicked = False
 
-    tabs = st.tabs(["Input Schedule", "Assumptions", "Financials"])
+    supplementary_tables: Dict[str, pd.DataFrame] = {}
+
+    tabs = st.tabs(
+        [
+            "Input Schedule",
+            "Assumptions",
+            "Financials",
+            "Dashboard",
+            "Advanced Analytics",
+            "Supplementary Schedules",
+        ]
+    )
 
     with tabs[0]:
         st.subheader("Input Schedule")
@@ -241,7 +252,6 @@ def main() -> None:
         st.session_state.schedule = schedule_editor
 
         st.markdown("### Supplementary Tables")
-        supplementary_tables: Dict[str, pd.DataFrame] = {}
         for name, default_table in st.session_state.supplementary.items():
             with st.expander(name, expanded=False):
                 table = st.data_editor(
@@ -336,9 +346,6 @@ def main() -> None:
                     "NPV": npv_value,
                     "Terminal Value": terminal_value,
                 }
-
-    # ensure supplementary_tables defined even if tabs[0] not executed (Streamlit rerun)
-    supplementary_tables = locals().get("supplementary_tables", {})
 
     with tabs[2]:
         st.subheader("Financial Statements")
@@ -465,7 +472,6 @@ def main() -> None:
         )
     else:
         model = results["model"]
-        base = results["base"]
         scenario = results["scenario"]
         kpis = results["kpis"]
         break_even = results["break_even"]
@@ -491,83 +497,78 @@ def main() -> None:
         st.subheader("KPIs (Annual)")
         st.dataframe(kpis.mul(100).round(2))
 
-    display_tabs = st.tabs([
-        "Dashboard",
-        "Advanced Analytics",
-        "Supplementary Schedules",
-    ])
-
-    if results is None:
-        with display_tabs[0]:
+    with tabs[3]:
+        st.subheader("Dashboard")
+        if results is None:
             st.info("Run the scenario to populate the dashboard charts.")
-        with display_tabs[1]:
-            st.info("Run the scenario to view advanced analytics.")
-        with display_tabs[2]:
-            st.info("Supplementary schedules will appear once a scenario has been run.")
-        return
-
-    # Results available for rendering
-    scenario = results["scenario"]
-    break_even = results["break_even"]
-    model = results["model"]
-    base = results["base"]
-
-    with display_tabs[0]:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### Revenue vs NPAT")
-            st.line_chart(scenario[["Revenue_adj", "NPAT_adj"]])
-            st.markdown("#### Expense Breakdown")
-            expense_cols = [
-                col
-                for col in [
-                    "COGS_adj",
-                    "Variable Expenses",
-                    "Fixed Expenses",
-                    "Direct Wages",
-                    "Admin Wages",
+        else:
+            scenario = results["scenario"]
+            break_even = results["break_even"]
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("#### Revenue vs NPAT")
+                st.line_chart(scenario[["Revenue_adj", "NPAT_adj"]])
+                st.markdown("#### Expense Breakdown")
+                expense_cols = [
+                    col
+                    for col in [
+                        "COGS_adj",
+                        "Variable Expenses",
+                        "Fixed Expenses",
+                        "Direct Wages",
+                        "Admin Wages",
+                    ]
+                    if col in scenario
                 ]
-                if col in scenario
-            ]
-            if expense_cols:
-                st.area_chart(scenario[expense_cols])
-            else:
-                st.info("Add expense series to the schedule to view this chart.")
+                if expense_cols:
+                    st.area_chart(scenario[expense_cols])
+                else:
+                    st.info("Add expense series to the schedule to view this chart.")
 
-        with col2:
-            st.markdown("#### Gross Margin vs EBITDA")
-            st.line_chart(scenario[["Gross Margin_adj", "EBITDA_adj"]])
-            st.markdown("#### Break-even Revenue")
-            st.bar_chart(break_even["Break-even Revenue"])
+            with col2:
+                st.markdown("#### Gross Margin vs EBITDA")
+                st.line_chart(scenario[["Gross Margin_adj", "EBITDA_adj"]])
+                st.markdown("#### Break-even Revenue")
+                st.bar_chart(break_even["Break-even Revenue"])
 
-    with display_tabs[1]:
-        try:
-            adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
-            adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
-            st.markdown("#### Monthly Advanced Analytics")
-            st.dataframe(adv_monthly)
-            st.markdown("#### Annual Advanced Analytics")
-            st.dataframe(adv_annual)
-        except ValueError as exc:
-            st.info(str(exc))
+            st.download_button(
+                "Download Scenario CSV",
+                scenario.to_csv().encode("utf-8"),
+                file_name="scenario_timeseries.csv",
+                mime="text/csv",
+            )
 
-    with display_tabs[2]:
-        supplementary_render = results.get("supplementary", {})
-        for name in [
-            "Capitalisation Table",
-            "Capex Schedule",
-            "Asset Schedules",
-            "Outputs",
-            "Benchmark KPIs",
-        ]:
-            _render_table(name, supplementary_render.get(name))
+    with tabs[4]:
+        st.subheader("Advanced Analytics")
+        if results is None:
+            st.info("Run the scenario to view advanced analytics.")
+        else:
+            scenario = results["scenario"]
+            model = results["model"]
+            try:
+                adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
+                adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
+                st.markdown("#### Monthly Advanced Analytics")
+                st.dataframe(adv_monthly)
+                st.markdown("#### Annual Advanced Analytics")
+                st.dataframe(adv_annual)
+            except ValueError as exc:
+                st.info(str(exc))
 
-    st.download_button(
-        "Download Scenario CSV",
-        scenario.to_csv().encode("utf-8"),
-        file_name="scenario_timeseries.csv",
-        mime="text/csv",
-    )
+    with tabs[5]:
+        st.subheader("Supplementary Schedules")
+        if results is None:
+            st.info("Supplementary schedules will appear once a scenario has been run.")
+        else:
+            supplementary_render = results.get("supplementary", {})
+            for name in [
+                "Capitalisation Table",
+                "Capex Schedule",
+                "Asset Schedules",
+                "Outputs",
+                "Benchmark KPIs",
+            ]:
+                _render_table(name, supplementary_render.get(name))
 
 
 if __name__ == "__main__":
