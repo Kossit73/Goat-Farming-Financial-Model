@@ -79,6 +79,13 @@ PRICING_DEFAULT_ROWS = [
 ]
 
 
+OPERATING_COST_DEFAULT_ROWS = [
+    ("Feed", 8500.0, 4.0),
+    ("Healthcare", 1800.0, 3.5),
+    ("Utilities", 1200.0, 2.0),
+]
+
+
 def _default_pricing_table() -> pd.DataFrame:
     if not PRICING_DEFAULT_ROWS:
         return pd.DataFrame(
@@ -213,6 +220,105 @@ def _apply_pricing_yearly_increment(
                 last_value = last_value * increment_factor
 
             work.at[idx, column] = last_value
+
+    return work
+
+
+def _default_operating_cost_table() -> pd.DataFrame:
+    if not OPERATING_COST_DEFAULT_ROWS:
+        return pd.DataFrame(
+            {
+                "Category": ["Operating Item"],
+                "Monthly Cost": [np.nan],
+                "Inflation %": [np.nan],
+            }
+        )
+
+    return pd.DataFrame(
+        {
+            "Category": [row[0] for row in OPERATING_COST_DEFAULT_ROWS],
+            "Monthly Cost": [row[1] for row in OPERATING_COST_DEFAULT_ROWS],
+            "Inflation %": [row[2] for row in OPERATING_COST_DEFAULT_ROWS],
+        }
+    )
+
+
+def _ensure_operating_cost_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        return _default_operating_cost_table()
+
+    work = table.copy()
+    work["Category"] = work.get("Category", "").astype(str).str.strip()
+    work.loc[work["Category"] == "", "Category"] = np.nan
+    work["Monthly Cost"] = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
+    work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
+
+    work = work.dropna(how="all")
+
+    if work.empty:
+        return _default_operating_cost_table()
+
+    if work["Category"].isna().any():
+        for idx in work.index:
+            if pd.isna(work.at[idx, "Category"]):
+                work.at[idx, "Category"] = f"Operating Item {idx + 1}"
+
+    required_cols = ["Category", "Monthly Cost", "Inflation %"]
+    for col in required_cols:
+        if col not in work.columns:
+            work[col] = np.nan
+
+    ordered = work[required_cols + [c for c in work.columns if c not in required_cols]]
+    return ordered.reset_index(drop=True)
+
+
+def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_operating_cost_table(table)
+    new_row = {
+        "Category": f"Operating Item {len(work) + 1}",
+        "Monthly Cost": np.nan,
+        "Inflation %": np.nan,
+    }
+    return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+
+
+def _remove_operating_cost_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
+    if table is None or table.empty:
+        return table
+    work = table.copy()
+    if 0 <= index < len(work):
+        work = work.drop(index=index).reset_index(drop=True)
+    return work
+
+
+def _apply_operating_cost_increment(
+    table: pd.DataFrame,
+    increment_pct: float,
+    target_category: Optional[str] = None,
+    column: str = "Monthly Cost",
+) -> pd.DataFrame:
+    if table is None or table.empty or increment_pct == 0:
+        return table
+
+    work = _ensure_operating_cost_table(table)
+    categories = work.get("Category", pd.Series(dtype=str)).astype(str).str.strip()
+
+    if target_category and target_category != "All categories":
+        mask = categories == target_category
+    else:
+        mask = pd.Series(True, index=work.index)
+
+    if column == "Monthly Cost":
+        factor = 1 + (increment_pct / 100.0)
+        work.loc[mask, "Monthly Cost"] = work.loc[mask, "Monthly Cost"].apply(
+            lambda x: x * factor if pd.notna(x) else x
+        )
+    elif column == "Inflation %":
+        work.loc[mask, "Inflation %"] = work.loc[mask, "Inflation %"].apply(
+            lambda x: x + increment_pct if pd.notna(x) else x
+        )
 
     return work
 
@@ -1413,13 +1519,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
             }
         ),
         "Pricing": _default_pricing_table(),
-        "Operating Costs": pd.DataFrame(
-            {
-                "Category": ["Feed", "Healthcare", "Utilities"],
-                "Monthly Cost": [8500.0, 1800.0, 1200.0],
-                "Inflation %": [4.0, 3.5, 2.0],
-            }
-        ),
+        "Operating Costs": _default_operating_cost_table(),
         "Capital & Financing": pd.DataFrame(
             {
                 "Source": ["Bank Loan", "Equity"],
@@ -2600,14 +2700,104 @@ def main() -> None:
 
         with assumption_tabs[3]:
             st.markdown("#### Operating Cost Assumptions")
-            op_cost_editor = st.data_editor(
-                st.session_state.assumptions["Operating Costs"],
+            operating_table = _ensure_operating_cost_table(
+                st.session_state.assumptions.get("Operating Costs")
+            )
+            st.session_state.assumptions["Operating Costs"] = operating_table
+
+            st.session_state.setdefault("operating_remove_choice", "-- Select Item --")
+            st.session_state.setdefault("operating_increment_target", "All categories")
+            st.session_state.setdefault("operating_increment_column", "Monthly Cost")
+            st.session_state.setdefault("operating_increment_pct", 0.0)
+
+            add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+            if add_col.button("Add Item", key="operating_add_row"):
+                operating_table = _add_operating_cost_row(operating_table)
+                st.session_state.assumptions["Operating Costs"] = operating_table
+
+            option_labels: list[str] = []
+            option_index: Dict[str, int] = {}
+            for idx_row, row in operating_table.iterrows():
+                category = str(row.get("Category", "")).strip() or f"Item {idx_row + 1}"
+                option_labels.append(category)
+                option_index[category] = idx_row
+
+            remove_select_col.selectbox(
+                "Select item",
+                options=["-- Select Item --"] + option_labels,
+                key="operating_remove_choice",
+            )
+
+            if remove_btn_col.button("Remove Item", key="operating_remove_row"):
+                choice = st.session_state.get("operating_remove_choice")
+                if choice in option_index:
+                    operating_table = _remove_operating_cost_row(
+                        operating_table, option_index[choice]
+                    )
+                    st.session_state.assumptions["Operating Costs"] = operating_table
+                    st.session_state["operating_remove_choice"] = "-- Select Item --"
+
+            inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
+                [2, 1.5, 1, 1]
+            )
+
+            target_options = ["All categories"] + sorted(
+                {
+                    str(cat).strip()
+                    for cat in operating_table.get("Category", pd.Series(dtype=str))
+                    .dropna()
+                    .tolist()
+                    if str(cat).strip()
+                }
+            )
+            inc_target_col.selectbox(
+                "Apply increment to",
+                options=target_options,
+                key="operating_increment_target",
+            )
+
+            inc_column_col.selectbox(
+                "Column",
+                options=["Monthly Cost", "Inflation %"],
+                key="operating_increment_column",
+            )
+
+            inc_pct_col.number_input(
+                "Yearly increment (%)",
+                min_value=-100.0,
+                max_value=100.0,
+                step=0.1,
+                key="operating_increment_pct",
+            )
+
+            if inc_btn_col.button("Apply increment", key="operating_apply_increment"):
+                operating_table = _apply_operating_cost_increment(
+                    operating_table,
+                    st.session_state.get("operating_increment_pct", 0.0),
+                    st.session_state.get("operating_increment_target"),
+                    st.session_state.get("operating_increment_column", "Monthly Cost"),
+                )
+                st.session_state.assumptions["Operating Costs"] = operating_table
+
+            operating_editor = st.data_editor(
+                operating_table,
                 num_rows="dynamic",
                 use_container_width=True,
                 key="assump_operating",
+                column_config={
+                    "Monthly Cost": st.column_config.NumberColumn(
+                        "Monthly Cost", format="%.2f"
+                    ),
+                    "Inflation %": st.column_config.NumberColumn(
+                        "Inflation (%)", format="%.2f"
+                    ),
+                },
             )
-            st.session_state.assumptions["Operating Costs"] = op_cost_editor
-            assumption_tables["Operating Costs"] = op_cost_editor
+
+            operating_table = _ensure_operating_cost_table(operating_editor)
+            st.session_state.assumptions["Operating Costs"] = operating_table
+            assumption_tables["Operating Costs"] = operating_table
 
         with assumption_tabs[4]:
             st.markdown("#### Capital & Financing Assumptions")
