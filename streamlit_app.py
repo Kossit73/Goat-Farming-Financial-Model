@@ -676,15 +676,18 @@ def main() -> None:
                         st.session_state.detail_schedules[name] = cogs_table
 
                     remove_options = ["Select a period"] + cogs_table["Period"].astype(str).tolist()
-                    st.session_state.cogs_remove_choice = controls[3].selectbox(
+                    controls[3].selectbox(
                         "Remove row",
                         options=remove_options,
                         key="cogs_remove_choice",
                     )
                     if controls[3].button("Remove", key="cogs_remove_row"):
-                        selection = st.session_state.get("cogs_remove_choice")
-                        if selection and selection in cogs_table["Period"].astype(str).values:
-                            cogs_table = _remove_cogs_row(cogs_table, selection)
+                        remove_choice = st.session_state.get("cogs_remove_choice")
+                        if (
+                            remove_choice
+                            and remove_choice in cogs_table["Period"].astype(str).values
+                        ):
+                            cogs_table = _remove_cogs_row(cogs_table, remove_choice)
                             st.session_state.detail_schedules[name] = cogs_table
                             st.session_state.cogs_remove_choice = "Select a period"
 
