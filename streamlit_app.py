@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from io import BytesIO
+import re
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -51,6 +53,172 @@ def _normalize_period(series: pd.Series) -> pd.Series:
     periods = pd.to_datetime(series, errors="coerce")
     formatted = periods.dt.strftime("%Y-%m-%d")
     return formatted.where(~periods.isna(), series.astype(str))
+
+
+def _format_scenario_label(milk_pct: int, feed_pct: int) -> str:
+    if milk_pct == 0 and feed_pct == 0:
+        return "Base Scenario"
+    return f"Milk {milk_pct:+d}%, Feed {feed_pct:+d}%"
+
+
+def _scenario_key_suffix(label: str) -> str:
+    normalized = re.sub(r"[^0-9a-zA-Z]+", "_", label).strip("_").lower()
+    return normalized or "scenario"
+
+
+def _sanitize_sheet_name(name: str, existing: set[str]) -> str:
+    invalid = set('[]:*?/\\')
+    cleaned = "".join("_" if ch in invalid else ch for ch in name).strip()
+    cleaned = cleaned or "Sheet"
+    if len(cleaned) > 31:
+        cleaned = cleaned[:31]
+    base = cleaned
+    suffix = 1
+    while cleaned in existing:
+        candidate = f"{base[:31 - len(str(suffix)) - 1]}_{suffix}" if len(base) >= 30 else f"{base}_{suffix}"
+        cleaned = candidate[:31]
+        suffix += 1
+    existing.add(cleaned)
+    return cleaned
+
+
+def _prepare_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+
+    frame = df.copy()
+    if isinstance(frame, pd.Series):
+        frame = frame.to_frame()
+
+    if isinstance(frame.columns, pd.MultiIndex):
+        frame.columns = [
+            " - ".join(str(part) for part in tup if str(part))
+            for tup in frame.columns.to_flat_index()
+        ]
+
+    index = frame.index
+    if isinstance(index, pd.MultiIndex):
+        frame = frame.reset_index()
+    elif isinstance(index, pd.DatetimeIndex):
+        frame = frame.reset_index()
+        first_col = frame.columns[0]
+        frame[first_col] = _normalize_period(frame[first_col])
+        if first_col == "index" or not first_col:
+            frame = frame.rename(columns={first_col: "Period"})
+    elif not isinstance(index, pd.RangeIndex) or index.name:
+        frame = frame.reset_index()
+        first_col = frame.columns[0]
+        if first_col == "index" and index.name:
+            frame = frame.rename(columns={first_col: index.name})
+
+    return frame
+
+
+def _generate_excel_bytes(
+    model: GoatModel,
+    results: Dict[str, Any],
+    scenario_label: str,
+) -> bytes:
+    buffer = BytesIO()
+
+    scenario_df = results.get("scenario")
+    base_df = results.get("base")
+    kpis = results.get("kpis")
+    break_even = results.get("break_even")
+    supplementary = results.get("supplementary", {})
+    scenario_inputs = results.get("scenario_inputs", {})
+
+    used_sheets: set[str] = set()
+
+    def write_sheet(name: str, df: Optional[pd.DataFrame]) -> None:
+        if df is None:
+            return
+        frame = _prepare_dataframe_for_excel(df)
+        if frame.empty and frame.columns.empty:
+            return
+        sheet_name = _sanitize_sheet_name(name, used_sheets)
+        frame.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        if base_df is not None:
+            write_sheet("Input Schedule", base_df)
+
+        if scenario_df is not None:
+            write_sheet("Scenario Timeline", scenario_df)
+            try:
+                annual = scenario_df.groupby(scenario_df.index.year).sum(min_count=1)
+                annual.index.name = "Year"
+                write_sheet("Scenario Annual", annual)
+            except Exception:
+                pass
+
+        if kpis is not None:
+            write_sheet("KPIs (Annual)", kpis.mul(100))
+
+        if break_even is not None:
+            write_sheet("Break-even Analysis", break_even)
+
+        valuation_inputs = model.valuation_inputs or {}
+        if valuation_inputs:
+            valuation_df = pd.DataFrame(
+                {
+                    "Metric": list(valuation_inputs.keys()),
+                    "Value": list(valuation_inputs.values()),
+                }
+            )
+            write_sheet("Valuation Inputs", valuation_df)
+
+        if scenario_inputs:
+            inputs_df = pd.DataFrame(
+                {
+                    "Input": list(scenario_inputs.keys()),
+                    "Value": list(scenario_inputs.values()),
+                }
+            )
+            write_sheet("Scenario Inputs", inputs_df)
+
+        if base_df is not None and scenario_df is not None:
+            try:
+                sop_base = model.statement_of_financial_performance(base_df, annual=True)
+                sop_scenario = model.statement_of_financial_performance(
+                    scenario_df, annual=True
+                )
+                sop_combined = (
+                    pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
+                    .swaplevel(axis=1)
+                    .sort_index(axis=1, level=0)
+                )
+                write_sheet("Financial Performance", sop_combined)
+            except ValueError:
+                pass
+
+        if base_df is not None:
+            try:
+                sofp = model.statement_of_financial_position(base_df, annual=True)
+                write_sheet("Financial Position", sofp)
+            except ValueError:
+                pass
+
+            try:
+                socf = model.statement_of_cash_flow(base_df, annual=True)
+                write_sheet("Cash Flow", socf)
+            except ValueError:
+                pass
+
+        for name, table in supplementary.items():
+            if table is None:
+                continue
+            write_sheet(f"Supplementary - {name}", table)
+
+        metadata_df = pd.DataFrame(
+            {
+                "Scenario": [scenario_label],
+            }
+        )
+        write_sheet("Scenario Details", metadata_df)
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 VARIABLE_DEFAULT_ITEMS = [
@@ -3017,6 +3185,12 @@ def main() -> None:
 
         st.success("Scenario complete")
 
+        scenario_label = _format_scenario_label(milk_price, feed_cost)
+        scenario_inputs = {
+            "Milk price change (%)": milk_price,
+            "Feed cost change (%)": feed_cost,
+        }
+
         st.session_state.results = {
             "model": model,
             "base": base,
@@ -3024,6 +3198,8 @@ def main() -> None:
             "kpis": kpis,
             "break_even": break_even,
             "supplementary": combined_supplementary,
+            "scenario_label": scenario_label,
+            "scenario_inputs": scenario_inputs,
         }
 
     results = st.session_state.results
@@ -3038,6 +3214,7 @@ def main() -> None:
         scenario = results["scenario"]
         kpis = results["kpis"]
         break_even = results["break_even"]
+        scenario_label = results.get("scenario_label", "Scenario")
 
         valuation_metrics = {
             "WACC": model.wacc(),
@@ -3056,6 +3233,40 @@ def main() -> None:
                 else:
                     summary_cols[idx].metric(label, f"{value:,.2f}")
                 idx += 1
+
+        download_container = st.container()
+        excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
+        excel_bytes = excel_map.get(scenario_label)
+        key_suffix = _scenario_key_suffix(scenario_label)
+
+        with download_container:
+            st.markdown("#### Excel Model Download")
+            if not excel_bytes:
+                if st.button(
+                    "Prepare Excel Model",
+                    key=f"prepare_excel_{key_suffix}",
+                ):
+                    with st.spinner("Preparing Excel workbook..."):
+                        excel_bytes = _generate_excel_bytes(model, results, scenario_label)
+                    excel_map[scenario_label] = excel_bytes
+                    st.session_state.excel_bytes_map = excel_map
+            if excel_bytes:
+                st.download_button(
+                    "Download Excel Model",
+                    data=excel_bytes,
+                    file_name="Goat_Farm_Financial_Model.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_excel_{key_suffix}",
+                )
+                if st.button(
+                    "Clear Prepared Excel",
+                    key=f"clear_excel_{key_suffix}",
+                ):
+                    excel_map.pop(scenario_label, None)
+                    st.session_state.excel_bytes_map = excel_map
+                    excel_bytes = None
+            if not excel_bytes:
+                st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
         st.subheader("KPIs (Annual)")
         st.dataframe(kpis.mul(100).round(2))
