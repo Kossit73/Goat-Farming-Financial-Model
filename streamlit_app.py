@@ -66,6 +66,13 @@ DIRECT_WAGE_DEFAULT_ITEMS = [
 ]
 
 
+ADMIN_WAGE_DEFAULT_ITEMS = [
+    ("Administration", 0.4),
+    ("Finance & Compliance", 0.35),
+    ("Sales & Support", 0.25),
+]
+
+
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
     if "Period" not in core.columns or "Revenue" not in core.columns:
         return {}
@@ -287,6 +294,181 @@ def _aggregate_direct_wages(
         result["Direct Wages"] = result["Direct Wages"].astype(float)
     else:
         result["Direct Wages"] = 0.0
+    return result
+
+
+# ---------- Admin wages helpers ----------
+
+
+def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
+    totals = pd.to_numeric(core.get("Admin Wages"), errors="coerce")
+    total_values = totals.tolist() if totals is not None else []
+
+    rows: list[dict[str, object]] = []
+    if periods:
+        for idx, period in enumerate(periods):
+            total = total_values[idx] if idx < len(total_values) else np.nan
+            for function, share in ADMIN_WAGE_DEFAULT_ITEMS:
+                amount = (
+                    total * share if total is not None and not np.isnan(total) else np.nan
+                )
+                rows.append(
+                    {
+                        "Period": period,
+                        "Function": function,
+                        "Amount": amount,
+                    }
+                )
+
+    if not rows:
+        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        rows.append({"Period": today, "Function": "Admin Wage", "Amount": np.nan})
+
+    return pd.DataFrame(rows)
+
+
+def _ensure_admin_wage_table(
+    table: Optional[pd.DataFrame], core: pd.DataFrame
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        return _default_admin_wage_table(core)
+
+    work = table.copy()
+    if "Admin Wages" in work.columns and "Amount" not in work.columns:
+        periods = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+        totals = pd.to_numeric(work.get("Admin Wages"), errors="coerce")
+        reconstructed: list[dict[str, object]] = []
+        for idx, period in enumerate(periods):
+            total = totals.iloc[idx] if idx < len(totals) else np.nan
+            for function, share in ADMIN_WAGE_DEFAULT_ITEMS:
+                amount = (
+                    total * share if total is not None and not np.isnan(total) else np.nan
+                )
+                reconstructed.append(
+                    {
+                        "Period": period,
+                        "Function": function,
+                        "Amount": amount,
+                    }
+                )
+        work = pd.DataFrame(reconstructed)
+
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    if "Function" not in work.columns and "Role" in work.columns:
+        work["Function"] = work["Role"]
+    work["Function"] = work.get("Function", "").astype(str).str.strip()
+    work.loc[work["Function"] == "", "Function"] = "Admin Wage"
+    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+
+    work = work.dropna(how="all")
+    work = work[(work["Function"].notna()) | (work["Amount"].notna())]
+    work = work.dropna(subset=["Period"], how="all")
+
+    if work.empty:
+        return _default_admin_wage_table(core)
+
+    return work.reset_index(drop=True)
+
+
+def _add_admin_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_admin_wage_table(table, core)
+    periods = work.get("Period", pd.Series(dtype=str))
+    default_period = None
+    if not periods.empty:
+        default_period = periods.iloc[-1]
+    else:
+        core_periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+        if not core_periods.empty:
+            default_period = core_periods.iloc[-1]
+    if default_period is None or pd.isna(default_period):
+        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+
+    new_row = {
+        "Period": default_period,
+        "Function": f"Admin Wage Item {len(work) + 1}",
+        "Amount": np.nan,
+    }
+    return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
+
+
+def _remove_admin_wage_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
+    if table is None or table.empty:
+        return table
+    work = table.copy()
+    if 0 <= index < len(work):
+        work = work.drop(index=index).reset_index(drop=True)
+    return work
+
+
+def _apply_admin_wage_increment(
+    table: pd.DataFrame, increment_pct: float, target_function: Optional[str] = None
+) -> pd.DataFrame:
+    if table is None or table.empty or increment_pct == 0:
+        return table
+
+    work = table.copy()
+    work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
+    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+    work["Function"] = work.get("Function", "").astype(str).str.strip()
+
+    increment_factor = 1 + (increment_pct / 100.0)
+
+    def _should_update(function: str) -> bool:
+        if not target_function or target_function == "All functions":
+            return True
+        return function == target_function
+
+    for function, group in work.groupby("Function", dropna=False):
+        function_key = function if isinstance(function, str) else ""
+        if not _should_update(function_key):
+            continue
+        group = group.sort_values("Period_dt", kind="stable")
+        prev_amount = None
+        prev_year = None
+        for idx, row in group.iterrows():
+            period_dt = row["Period_dt"]
+            amount = row["Amount"]
+            if pd.isna(period_dt):
+                continue
+            year = int(period_dt.year)
+            if prev_amount is None and not pd.isna(amount):
+                prev_amount = amount
+                prev_year = year
+                continue
+            if prev_amount is None or prev_year is None:
+                continue
+            year_gap = year - prev_year
+            if year_gap <= 0:
+                if not pd.isna(amount):
+                    prev_amount = amount
+                    prev_year = year
+                continue
+            new_amount = prev_amount * (increment_factor ** year_gap)
+            work.at[idx, "Amount"] = new_amount
+            prev_amount = new_amount
+            prev_year = year
+
+    return work.drop(columns="Period_dt")
+
+
+def _aggregate_admin_wages(
+    table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    work = _ensure_admin_wage_table(table, core)
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+    summary = (
+        work.groupby("Period", as_index=False)["Amount"].sum(min_count=1)
+        if not work.empty
+        else pd.DataFrame(columns=["Period", "Amount"])
+    )
+    result = pd.DataFrame({"Period": periods})
+    summary_map = dict(zip(summary.get("Period", []), summary.get("Amount", [])))
+    result["Admin Wages"] = result["Period"].map(summary_map)
+    if result["Admin Wages"].notna().any():
+        result["Admin Wages"] = result["Admin Wages"].astype(float)
+    else:
+        result["Admin Wages"] = 0.0
     return result
 
 
@@ -1025,6 +1207,9 @@ def _default_schedule_components(
         if name == "Direct Wages Schedule":
             detail_tables[name] = _default_direct_wage_table(base)
             continue
+        if name == "Admin Wages Schedule":
+            detail_tables[name] = _default_admin_wage_table(base)
+            continue
         detail_cols = ["Period"] + [col for col in cols if col in base.columns]
         detail_tables[name] = base[detail_cols].copy()
 
@@ -1650,6 +1835,105 @@ def main() -> None:
 
                     st.markdown("##### Direct Wages Summary")
                     st.dataframe(aggregated_direct)
+                elif name == "Admin Wages Schedule":
+                    st.markdown("#### Admin Wages Schedule")
+                    st.caption(
+                        "Detail administrative wage items, add or remove roles, and apply yearly increments to keep overhead "
+                        "assumptions in sync with your operating plan. Totals automatically roll into the income statement."
+                    )
+
+                    admin_table = _ensure_admin_wage_table(
+                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        st.session_state.core_schedule,
+                    )
+
+                    st.session_state.setdefault("admin_wage_remove_choice", "-- Select Row --")
+                    st.session_state.setdefault("admin_wage_increment_target", "All functions")
+                    st.session_state.setdefault("admin_wage_increment_pct", 0.0)
+
+                    add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+                    if add_col.button("Add Row", key="admin_wage_add_row"):
+                        admin_table = _add_admin_wage_row(
+                            admin_table, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = admin_table
+
+                    option_labels: list[str] = []
+                    option_index: Dict[str, int] = {}
+                    for idx_row, row in admin_table.iterrows():
+                        label_period = row.get("Period") or "Unknown Period"
+                        label_role = row.get("Function") or "Function"
+                        label = f"{label_period} – {label_role}"
+                        option_labels.append(label)
+                        option_index[label] = idx_row
+
+                    remove_select_col.selectbox(
+                        "Select row",
+                        options=["-- Select Row --"] + option_labels,
+                        key="admin_wage_remove_choice",
+                    )
+                    if remove_btn_col.button("Remove Row", key="admin_wage_remove_row"):
+                        choice = st.session_state.get("admin_wage_remove_choice")
+                        if choice in option_index:
+                            admin_table = _remove_admin_wage_row(
+                                admin_table, option_index[choice]
+                            )
+                            st.session_state.detail_schedules[name] = admin_table
+                            st.session_state.admin_wage_remove_choice = "-- Select Row --"
+
+                    inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
+                    target_options = ["All functions"] + sorted(
+                        {
+                            str(function)
+                            for function in admin_table.get("Function", pd.Series(dtype=str))
+                            .dropna()
+                            .unique()
+                            .tolist()
+                            if str(function).strip()
+                        }
+                    )
+                    inc_target_col.selectbox(
+                        "Apply increment to",
+                        options=target_options,
+                        key="admin_wage_increment_target",
+                    )
+                    inc_pct_col.number_input(
+                        "Yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="admin_wage_increment_pct",
+                    )
+                    if inc_btn_col.button("Apply increment", key="admin_wage_apply_increment"):
+                        admin_table = _apply_admin_wage_increment(
+                            admin_table,
+                            st.session_state.get("admin_wage_increment_pct", 0.0),
+                            st.session_state.get("admin_wage_increment_target"),
+                        )
+                        st.session_state.detail_schedules[name] = admin_table
+
+                    editor = st.data_editor(
+                        admin_table,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key="schedule_admin_wages_schedule",
+                        column_config={
+                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
+                        },
+                    )
+                    admin_table = _ensure_admin_wage_table(
+                        editor, st.session_state.core_schedule
+                    )
+                    st.session_state.detail_schedules[name] = admin_table
+
+                    aggregated_admin = _aggregate_admin_wages(
+                        admin_table, st.session_state.core_schedule
+                    )
+                    detail_tables_for_run[name] = aggregated_admin
+
+                    st.markdown("##### Admin Wages Summary")
+                    st.dataframe(aggregated_admin)
                 else:
                     table = st.data_editor(
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
