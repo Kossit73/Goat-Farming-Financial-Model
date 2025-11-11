@@ -228,7 +228,7 @@ def main() -> None:
     include_valuation = False
     run_clicked = False
 
-    tabs = st.tabs(["Input Schedule", "Assumptions"])
+    tabs = st.tabs(["Input Schedule", "Assumptions", "Financials"])
 
     with tabs[0]:
         st.subheader("Input Schedule")
@@ -340,6 +340,54 @@ def main() -> None:
     # ensure supplementary_tables defined even if tabs[0] not executed (Streamlit rerun)
     supplementary_tables = locals().get("supplementary_tables", {})
 
+    with tabs[2]:
+        st.subheader("Financial Statements")
+        if st.session_state.results is None:
+            st.info("Run the scenario to generate the financial statements.")
+        else:
+            results = st.session_state.results
+            financial_tabs = st.tabs(
+                [
+                    "Statement of Financial Performance",
+                    "Statement of Financial Position",
+                    "Statement of Cash Flow",
+                ]
+            )
+
+            with financial_tabs[0]:
+                try:
+                    sop_base = results["model"].statement_of_financial_performance(
+                        results["base"], annual=True
+                    )
+                    sop_scenario = results["model"].statement_of_financial_performance(
+                        results["scenario"], annual=True
+                    )
+                    st.dataframe(
+                        pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
+                        .swaplevel(axis=1)
+                        .sort_index(axis=1, level=0)
+                    )
+                except ValueError as exc:
+                    st.info(str(exc))
+
+            with financial_tabs[1]:
+                try:
+                    sofp = results["model"].statement_of_financial_position(
+                        results["base"], annual=True
+                    )
+                    st.dataframe(sofp)
+                except ValueError as exc:
+                    st.info(str(exc))
+
+            with financial_tabs[2]:
+                try:
+                    socf = results["model"].statement_of_cash_flow(
+                        results["base"], annual=True
+                    )
+                    st.dataframe(socf)
+                except ValueError as exc:
+                    st.info(str(exc))
+
     if run_clicked:
         try:
             schedule_df = _prepare_schedule(schedule_editor)
@@ -443,29 +491,18 @@ def main() -> None:
         st.subheader("KPIs (Annual)")
         st.dataframe(kpis.mul(100).round(2))
 
-    display_tabs = st.tabs(
-        [
-            "Dashboard",
-            "Statement of Financial Performance",
-            "Statement of Financial Position",
-            "Statement of Cash Flow",
-            "Advanced Analytics",
-            "Supplementary Schedules",
-        ]
-    )
+    display_tabs = st.tabs([
+        "Dashboard",
+        "Advanced Analytics",
+        "Supplementary Schedules",
+    ])
 
     if results is None:
         with display_tabs[0]:
             st.info("Run the scenario to populate the dashboard charts.")
         with display_tabs[1]:
-            st.info("Run the scenario to generate the Statement of Financial Performance.")
-        with display_tabs[2]:
-            st.info("Run the scenario to generate the Statement of Financial Position.")
-        with display_tabs[3]:
-            st.info("Run the scenario to generate the Statement of Cash Flow.")
-        with display_tabs[4]:
             st.info("Run the scenario to view advanced analytics.")
-        with display_tabs[5]:
+        with display_tabs[2]:
             st.info("Supplementary schedules will appear once a scenario has been run.")
         return
 
@@ -505,34 +542,6 @@ def main() -> None:
 
     with display_tabs[1]:
         try:
-            sop_base = model.statement_of_financial_performance(base, annual=True)
-            sop_scenario = model.statement_of_financial_performance(
-                scenario, annual=True
-            )
-            st.dataframe(
-                pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
-                .swaplevel(axis=1)
-                .sort_index(axis=1, level=0)
-            )
-        except ValueError as exc:
-            st.info(str(exc))
-
-    with display_tabs[2]:
-        try:
-            sofp = model.statement_of_financial_position(base, annual=True)
-            st.dataframe(sofp)
-        except ValueError as exc:
-            st.info(str(exc))
-
-    with display_tabs[3]:
-        try:
-            socf = model.statement_of_cash_flow(base, annual=True)
-            st.dataframe(socf)
-        except ValueError as exc:
-            st.info(str(exc))
-
-    with display_tabs[4]:
-        try:
             adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
             adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
             st.markdown("#### Monthly Advanced Analytics")
@@ -542,7 +551,7 @@ def main() -> None:
         except ValueError as exc:
             st.info(str(exc))
 
-    with display_tabs[5]:
+    with display_tabs[2]:
         supplementary_render = results.get("supplementary", {})
         for name in [
             "Capitalisation Table",
