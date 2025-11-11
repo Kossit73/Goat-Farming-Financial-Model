@@ -7,6 +7,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 import streamlit as st
+from pandas.tseries.offsets import MonthEnd
 
 from goat_financial_model import GoatModel, InputSchedule
 
@@ -21,6 +22,167 @@ DETAIL_SCHEDULE_COLUMNS = {
     "Admin Wages Schedule": ["Admin Wages"],
     "Capex Schedule": ["Capex"],
 }
+
+
+def _normalize_period(series: pd.Series) -> pd.Series:
+    periods = pd.to_datetime(series, errors="coerce")
+    formatted = periods.dt.strftime("%Y-%m-%d")
+    return formatted.where(~periods.isna(), series.astype(str))
+
+
+def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
+    if "Period" not in core.columns or "Revenue" not in core.columns:
+        return {}
+    periods = _normalize_period(core["Period"])
+    revenue = pd.to_numeric(core["Revenue"], errors="coerce")
+    return {
+        period: float(value)
+        for period, value in zip(periods, revenue)
+        if period and not np.isnan(value)
+    }
+
+
+def _sync_cogs_table(
+    table: pd.DataFrame, core: pd.DataFrame, default_pct: float = 45.0
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        return table
+
+    work = table.copy()
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+
+    if "COGS" not in work.columns:
+        work["COGS"] = np.nan
+    if "COGS %" not in work.columns:
+        work["COGS %"] = np.nan
+
+    revenue_lookup = _revenue_map(core)
+    revenue_series = work["Period"].map(revenue_lookup)
+    amount = pd.to_numeric(work["COGS"], errors="coerce")
+    percent = pd.to_numeric(work["COGS %"], errors="coerce")
+
+    # Treat fractions (0.45) as percentages (45%)
+    fraction_mask = percent.notna() & (percent <= 1.0)
+    percent.loc[fraction_mask] = percent.loc[fraction_mask] * 100.0
+
+    percent_provided = percent.notna()
+    amount_provided = amount.notna()
+    revenue_available = revenue_series.notna() & (revenue_series != 0)
+
+    # Where amount is provided alongside revenue, derive the percentage
+    mask = revenue_available & amount_provided
+    percent.loc[mask] = (amount.loc[mask] / revenue_series.loc[mask]) * 100.0
+
+    # Where only the percentage is provided, back into the amount
+    mask = revenue_available & percent_provided & ~amount_provided
+    amount.loc[mask] = revenue_series.loc[mask] * (percent.loc[mask] / 100.0)
+
+    # Where neither is supplied but revenue exists, fall back to default
+    mask = revenue_available & ~amount_provided & ~percent_provided
+    amount.loc[mask] = revenue_series.loc[mask] * (default_pct / 100.0)
+    percent.loc[mask] = default_pct
+
+    work["COGS"] = amount
+    work["COGS %"] = percent
+
+    ordered_cols = ["Period", "COGS %", "COGS"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _ensure_cogs_schedule(
+    table: Optional[pd.DataFrame], core: pd.DataFrame, default_pct: float = 45.0
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        base_periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+        table = pd.DataFrame({"Period": base_periods, "COGS": np.nan})
+
+    return _sync_cogs_table(table, core, default_pct=default_pct)
+
+
+def _apply_cogs_percentage(
+    table: pd.DataFrame, core: pd.DataFrame, percent: float
+) -> pd.DataFrame:
+    work = table.copy()
+    work["COGS %"] = percent
+    return _sync_cogs_table(work, core, default_pct=percent)
+
+
+def _apply_yearly_increment(
+    table: pd.DataFrame, core: pd.DataFrame, increment_pct: float, default_pct: float
+) -> pd.DataFrame:
+    if table is None or table.empty or increment_pct == 0:
+        return table
+
+    work = _sync_cogs_table(table, core, default_pct=default_pct)
+    temp = work.copy()
+    temp["__period_dt"] = pd.to_datetime(temp["Period"], errors="coerce")
+    temp = temp.sort_values("__period_dt", kind="stable")
+
+    increment_factor = 1 + (increment_pct / 100.0)
+    current_pct = None
+    current_year = None
+
+    for idx, row in temp.iterrows():
+        period_dt = row["__period_dt"]
+        pct_value = row["COGS %"]
+        if pd.isna(period_dt):
+            continue
+        if current_pct is None:
+            current_pct = default_pct if pd.isna(pct_value) else float(pct_value)
+            current_year = period_dt.year
+            temp.at[idx, "COGS %"] = current_pct
+            continue
+
+        year_gap = period_dt.year - current_year if current_year is not None else 0
+        if year_gap > 0:
+            current_pct = current_pct * (increment_factor ** year_gap)
+            current_year = period_dt.year
+        temp.at[idx, "COGS %"] = current_pct
+
+    temp = temp.drop(columns="__period_dt")
+    work.loc[temp.index, "COGS %"] = temp["COGS %"]
+    return _sync_cogs_table(work, core, default_pct=default_pct)
+
+
+def _add_cogs_row(
+    table: pd.DataFrame, core: pd.DataFrame, default_pct: float
+) -> pd.DataFrame:
+    work = _sync_cogs_table(table, core, default_pct=default_pct)
+    periods = pd.to_datetime(work["Period"], errors="coerce")
+
+    if periods.notna().any():
+        last_period = periods.max()
+    else:
+        core_periods = pd.to_datetime(core.get("Period", pd.Series(dtype=str)), errors="coerce")
+        if core_periods.notna().any():
+            last_period = core_periods.max()
+        else:
+            last_period = pd.Timestamp.today() + MonthEnd(0)
+
+    next_period = (last_period + MonthEnd(1)) if last_period is not None else pd.Timestamp.today() + MonthEnd(0)
+    existing_periods = set(work["Period"].astype(str))
+    while next_period.strftime("%Y-%m-%d") in existing_periods:
+        next_period += MonthEnd(1)
+
+    next_period_str = next_period.strftime("%Y-%m-%d")
+
+    revenue_lookup = _revenue_map(core)
+    revenue = revenue_lookup.get(next_period_str)
+
+    last_pct_series = pd.to_numeric(work.get("COGS %"), errors="coerce").dropna()
+    pct_value = float(last_pct_series.iloc[-1]) if not last_pct_series.empty else default_pct
+    amount = revenue * (pct_value / 100.0) if revenue is not None else np.nan
+
+    new_row = {"Period": next_period_str, "COGS %": pct_value, "COGS": amount}
+    return _sync_cogs_table(pd.concat([work, pd.DataFrame([new_row])], ignore_index=True), core, default_pct=pct_value)
+
+
+def _remove_cogs_row(table: pd.DataFrame, period: str) -> pd.DataFrame:
+    if table is None or table.empty:
+        return table
+    mask = table["Period"].astype(str) != str(period)
+    return table.loc[mask].reset_index(drop=True)
 
 
 def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
@@ -447,14 +609,117 @@ def main() -> None:
 
         for idx, name in enumerate(schedule_tab_names[1:], start=1):
             with schedule_tabs[idx]:
-                table = st.data_editor(
-                    st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key=f"schedule_{name.lower().replace(' ', '_')}",
-                )
-                st.session_state.detail_schedules[name] = table
-                detail_tables_for_run[name] = table
+                if name == "COGS Schedule":
+                    st.markdown("#### Cost of Goods Sold Schedule")
+                    st.caption(
+                        "Adjust COGS as a percentage of revenue, add or remove periods, and apply "
+                        "automatic yearly increments. Amounts update automatically when revenue is available."
+                    )
+
+                    cogs_table = _ensure_cogs_schedule(
+                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        st.session_state.core_schedule,
+                    )
+
+                    inferred_pct = pd.to_numeric(
+                        cogs_table.get("COGS %"), errors="coerce"
+                    )
+                    base_pct = (
+                        float(inferred_pct.dropna().iloc[0])
+                        if inferred_pct.notna().any()
+                        else 45.0
+                    )
+
+                    st.session_state.setdefault("cogs_pct_input", round(base_pct, 2))
+                    st.session_state.setdefault("cogs_increment_pct", 0.0)
+                    st.session_state.setdefault("cogs_remove_choice", "Select a period")
+
+                    controls = st.columns((1, 1, 1, 1))
+
+                    pct_input = controls[0].number_input(
+                        "Default COGS %",
+                        min_value=0.0,
+                        max_value=200.0,
+                        step=0.1,
+                        key="cogs_pct_input",
+                    )
+                    if controls[0].button("Apply % to all rows", key="cogs_apply_pct"):
+                        cogs_table = _apply_cogs_percentage(
+                            cogs_table, st.session_state.core_schedule, pct_input
+                        )
+                        st.session_state.detail_schedules[name] = cogs_table
+
+                    increment_input = controls[1].number_input(
+                        "Yearly increment %",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="cogs_increment_pct",
+                    )
+                    if controls[1].button(
+                        "Apply yearly increment", key="cogs_apply_increment"
+                    ):
+                        cogs_table = _apply_yearly_increment(
+                            cogs_table,
+                            st.session_state.core_schedule,
+                            increment_input,
+                            default_pct=pct_input,
+                        )
+                        st.session_state.detail_schedules[name] = cogs_table
+
+                    if controls[2].button("Add Row", key="cogs_add_row"):
+                        cogs_table = _add_cogs_row(
+                            cogs_table,
+                            st.session_state.core_schedule,
+                            default_pct=pct_input,
+                        )
+                        st.session_state.detail_schedules[name] = cogs_table
+
+                    remove_options = ["Select a period"] + cogs_table["Period"].astype(str).tolist()
+                    st.session_state.cogs_remove_choice = controls[3].selectbox(
+                        "Remove row",
+                        options=remove_options,
+                        key="cogs_remove_choice",
+                    )
+                    if controls[3].button("Remove", key="cogs_remove_row"):
+                        selection = st.session_state.get("cogs_remove_choice")
+                        if selection and selection in cogs_table["Period"].astype(str).values:
+                            cogs_table = _remove_cogs_row(cogs_table, selection)
+                            st.session_state.detail_schedules[name] = cogs_table
+                            st.session_state.cogs_remove_choice = "Select a period"
+
+                    cogs_table = _sync_cogs_table(
+                        cogs_table, st.session_state.core_schedule, default_pct=pct_input
+                    )
+
+                    editor = st.data_editor(
+                        cogs_table,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        column_config={
+                            "COGS %": st.column_config.NumberColumn(
+                                "COGS % of Revenue", format="%.2f %%", step=0.1
+                            ),
+                            "COGS": st.column_config.NumberColumn(
+                                "COGS Amount", format="%.2f"
+                            ),
+                        },
+                        key="schedule_cogs_schedule",
+                    )
+                    synced_editor = _sync_cogs_table(
+                        editor, st.session_state.core_schedule, default_pct=pct_input
+                    )
+                    st.session_state.detail_schedules[name] = synced_editor
+                    detail_tables_for_run[name] = synced_editor
+                else:
+                    table = st.data_editor(
+                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key=f"schedule_{name.lower().replace(' ', '_')}",
+                    )
+                    st.session_state.detail_schedules[name] = table
+                    detail_tables_for_run[name] = table
 
         st.markdown("### Supplementary Tables")
         for name, default_table in st.session_state.supplementary.items():
