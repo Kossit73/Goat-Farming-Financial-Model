@@ -907,7 +907,7 @@ class GoatModel:
         df: Optional[pd.DataFrame] = None,
         window: int = 3,
         annual: bool = False,
-    ) -> pd.DataFrame:
+    ) -> Dict[str, object]:
         if df is None:
             df = self.to_tidy()
 
@@ -920,37 +920,39 @@ class GoatModel:
         if not required:
             raise ValueError("Insufficient data to compute advanced analytics.")
 
-        work = df[required].rename(
-            columns={
-                rev_col: "Revenue",
-                gm_col: "Gross Margin",
-                ebitda_col: "EBITDA",
-                npat_col: "NPAT",
+        work = pd.DataFrame(
+            {
+                "Revenue": df[rev_col],
+                "Gross Margin": df[gm_col],
+                "EBITDA": df[ebitda_col],
+                "NPAT": df[npat_col],
             }
         )
+        for candidate in (
+            "Variable Expenses",
+            "Direct Wages",
+            "Fixed Expenses",
+            "Admin Wages",
+            "Depreciation & Amortization",
+            "Interest Expense",
+            "Tax Expense",
+            "Capex",
+            "Unlevered Free Cash Flow",
+        ):
+            if candidate in df:
+                work[candidate] = df[candidate]
 
-        if annual:
-            work = work.groupby(work.index.year).sum(min_count=1)
+        from .advanced import run_advanced_analytics
 
-        out = pd.DataFrame(index=work.index)
-        out["Revenue Growth %"] = work["Revenue"].pct_change()
-        out["Rolling Revenue (window)"] = work["Revenue"].rolling(window, min_periods=1).mean()
-        out["Gross Margin %"] = self._safe_divide(work["Gross Margin"], work["Revenue"])
-        out["EBITDA Margin %"] = self._safe_divide(work["EBITDA"], work["Revenue"])
-        out["Net Margin %"] = self._safe_divide(work["NPAT"], work["Revenue"])
-        if "Variable Expenses" in df:
-            var = df["Variable Expenses"]
-            var = var.groupby(var.index.year).sum(min_count=1) if annual else var
-            out["Variable Cost %"] = self._safe_divide(var, work["Revenue"])
-        if "Fixed Expenses" in df:
-            fixed = df["Fixed Expenses"]
-            fixed = fixed.groupby(fixed.index.year).sum(min_count=1) if annual else fixed
-            out["Fixed Cost %"] = self._safe_divide(fixed, work["Revenue"])
-        if "EBITDA" in work:
-            out["EBITDA Conversion"] = self._safe_divide(
-                work["EBITDA"], work["Gross Margin"]
-            )
-        return out
+        results = run_advanced_analytics(work, window=window, annual=annual)
+        payload: Dict[str, object] = {}
+        for key, analysis in results.items():
+            payload[key] = {
+                "title": analysis.title,
+                "description": analysis.description,
+                "tables": analysis.tables,
+            }
+        return payload
 
     def to_tidy(self) -> pd.DataFrame:
         return self.data.copy()

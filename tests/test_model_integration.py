@@ -122,12 +122,11 @@ def test_scenario_and_statements_pipeline():
     assert "Total Liabilities & Equity" in position.columns
 
     analytics = model.advanced_analytics(scenario, window=3, annual=True)
-    assert {
-        "Revenue Growth %",
-        "Gross Margin %",
-        "EBITDA Margin %",
-        "Net Margin %",
-    }.issubset(analytics.columns)
+    assert {"sensitivity", "monte_carlo", "goal_seek"}.issubset(analytics.keys())
+    sensitivity = analytics["sensitivity"]["tables"]["Impact Summary"]
+    assert {"Revenue", "EBITDA", "NPAT"}.issubset(sensitivity.columns)
+    monte_carlo = analytics["monte_carlo"]["tables"]["Summary Statistics"]
+    assert "Mean" in monte_carlo.index
 
     kpis = model.kpis(scenario, annual=True)
     assert "Gross Margin %" in kpis.columns

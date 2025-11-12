@@ -3524,10 +3524,28 @@ def main() -> None:
             try:
                 adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
                 adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
-                st.markdown("#### Monthly Advanced Analytics")
-                st.dataframe(adv_monthly)
-                st.markdown("#### Annual Advanced Analytics")
-                st.dataframe(adv_annual)
+
+                def _render_analytics(block_name: str, payload: Dict[str, object]) -> None:
+                    st.markdown(f"#### {block_name} Advanced Analytics")
+                    for key, item in payload.items():
+                        title = item.get("title", key.replace("_", " ").title())
+                        description = item.get("description", "")
+                        tables = item.get("tables", {})
+                        with st.expander(title, expanded=False):
+                            if description:
+                                st.caption(description)
+                            if isinstance(tables, dict):
+                                for table_name, table in tables.items():
+                                    st.markdown(f"**{table_name}**")
+                                    if isinstance(table, pd.DataFrame) and not table.empty:
+                                        st.dataframe(table)
+                                    else:
+                                        st.info("No data available for this table.")
+                            else:
+                                st.info("No tables available for this analysis.")
+
+                _render_analytics("Monthly", adv_monthly)
+                _render_analytics("Annual", adv_annual)
             except ValueError as exc:
                 st.info(str(exc))
 
