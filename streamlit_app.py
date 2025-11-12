@@ -5493,14 +5493,14 @@ def main() -> None:
             if not excel_bytes:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
-        st.subheader("KPIs (Annual)")
-        st.dataframe(kpis.mul(100).round(2))
-
     with tabs[3]:
         st.subheader("Dashboard")
         if results is None:
             st.info("Run the scenarios to populate the dashboard charts.")
         else:
+            st.subheader("KPIs (Annual)")
+            st.dataframe(kpis.mul(100).round(2))
+
             scenario = results["scenario"]
             break_even = results["break_even"]
             col1, col2 = st.columns(2)
