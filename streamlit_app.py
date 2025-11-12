@@ -2084,9 +2084,6 @@ def main() -> None:
         st.session_state.results = None
 
     ai_payload = st.session_state.setdefault("ai_payload", {})
-    with st.sidebar:
-        st.header("AI & Machine Learning")
-        _render_ai_settings(ai_payload, st.sidebar)
 
     milk_price = 0
     feed_cost = 0
@@ -2111,6 +2108,9 @@ def main() -> None:
 
     with tabs[0]:
         st.subheader("Input Schedule")
+        st.markdown("### AI & Machine Learning")
+        _render_ai_settings(ai_payload)
+
         schedule_tab_names = [
             "Core Schedule",
             "COGS Schedule",
