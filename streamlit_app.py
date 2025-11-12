@@ -16,6 +16,32 @@ from streamlit.delta_generator import DeltaGenerator
 from goat_financial_model import GoatModel, InputSchedule
 
 
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+except Exception:  # pragma: no cover - fallback for older Streamlit builds
+    get_script_run_ctx = None
+
+
+def _can_rerun() -> bool:
+    """Return True when the app is executing within a Streamlit runtime."""
+
+    if get_script_run_ctx is None:
+        return False
+    try:
+        return get_script_run_ctx() is not None
+    except Exception:  # pragma: no cover - defensive guard for API changes
+        return False
+
+
+def _maybe_rerun() -> None:
+    """Invoke Streamlit rerun when a runtime context is active."""
+
+    rerun_fn = getattr(st, "experimental_rerun", None) or getattr(st, "rerun", None)
+    if rerun_fn is None or not _can_rerun():
+        return
+    rerun_fn()
+
+
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 
 
@@ -178,7 +204,7 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
         st.session_state["ai_api_key"] = settings.get("api_key", "")
         _ai_settings_to_payload(settings, payload)
         st.session_state["ai_settings_saved"] = True
-        st.experimental_rerun()
+        _maybe_rerun()
 
 
 def _analytics_override_store() -> Dict[str, Any]:
@@ -4415,7 +4441,7 @@ def main() -> None:
                                                 )
                                             st.session_state.pop(editor_key, None)
                                             st.session_state[edit_flag_key] = False
-                                            st.experimental_rerun()
+                                            _maybe_rerun()
 
                                         if action_cols[1].button(
                                             "Cancel",
@@ -4423,7 +4449,7 @@ def main() -> None:
                                         ):
                                             st.session_state.pop(editor_key, None)
                                             st.session_state[edit_flag_key] = False
-                                            st.experimental_rerun()
+                                            _maybe_rerun()
 
                                         if action_cols[2].button(
                                             "Restore Original",
@@ -4437,7 +4463,7 @@ def main() -> None:
                                             )
                                             st.session_state.pop(editor_key, None)
                                             st.session_state[edit_flag_key] = False
-                                            st.experimental_rerun()
+                                            _maybe_rerun()
                                     else:
                                         st.dataframe(display_df)
                                         if override is not None:
@@ -4448,7 +4474,7 @@ def main() -> None:
                                             key=f"edit_{editor_key}",
                                         ):
                                             st.session_state[edit_flag_key] = True
-                                            st.experimental_rerun()
+                                            _maybe_rerun()
 
                                         if button_cols[1].button(
                                             "Clear Manual Override",
@@ -4461,7 +4487,7 @@ def main() -> None:
                                                 key,
                                                 table_name,
                                             )
-                                            st.experimental_rerun()
+                                            _maybe_rerun()
                             else:
                                 st.info("No tables available for this analysis.")
 
