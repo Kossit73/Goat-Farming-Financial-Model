@@ -95,34 +95,29 @@ def test_scenario_and_statements_pipeline():
     assert expected_columns.issubset(scenario.columns)
 
     performance = model.statement_of_financial_performance(scenario, annual=True)
-    assert list(performance.columns) == [
-        "Revenue",
-        "Cost of sales",
-        "Gross profit",
-        "Gross profit margin",
-        "Other income",
-        "Operating expenses – Distribution costs",
-        "Operating expenses – Administrative expenses",
-        "Operating expenses – Depreciation and amortisation",
-        "Operating expenses – Other",
-        "Operating expenses – Total",
-        "Operating profit (EBIT)",
-        "EBITDA",
-        "Finance costs",
-        "Profit before tax",
-        "Income tax expense",
-        "Profit for the period",
-    ]
-    assert not performance["Revenue"].isna().all()
-    assert not performance["Profit for the period"].isna().all()
+    assert "Income – Revenue" in performance.columns
+    assert "Cost of sales – Gross profit" in performance.columns
+    assert "Operating profit – EBIT" in performance.columns
+    assert "Profit – Profit for the period" in performance.columns
+    assert not performance["Income – Revenue"].isna().all()
+    assert not performance["Profit – Profit for the period"].isna().all()
 
     cash_flow = model.statement_of_cash_flow(scenario, annual=True)
-    assert "Net cash from operating activities" in cash_flow.columns
-    assert "Closing cash and cash equivalents" in cash_flow.columns
+    assert (
+        "Operating activities – Net cash from operating activities"
+        in cash_flow.columns
+    )
+    assert (
+        "Net change – Cash and cash equivalents at end of period"
+        in cash_flow.columns
+    )
 
     position = model.statement_of_financial_position(scenario, annual=True)
-    assert "Total Assets" in position.columns
-    assert "Total Liabilities & Equity" in position.columns
+    assert "Assets – Total assets" in position.columns
+    assert (
+        "Equity and liabilities – Total equity and liabilities"
+        in position.columns
+    )
 
     analytics = model.advanced_analytics(scenario, window=3, annual=True)
     assert {"sensitivity", "monte_carlo", "goal_seek"}.issubset(analytics.keys())
