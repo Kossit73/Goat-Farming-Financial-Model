@@ -75,6 +75,7 @@ def test_build_scenario_suite_supports_custom_entries():
 def test_current_scenario_presets_respect_overrides():
     streamlit_app.st.session_state.pop("scenario_preset_tables", None)
     streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
+    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
 
     override_table = pd.DataFrame(
         {
@@ -99,6 +100,40 @@ def test_current_scenario_presets_respect_overrides():
 
     streamlit_app.st.session_state.pop("scenario_preset_tables", None)
     streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
+    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
+
+
+def test_scenario_preset_add_and_remove_variables():
+    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
+    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
+    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
+
+    base_table = streamlit_app._get_scenario_preset_table("Base Case Scenario")
+    assert "Milk price change (%)" in base_table["Driver"].tolist()
+
+    streamlit_app._remove_scenario_preset_driver(
+        "Base Case Scenario", "Milk price change (%)"
+    )
+
+    updated_table = streamlit_app._get_scenario_preset_table("Base Case Scenario")
+    assert "Milk price change (%)" not in updated_table["Driver"].tolist()
+
+    streamlit_app._add_scenario_preset_driver(
+        "Base Case Scenario", "Herd productivity change (%)", 4.0
+    )
+
+    refreshed_table = streamlit_app._get_scenario_preset_table("Base Case Scenario")
+    assert "Herd productivity change (%)" in refreshed_table["Driver"].tolist()
+
+    presets = streamlit_app._current_scenario_presets()
+    base_adjustments = presets["Base Case Scenario"]["adjustments"]
+
+    assert "Milk price change (%)" not in base_adjustments
+    assert base_adjustments["Herd productivity change (%)"] == 4.0
+
+    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
+    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
+    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
 
 
 def test_rebase_schedule_to_horizon_extends_periods():

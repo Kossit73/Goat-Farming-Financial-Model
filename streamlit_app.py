@@ -6,7 +6,7 @@ from copy import deepcopy
 from importlib.util import find_spec
 from io import BytesIO
 import re
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from copy import deepcopy
 
@@ -947,6 +947,59 @@ def _default_scenario_preset_table(name: str) -> pd.DataFrame:
     )
 
 
+def _scenario_preset_removed_store() -> Dict[str, List[str]]:
+    store = st.session_state.setdefault("scenario_preset_removed_drivers", {})
+    normalised: Dict[str, List[str]] = {}
+    updated = False
+
+    for name in SCENARIO_PRESETS.keys():
+        entries = store.get(name, [])
+        cleaned = sorted(
+            {
+                str(entry).casefold()
+                for entry in entries
+                if str(entry).strip()
+            }
+        )
+        normalised[name] = cleaned
+        if entries != cleaned:
+            updated = True
+
+    if set(store.keys()) != set(normalised.keys()):
+        updated = True
+
+    if updated:
+        st.session_state["scenario_preset_removed_drivers"] = normalised
+        store = normalised
+    else:
+        st.session_state["scenario_preset_removed_drivers"] = store
+
+    return store
+
+
+def _unmark_removed_scenario_drivers(name: str, drivers: Iterable[str]) -> None:
+    store = _scenario_preset_removed_store()
+    current = set(store.get(name, []))
+    lower_drivers = {str(driver).casefold() for driver in drivers if str(driver).strip()}
+    new_removed = sorted(current - lower_drivers)
+    if new_removed != sorted(current):
+        store[name] = new_removed
+        st.session_state["scenario_preset_removed_drivers"] = store
+
+
+def _mark_removed_scenario_driver(name: str, driver: str) -> None:
+    store = _scenario_preset_removed_store()
+    cleaned = str(driver).strip()
+    if not cleaned:
+        return
+    lowered = cleaned.casefold()
+    current = set(store.get(name, []))
+    if lowered not in current:
+        current.add(lowered)
+        store[name] = sorted(current)
+        st.session_state["scenario_preset_removed_drivers"] = store
+
+
 def _scenario_preset_tables_store() -> Dict[str, pd.DataFrame]:
     return st.session_state.setdefault("scenario_preset_tables", {})
 
@@ -969,10 +1022,15 @@ def _ensure_scenario_preset_table(
         work["Change %"] = np.nan
     work["Change %"] = pd.to_numeric(work.get("Change %"), errors="coerce")
 
+    removed_store = _scenario_preset_removed_store()
+    removed = set(removed_store.get(name, []))
+
     required_rows = []
     for _, row in default_table.iterrows():
         driver = str(row.get("Driver", "")).strip()
         if not driver:
+            continue
+        if driver.casefold() in removed:
             continue
         mask = work["Driver"].str.casefold() == driver.casefold()
         if not mask.any():
@@ -991,6 +1049,7 @@ def _ensure_scenario_preset_table(
     driver_order = [
         str(val).casefold()
         for val in default_table.get("Driver", pd.Series(dtype=str)).tolist()
+        if str(val).strip() and str(val).casefold() not in removed
     ]
     order_map = {driver: idx for idx, driver in enumerate(driver_order)}
     work["__order__"] = work["Driver"].str.casefold().map(order_map)
@@ -1005,7 +1064,9 @@ def _ensure_scenario_preset_table(
 
 def _set_scenario_preset_table(name: str, table: pd.DataFrame) -> None:
     store = _scenario_preset_tables_store()
-    store[name] = table.copy(deep=True)
+    store[name] = table.copy(deep=True).reset_index(drop=True)
+    drivers = store[name].get("Driver", pd.Series(dtype=str)).tolist()
+    _unmark_removed_scenario_drivers(name, drivers)
     st.session_state["scenario_preset_tables"] = store
 
 
@@ -1040,14 +1101,8 @@ def _set_scenario_preset_description(name: str, description: str) -> Optional[st
 def _scenario_preset_table_to_adjustments(
     name: str, table: pd.DataFrame
 ) -> Dict[str, float]:
-    base_adjustments = {
-        str(driver): float(value)
-        for driver, value in SCENARIO_PRESETS.get(name, {})
-        .get("adjustments", {})
-        .items()
-    }
-
     ensured = _ensure_scenario_preset_table(name, table)
+    adjustments: Dict[str, float] = {}
     for _, row in ensured.iterrows():
         driver = str(row.get("Driver", "")).strip()
         if not driver:
@@ -1055,8 +1110,52 @@ def _scenario_preset_table_to_adjustments(
         value = pd.to_numeric(pd.Series([row.get("Change %")]), errors="coerce").iloc[0]
         if pd.isna(value):
             continue
-        base_adjustments[driver] = float(value)
-    return base_adjustments
+        adjustments[driver] = float(value)
+
+    removed_store = _scenario_preset_removed_store()
+    removed = set(removed_store.get(name, []))
+    for driver in list(adjustments.keys()):
+        if driver.casefold() in removed:
+            adjustments.pop(driver, None)
+
+    return adjustments
+
+
+def _add_scenario_preset_driver(name: str, driver: str, change: float) -> None:
+    cleaned = str(driver).strip()
+    if not cleaned:
+        return
+
+    table = _get_scenario_preset_table(name)
+    mask = table["Driver"].str.casefold() == cleaned.casefold()
+    if mask.any():
+        table.loc[mask, "Change %"] = float(change)
+    else:
+        new_row = pd.DataFrame(
+            [{"Driver": cleaned, "Change %": float(change)}],
+            columns=table.columns,
+        )
+        table = pd.concat([table, new_row], ignore_index=True)
+
+    _set_scenario_preset_table(name, table)
+    _unmark_removed_scenario_drivers(name, [cleaned])
+    _reset_cached_results()
+
+
+def _remove_scenario_preset_driver(name: str, driver: str) -> None:
+    cleaned = str(driver).strip()
+    if not cleaned:
+        return
+
+    table = _get_scenario_preset_table(name)
+    mask = table["Driver"].str.casefold() == cleaned.casefold()
+    if not mask.any():
+        return
+
+    updated = table.loc[~mask].reset_index(drop=True)
+    _set_scenario_preset_table(name, updated)
+    _mark_removed_scenario_driver(name, cleaned)
+    _reset_cached_results()
 
 
 def _current_scenario_presets() -> Dict[str, Dict[str, Any]]:
@@ -1087,6 +1186,47 @@ def _render_scenario_preset_editors() -> None:
     for tab, name in zip(tabs, preset_names):
         with tab:
             table = _get_scenario_preset_table(name)
+
+            add_cols = st.columns([2, 1, 1])
+            driver_key = f"scenario_preset::{_scenario_key_suffix(name)}::new_driver"
+            change_key = f"scenario_preset::{_scenario_key_suffix(name)}::new_change"
+            if driver_key not in st.session_state:
+                st.session_state[driver_key] = ""
+            if change_key not in st.session_state:
+                st.session_state[change_key] = 0.0
+
+            new_driver = add_cols[0].text_input(
+                "Driver name",
+                key=driver_key,
+            )
+            new_change = add_cols[1].number_input(
+                "Change (%)",
+                key=change_key,
+                step=0.25,
+                format="%.2f",
+            )
+            if add_cols[2].button("Add variable", key=f"{driver_key}::add"):
+                _add_scenario_preset_driver(name, new_driver, float(new_change))
+                st.session_state[driver_key] = ""
+                st.session_state[change_key] = 0.0
+                _maybe_rerun()
+                return
+
+            remove_cols = st.columns([2, 1])
+            driver_options = table.get("Driver", pd.Series(dtype=str)).fillna("")
+            option_labels = [value for value in driver_options.astype(str).tolist() if value.strip()]
+            remove_key = f"scenario_preset::{_scenario_key_suffix(name)}::remove_choice"
+            remove_selection = remove_cols[0].selectbox(
+                "Select variable to remove",
+                options=["-- Select --"] + option_labels,
+                key=remove_key,
+            )
+            if remove_cols[1].button("Remove variable", key=f"{remove_key}::remove"):
+                if remove_selection and remove_selection != "-- Select --":
+                    _remove_scenario_preset_driver(name, remove_selection)
+                    st.session_state[remove_key] = "-- Select --"
+                    _maybe_rerun()
+                    return
 
             def _save(updated: pd.DataFrame, preset_name: str = name) -> None:
                 ensured = _ensure_scenario_preset_table(preset_name, updated)
