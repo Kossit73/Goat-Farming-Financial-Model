@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from io import BytesIO
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -412,6 +412,177 @@ def _render_row_input(
 
     display_value = "" if pd.isna(value) else str(value)
     return st.text_input(column, value=display_value, key=widget_key)
+
+
+def _schedule_edit_flag_key(identifier: str) -> str:
+    return f"schedule_edit::{identifier}"
+
+
+def _schedule_working_key(identifier: str) -> str:
+    return f"schedule_editor::{identifier}::working"
+
+
+def _schedule_meta_key(identifier: str) -> str:
+    return f"schedule_editor::{identifier}::meta"
+
+
+def _schedule_row_selector_key(identifier: str) -> str:
+    return f"schedule_editor::{identifier}::row"
+
+
+def _clear_schedule_editor_state(identifier: str) -> None:
+    """Remove any cached working copies for a schedule editor."""
+
+    st.session_state.pop(_schedule_working_key(identifier), None)
+    st.session_state.pop(_schedule_meta_key(identifier), None)
+    st.session_state.pop(_schedule_row_selector_key(identifier), None)
+
+
+def _default_value_for_dtype(dtype: pd.Series.dtype) -> Any:
+    if is_bool_dtype(dtype):
+        return False
+    if is_numeric_dtype(dtype):
+        return np.nan
+    return ""
+
+
+def _blank_row_like(df: pd.DataFrame) -> Dict[str, Any]:
+    """Return a dictionary representing a blank row for the dataframe."""
+
+    blanks: Dict[str, Any] = {}
+    for column in df.columns:
+        blanks[column] = _default_value_for_dtype(df[column].dtype)
+    return blanks
+
+
+def _render_schedule_row_editor(
+    identifier: str, table: pd.DataFrame, save_callback: Callable[[pd.DataFrame], None]
+) -> None:
+    """Render a row-focused editor for schedule dataframes."""
+
+    st.dataframe(table, use_container_width=True)
+
+    edit_flag_key = _schedule_edit_flag_key(identifier)
+    editing = st.session_state.get(edit_flag_key, False)
+    toggle_label = "Edit rows" if not editing else "Close row editor"
+    if st.button(toggle_label, key=f"{identifier}::toggle"):
+        if editing:
+            _clear_schedule_editor_state(identifier)
+        st.session_state[edit_flag_key] = not editing
+        _maybe_rerun()
+        return
+
+    editing = st.session_state.get(edit_flag_key, False)
+    if not editing:
+        return
+
+    editor_df, meta = _prepare_editor_table(table)
+    working_key = _schedule_working_key(identifier)
+    meta_key = _schedule_meta_key(identifier)
+
+    if working_key not in st.session_state:
+        st.session_state[working_key] = editor_df.copy(deep=True)
+        st.session_state[meta_key] = meta
+
+    working_df = st.session_state.get(working_key, editor_df.copy(deep=True))
+    stored_meta = st.session_state.get(meta_key, meta)
+
+    st.caption(
+        "Update one row at a time. Use the controls below to add new rows or remove the selected row."
+    )
+    st.dataframe(working_df, use_container_width=True)
+
+    template_df = working_df if not working_df.empty else editor_df
+
+    controls = st.columns(3)
+    if controls[0].button("Add row", key=f"{identifier}::add_row"):
+        blank_row = _blank_row_like(template_df)
+        new_row = pd.DataFrame([blank_row], columns=template_df.columns)
+        updated_df = pd.concat([working_df, new_row], ignore_index=True)
+        st.session_state[working_key] = updated_df
+        _maybe_rerun()
+        return
+
+    selector_key = _schedule_row_selector_key(identifier)
+    if working_df.empty:
+        selected_row = None
+        controls[1].write("No rows to delete.")
+    else:
+        selected_row = st.selectbox(
+            "Select a row to edit",
+            list(range(len(working_df))),
+            format_func=lambda idx: _format_row_label(working_df, idx),
+            key=selector_key,
+        )
+        if controls[1].button("Delete row", key=f"{identifier}::delete_row"):
+            if selected_row is not None and 0 <= selected_row < len(working_df):
+                updated_df = working_df.drop(index=selected_row).reset_index(drop=True)
+                st.session_state[working_key] = updated_df
+                _maybe_rerun()
+                return
+
+    if controls[2].button("Reset changes", key=f"{identifier}::reset"):
+        st.session_state[working_key] = editor_df.copy(deep=True)
+        st.session_state[meta_key] = meta
+        _maybe_rerun()
+        return
+
+    working_df = st.session_state.get(working_key, editor_df.copy(deep=True))
+
+    if working_df.empty:
+        st.info("There are no rows to edit. Add a new row to begin.")
+    else:
+        selected_row = st.session_state.get(selector_key, 0)
+        if selected_row >= len(working_df):
+            selected_row = 0
+            st.session_state[selector_key] = selected_row
+
+        dtype_map = working_df.dtypes.to_dict()
+        row_series = working_df.iloc[selected_row]
+
+        with st.form(f"{identifier}::row_form"):
+            updated_values: Dict[str, Any] = {}
+            for column in working_df.columns:
+                widget_key = f"{identifier}::{selected_row}::{column}"
+                updated_values[column] = _render_row_input(
+                    column, row_series[column], dtype_map[column], widget_key
+                )
+
+            submitted = st.form_submit_button("Apply row changes")
+            if submitted:
+                for column, raw_value in updated_values.items():
+                    coerced = _coerce_row_value(raw_value, dtype_map[column])
+                    working_df.iat[
+                        selected_row, working_df.columns.get_loc(column)
+                    ] = coerced
+                st.session_state[working_key] = working_df
+                _maybe_rerun()
+                return
+
+    action_cols = st.columns(3)
+    if action_cols[0].button("Save changes", key=f"{identifier}::save"):
+        try:
+            current_df = st.session_state.get(working_key, editor_df.copy(deep=True))
+            current_meta = st.session_state.get(meta_key, stored_meta)
+            restored = _restore_editor_table(current_df, current_meta)
+            save_callback(restored)
+            _clear_schedule_editor_state(identifier)
+            st.session_state[edit_flag_key] = False
+            _maybe_rerun()
+            return
+        except Exception as exc:  # pragma: no cover - user feedback path
+            action_cols[0].error(f"Unable to save changes: {exc}")
+
+    if action_cols[1].button("Discard edits", key=f"{identifier}::cancel"):
+        _clear_schedule_editor_state(identifier)
+        st.session_state[edit_flag_key] = False
+        _maybe_rerun()
+        return
+
+    if action_cols[2].button("Close editor", key=f"{identifier}::close"):
+        _clear_schedule_editor_state(identifier)
+        st.session_state[edit_flag_key] = False
+        _maybe_rerun()
 
 
 DETAIL_SCHEDULE_COLUMNS = {
@@ -2634,13 +2805,19 @@ def main() -> None:
         schedule_tabs = st.tabs(schedule_tab_names)
 
         with schedule_tabs[0]:
-            core_editor = st.data_editor(
+            core_table = st.session_state.get("core_schedule")
+            if not isinstance(core_table, pd.DataFrame):
+                core_table = pd.DataFrame()
+                st.session_state.core_schedule = core_table
+
+            _render_schedule_row_editor(
+                "core_schedule",
                 st.session_state.core_schedule,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="schedule_core",
+                lambda updated: st.session_state.__setitem__(
+                    "core_schedule", updated
+                ),
             )
-            st.session_state.core_schedule = core_editor
+            core_editor = st.session_state.core_schedule
             st.markdown("### Supplementary Tables")
             for name in list(st.session_state.supplementary.keys()):
                 if name == "Capitalisation Table":
@@ -2648,6 +2825,7 @@ def main() -> None:
                     cap_table = _ensure_capitalisation_table(
                         st.session_state.supplementary.get(name)
                     )
+                    st.session_state.supplementary[name] = cap_table
 
                     add_col, remove_select_col, remove_btn_col, inc_col_col, inc_pct_col = st.columns(
                         [1, 2, 1, 2, 2]
@@ -2656,6 +2834,8 @@ def main() -> None:
                     with add_col:
                         if st.button("Add Row", key="cap_table_add_row"):
                             cap_table = _add_capitalisation_row(cap_table)
+                            st.session_state.supplementary[name] = cap_table
+                            _clear_schedule_editor_state("supp::capitalisation_table")
 
                     option_labels = []
                     option_map: Dict[str, int] = {}
@@ -2689,6 +2869,8 @@ def main() -> None:
                             cap_table = _remove_capitalisation_row(
                                 cap_table, option_map[remove_choice]
                             )
+                            st.session_state.supplementary[name] = cap_table
+                            _clear_schedule_editor_state("supp::capitalisation_table")
 
                     with inc_col_col:
                         increment_column = st.selectbox(
@@ -2709,25 +2891,22 @@ def main() -> None:
                                 cap_table, increment_column, increment_pct
                             )
 
-                    cap_editor = st.data_editor(
-                        cap_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="supp_capitalisation_table",
-                        column_config={
-                            "Ownership %": st.column_config.NumberColumn(
-                                "Ownership %", format="%.2f", step=0.1
-                            ),
-                            "Investment": st.column_config.NumberColumn(
-                                "Investment", format="%.2f"
-                            ),
-                        },
+                            st.session_state.supplementary[name] = cap_table
+                            _clear_schedule_editor_state("supp::capitalisation_table")
+
+                    cap_table = st.session_state.supplementary[name]
+
+                    def _save_capitalisation(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_capitalisation_table(updated)
+                        st.session_state.supplementary[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "supp::capitalisation_table", cap_table, _save_capitalisation
                     )
 
-                    cap_table = _ensure_capitalisation_table(cap_editor)
-                    st.session_state.supplementary[name] = cap_table
-
-                    cleaned_cap = _clean_editor_table(cap_table)
+                    cleaned_cap = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
                     if cleaned_cap is not None:
                         supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
                     continue
@@ -2736,6 +2915,7 @@ def main() -> None:
                     capex_table = _ensure_capex_schedule(
                         st.session_state.supplementary.get(name)
                     )
+                    st.session_state.supplementary[name] = capex_table
 
                     rate_series = pd.to_numeric(
                         capex_table.get("Depreciation Rate %"), errors="coerce"
@@ -2764,6 +2944,8 @@ def main() -> None:
                     )
                     if rate_btn_col.button("Apply rate to all", key="capex_apply_rate"):
                         capex_table = _apply_capex_rate(capex_table, rate_value)
+                        st.session_state.supplementary[name] = capex_table
+                        _clear_schedule_editor_state("supp::capex_schedule")
 
                     spend_default = spend_col.number_input(
                         "Default spend for new row",
@@ -2780,6 +2962,8 @@ def main() -> None:
                             default_rate=rate_value,
                             default_spend=spend_default,
                         )
+                        st.session_state.supplementary[name] = capex_table
+                        _clear_schedule_editor_state("supp::capex_schedule")
 
                     option_labels: list[str] = []
                     option_map: Dict[str, int] = {}
@@ -2804,6 +2988,8 @@ def main() -> None:
                                 capex_table, option_map[remove_choice]
                             )
                             st.session_state.capex_remove_choice = "-- Select Row --"
+                            st.session_state.supplementary[name] = capex_table
+                            _clear_schedule_editor_state("supp::capex_schedule")
 
                     inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
 
@@ -2823,30 +3009,22 @@ def main() -> None:
                         capex_table = _apply_capex_yearly_increment(
                             capex_table, increment_column, increment_pct
                         )
+                        st.session_state.supplementary[name] = capex_table
+                        _clear_schedule_editor_state("supp::capex_schedule")
 
-                    capex_editor = st.data_editor(
-                        capex_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="supp_capex_schedule",
-                        column_config={
-                            "Year": st.column_config.NumberColumn("Year", step=1),
-                            "Depreciation Rate %": st.column_config.NumberColumn(
-                                "Depreciation Rate (%)", format="%.2f", step=0.1
-                            ),
-                            "Spend": st.column_config.NumberColumn(
-                                "Spend", format="%.2f"
-                            ),
-                            "Depreciation": st.column_config.NumberColumn(
-                                "Depreciation", format="%.2f"
-                            ),
-                        },
+                    capex_table = st.session_state.supplementary[name]
+
+                    def _save_capex(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_capex_schedule(updated)
+                        st.session_state.supplementary[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "supp::capex_schedule", capex_table, _save_capex
                     )
 
-                    synced_capex = _ensure_capex_schedule(capex_editor)
-                    st.session_state.supplementary[name] = synced_capex
-
-                    cleaned_capex = _clean_editor_table(synced_capex)
+                    cleaned_capex = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
                     if cleaned_capex is not None:
                         supplementary_tables[name] = _ensure_capex_schedule(cleaned_capex)
                     continue
@@ -2855,6 +3033,7 @@ def main() -> None:
                     asset_table = _ensure_asset_schedule(
                         st.session_state.supplementary.get(name)
                     )
+                    st.session_state.supplementary[name] = asset_table
 
                     rate_series = pd.to_numeric(
                         asset_table.get("Depreciation Rate %"), errors="coerce"
@@ -2888,6 +3067,8 @@ def main() -> None:
                     )
                     if rate_btn_col.button("Apply rate to all", key="asset_apply_rate"):
                         asset_table = _apply_asset_rate(asset_table, rate_value)
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
 
                     base_add_value = add_base_col.number_input(
                         "Base additions",
@@ -2908,6 +3089,8 @@ def main() -> None:
                         asset_table = _apply_asset_additions_pattern(
                             asset_table, base_add_value, add_increment
                         )
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
 
                     (
                         add_row_col,
@@ -2924,6 +3107,8 @@ def main() -> None:
                             default_rate=rate_value,
                             default_additions=base_add_value,
                         )
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
 
                     option_labels: list[str] = []
                     option_map: Dict[str, int] = {}
@@ -2948,6 +3133,8 @@ def main() -> None:
                                 asset_table, option_map[remove_choice]
                             )
                             st.session_state.asset_remove_choice = "-- Select Row --"
+                            st.session_state.supplementary[name] = asset_table
+                            _clear_schedule_editor_state("supp::asset_schedule")
 
                     increment_column = inc_column_col.selectbox(
                         "Increment column",
@@ -2970,45 +3157,50 @@ def main() -> None:
                         asset_table = _apply_asset_yearly_increment(
                             asset_table, increment_column, increment_pct
                         )
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
 
-                    asset_editor = st.data_editor(
-                        asset_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="supp_asset_schedule",
-                        column_config={
-                            "Year": st.column_config.NumberColumn("Year", step=1),
-                            "Depreciation Rate %": st.column_config.NumberColumn(
-                                "Depreciation Rate (%)", format="%.2f", step=0.1
-                            ),
-                            "Depreciation": st.column_config.NumberColumn(
-                                "Depreciation", format="%.2f"
-                            ),
-                            "Closing NBV": st.column_config.NumberColumn(
-                                "Closing NBV", format="%.2f"
-                            ),
-                        },
+                    asset_table = st.session_state.supplementary[name]
+
+                    def _save_asset(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_asset_schedule(updated)
+                        st.session_state.supplementary[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "supp::asset_schedule", asset_table, _save_asset
                     )
 
-                    synced_asset = _ensure_asset_schedule(asset_editor)
-                    st.session_state.supplementary[name] = synced_asset
-
-                    cleaned_asset = _clean_editor_table(synced_asset)
+                    cleaned_asset = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
                     if cleaned_asset is not None:
                         supplementary_tables[name] = _ensure_asset_schedule(cleaned_asset)
                     continue
 
                 with st.expander(name, expanded=False):
-                    table = st.data_editor(
-                        st.session_state.supplementary.get(name, pd.DataFrame()),
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key=f"supp_{name}",
+                    table = st.session_state.supplementary.get(name, pd.DataFrame())
+                    if not isinstance(table, pd.DataFrame):
+                        table = pd.DataFrame()
+                        st.session_state.supplementary[name] = table
+
+                    def _save_generic(updated: pd.DataFrame, table_name: str = name) -> None:
+                        st.session_state.supplementary[table_name] = updated
+
+                    _render_schedule_row_editor(
+                        f"supp::{_scenario_key_suffix(name)}",
+                        table,
+                        _save_generic,
                     )
-                cleaned = _clean_editor_table(table)
+
+                cleaned = _clean_editor_table(
+                    st.session_state.supplementary.get(name, pd.DataFrame())
+                )
                 if cleaned is not None:
                     supplementary_tables[name] = cleaned
-                st.session_state.supplementary[name] = table
+                else:
+                    st.session_state.supplementary[name] = (
+                        st.session_state.supplementary.get(name, pd.DataFrame())
+                    )
 
         for idx, name in enumerate(schedule_tab_names[1:], start=1):
             with schedule_tabs[idx]:
@@ -3023,6 +3215,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = cogs_table
 
                     inferred_pct = pd.to_numeric(
                         cogs_table.get("COGS %"), errors="coerce"
@@ -3051,6 +3244,7 @@ def main() -> None:
                             cogs_table, st.session_state.core_schedule, pct_input
                         )
                         st.session_state.detail_schedules[name] = cogs_table
+                        _clear_schedule_editor_state("detail::cogs_schedule")
 
                     increment_input = controls[1].number_input(
                         "Yearly increment %",
@@ -3069,6 +3263,7 @@ def main() -> None:
                             default_pct=pct_input,
                         )
                         st.session_state.detail_schedules[name] = cogs_table
+                        _clear_schedule_editor_state("detail::cogs_schedule")
 
                     if controls[2].button("Add Row", key="cogs_add_row"):
                         cogs_table = _add_cogs_row(
@@ -3077,6 +3272,7 @@ def main() -> None:
                             default_pct=pct_input,
                         )
                         st.session_state.detail_schedules[name] = cogs_table
+                        _clear_schedule_editor_state("detail::cogs_schedule")
 
                     remove_options = ["Select a period"] + cogs_table["Period"].astype(str).tolist()
                     controls[3].selectbox(
@@ -3093,30 +3289,27 @@ def main() -> None:
                             cogs_table = _remove_cogs_row(cogs_table, remove_choice)
                             st.session_state.detail_schedules[name] = cogs_table
                             st.session_state.cogs_remove_choice = "Select a period"
+                            _clear_schedule_editor_state("detail::cogs_schedule")
 
                     cogs_table = _sync_cogs_table(
                         cogs_table, st.session_state.core_schedule, default_pct=pct_input
                     )
+                    st.session_state.detail_schedules[name] = cogs_table
+                    def _save_cogs(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_cogs_schedule(
+                            updated,
+                            st.session_state.core_schedule,
+                            default_pct=pct_input,
+                        )
+                        st.session_state.detail_schedules[name] = ensured
 
-                    editor = st.data_editor(
-                        cogs_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        column_config={
-                            "COGS %": st.column_config.NumberColumn(
-                                "COGS % of Revenue", format="%.2f %%", step=0.1
-                            ),
-                            "COGS": st.column_config.NumberColumn(
-                                "COGS Amount", format="%.2f"
-                            ),
-                        },
-                        key="schedule_cogs_schedule",
+                    _render_schedule_row_editor(
+                        "detail::cogs_schedule",
+                        st.session_state.detail_schedules[name],
+                        _save_cogs,
                     )
-                    synced_editor = _sync_cogs_table(
-                        editor, st.session_state.core_schedule, default_pct=pct_input
-                    )
-                    st.session_state.detail_schedules[name] = synced_editor
-                    detail_tables_for_run[name] = synced_editor
+
+                    detail_tables_for_run[name] = st.session_state.detail_schedules[name]
                 elif name == "Variable Expenses Schedule":
                     st.markdown("#### Variable Expenses Schedule")
                     st.caption(
@@ -3128,6 +3321,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = variable_table
 
                     st.session_state.setdefault("var_exp_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("var_exp_increment_target", "All items")
@@ -3140,6 +3334,7 @@ def main() -> None:
                             variable_table, st.session_state.core_schedule
                         )
                         st.session_state.detail_schedules[name] = variable_table
+                        _clear_schedule_editor_state("detail::variable_expenses")
 
                     option_labels: list[str] = []
                     option_index: Dict[str, int] = {}
@@ -3161,6 +3356,7 @@ def main() -> None:
                             )
                             st.session_state.detail_schedules[name] = variable_table
                             st.session_state.var_exp_remove_choice = "-- Select Row --"
+                            _clear_schedule_editor_state("detail::variable_expenses")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
                     target_options = ["All items"] + sorted(
@@ -3187,20 +3383,21 @@ def main() -> None:
                             st.session_state.get("var_exp_increment_target"),
                         )
                         st.session_state.detail_schedules[name] = variable_table
+                        _clear_schedule_editor_state("detail::variable_expenses")
 
-                    editor = st.data_editor(
-                        variable_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="schedule_variable_expenses_schedule",
-                        column_config={
-                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
-                        },
+                    def _save_variable(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_variable_expense_table(
+                            updated, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "detail::variable_expenses",
+                        st.session_state.detail_schedules[name],
+                        _save_variable,
                     )
-                    variable_table = _ensure_variable_expense_table(
-                        editor, st.session_state.core_schedule
-                    )
-                    st.session_state.detail_schedules[name] = variable_table
+
+                    variable_table = st.session_state.detail_schedules[name]
 
                     st.session_state.setdefault(
                         "variable_defaults_edit_mode", False
@@ -3274,6 +3471,7 @@ def main() -> None:
                             st.success(
                                 "Variable expense defaults restored and schedule refreshed."
                             )
+                            _clear_schedule_editor_state("detail::variable_expenses")
 
                         if apply_col.button(
                             "Apply to schedule", key="apply_variable_defaults"
@@ -3290,6 +3488,7 @@ def main() -> None:
                             st.success(
                                 "Variable expenses schedule regenerated from defaults."
                             )
+                            _clear_schedule_editor_state("detail::variable_expenses")
 
                     aggregated_variable = _aggregate_variable_expenses(
                         variable_table, st.session_state.core_schedule
@@ -3309,6 +3508,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = direct_table
 
                     st.session_state.setdefault("direct_wage_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("direct_wage_increment_target", "All roles")
@@ -3321,6 +3521,7 @@ def main() -> None:
                             direct_table, st.session_state.core_schedule
                         )
                         st.session_state.detail_schedules[name] = direct_table
+                        _clear_schedule_editor_state("detail::direct_wages")
 
                     option_labels: list[str] = []
                     option_index: Dict[str, int] = {}
@@ -3344,6 +3545,7 @@ def main() -> None:
                             )
                             st.session_state.detail_schedules[name] = direct_table
                             st.session_state.direct_wage_remove_choice = "-- Select Row --"
+                            _clear_schedule_editor_state("detail::direct_wages")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
                     target_options = ["All roles"] + sorted(
@@ -3375,20 +3577,21 @@ def main() -> None:
                             st.session_state.get("direct_wage_increment_target"),
                         )
                         st.session_state.detail_schedules[name] = direct_table
+                        _clear_schedule_editor_state("detail::direct_wages")
 
-                    editor = st.data_editor(
-                        direct_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="schedule_direct_wages_schedule",
-                        column_config={
-                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
-                        },
+                    def _save_direct(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_direct_wage_table(
+                            updated, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "detail::direct_wages",
+                        st.session_state.detail_schedules[name],
+                        _save_direct,
                     )
-                    direct_table = _ensure_direct_wage_table(
-                        editor, st.session_state.core_schedule
-                    )
-                    st.session_state.detail_schedules[name] = direct_table
+
+                    direct_table = st.session_state.detail_schedules[name]
 
                     st.session_state.setdefault("direct_defaults_edit_mode", False)
                     toggle_label = (
@@ -3462,6 +3665,7 @@ def main() -> None:
                             st.success(
                                 "Direct wage defaults restored and schedule refreshed."
                             )
+                            _clear_schedule_editor_state("detail::direct_wages")
 
                         if apply_col.button(
                             "Apply to schedule", key="apply_direct_wage_defaults"
@@ -3478,6 +3682,7 @@ def main() -> None:
                             st.success(
                                 "Direct wages schedule regenerated from defaults."
                             )
+                            _clear_schedule_editor_state("detail::direct_wages")
 
                     aggregated_direct = _aggregate_direct_wages(
                         direct_table, st.session_state.core_schedule
@@ -3497,6 +3702,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = admin_table
 
                     st.session_state.setdefault("admin_wage_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("admin_wage_increment_target", "All functions")
@@ -3509,6 +3715,7 @@ def main() -> None:
                             admin_table, st.session_state.core_schedule
                         )
                         st.session_state.detail_schedules[name] = admin_table
+                        _clear_schedule_editor_state("detail::admin_wages")
 
                     option_labels: list[str] = []
                     option_index: Dict[str, int] = {}
@@ -3532,6 +3739,7 @@ def main() -> None:
                             )
                             st.session_state.detail_schedules[name] = admin_table
                             st.session_state.admin_wage_remove_choice = "-- Select Row --"
+                            _clear_schedule_editor_state("detail::admin_wages")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
                     target_options = ["All functions"] + sorted(
@@ -3563,20 +3771,21 @@ def main() -> None:
                             st.session_state.get("admin_wage_increment_target"),
                         )
                         st.session_state.detail_schedules[name] = admin_table
+                        _clear_schedule_editor_state("detail::admin_wages")
 
-                    editor = st.data_editor(
-                        admin_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="schedule_admin_wages_schedule",
-                        column_config={
-                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
-                        },
+                    def _save_admin(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_admin_wage_table(
+                            updated, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "detail::admin_wages",
+                        st.session_state.detail_schedules[name],
+                        _save_admin,
                     )
-                    admin_table = _ensure_admin_wage_table(
-                        editor, st.session_state.core_schedule
-                    )
-                    st.session_state.detail_schedules[name] = admin_table
+
+                    admin_table = st.session_state.detail_schedules[name]
 
                     st.session_state.setdefault("admin_defaults_edit_mode", False)
                     toggle_label = (
@@ -3646,6 +3855,7 @@ def main() -> None:
                             st.success(
                                 "Admin wage defaults restored and schedule refreshed."
                             )
+                            _clear_schedule_editor_state("detail::admin_wages")
 
                         if apply_col.button(
                             "Apply to schedule", key="apply_admin_wage_defaults"
@@ -3662,6 +3872,7 @@ def main() -> None:
                             st.success(
                                 "Admin wages schedule regenerated from defaults."
                             )
+                            _clear_schedule_editor_state("detail::admin_wages")
 
                     aggregated_admin = _aggregate_admin_wages(
                         admin_table, st.session_state.core_schedule
@@ -3671,14 +3882,22 @@ def main() -> None:
                     st.markdown("##### Admin Wages Summary")
                     st.dataframe(aggregated_admin)
                 else:
-                    table = st.data_editor(
-                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key=f"schedule_{name.lower().replace(' ', '_')}",
+                    table = st.session_state.detail_schedules.get(name, pd.DataFrame())
+                    if not isinstance(table, pd.DataFrame):
+                        table = pd.DataFrame()
+                        st.session_state.detail_schedules[name] = table
+
+                    def _save_other(updated: pd.DataFrame, schedule_name: str = name) -> None:
+                        st.session_state.detail_schedules[schedule_name] = updated
+
+                    _render_schedule_row_editor(
+                        f"detail::{_scenario_key_suffix(name)}",
+                        st.session_state.detail_schedules.get(name, table),
+                        _save_other,
                     )
-                    st.session_state.detail_schedules[name] = table
-                    detail_tables_for_run[name] = table
+                    detail_tables_for_run[name] = st.session_state.detail_schedules.get(
+                        name, table
+                    )
 
     if core_editor is None:
         core_editor = st.session_state.core_schedule
