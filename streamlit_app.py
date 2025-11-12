@@ -2454,24 +2454,212 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
     }
 
 
+def _default_scenario_controls_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Driver": [
+                "Milk price change (%)",
+                "Feed cost change (%)",
+            ],
+            "Change %": [0.0, 0.0],
+        }
+    )
+
+
+def _ensure_scenario_controls_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_scenario_controls_table()
+    else:
+        work = table.copy()
+
+    if "Driver" not in work.columns:
+        work["Driver"] = ""
+    work["Driver"] = work.get("Driver", "").astype(str).str.strip()
+    work.loc[work["Driver"] == "", "Driver"] = "Driver"
+
+    if "Change %" not in work.columns:
+        work["Change %"] = np.nan
+    work["Change %"] = pd.to_numeric(work.get("Change %"), errors="coerce")
+
+    defaults = _default_scenario_controls_table()
+    for _, default_row in defaults.iterrows():
+        driver = str(default_row["Driver"])
+        if not work["Driver"].str.casefold().eq(driver.casefold()).any():
+            work = pd.concat(
+                [
+                    work,
+                    pd.DataFrame(
+                        {
+                            "Driver": [driver],
+                            "Change %": [float(default_row["Change %"])],
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+
+    ordered_cols = ["Driver", "Change %"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _scenario_controls_value_map(table: pd.DataFrame) -> Dict[str, float]:
+    work = _ensure_scenario_controls_table(table)
+    values: Dict[str, float] = {}
+    for _, row in work.iterrows():
+        driver = str(row.get("Driver", "")).strip()
+        change = pd.to_numeric(pd.Series([row.get("Change %")]), errors="coerce").iloc[0]
+        if driver:
+            values[driver] = float(change) if not pd.isna(change) else 0.0
+    return values
+
+
+def _update_scenario_control_value(
+    table: pd.DataFrame, driver: str, value: float
+) -> pd.DataFrame:
+    work = _ensure_scenario_controls_table(table)
+    driver_key = str(driver).strip()
+    if not driver_key:
+        return work
+
+    mask = work["Driver"].str.casefold() == driver_key.casefold()
+    if mask.any():
+        work.loc[mask, "Change %"] = float(value)
+    else:
+        work = pd.concat(
+            [
+                work,
+                pd.DataFrame({"Driver": [driver_key], "Change %": [float(value)]}),
+            ],
+            ignore_index=True,
+        )
+    return _ensure_scenario_controls_table(work)
+
+
+def _default_production_horizon_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Start Year": [2024],
+            "End Year": [2030],
+        }
+    )
+
+
+def _ensure_production_horizon_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_production_horizon_table()
+    else:
+        work = table.copy()
+
+    for column in ["Start Year", "End Year"]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    work = work.dropna(how="all")
+    if work.empty:
+        return _default_production_horizon_table()
+
+    defaults = _default_production_horizon_table().iloc[0]
+    work["Start Year"] = work["Start Year"].fillna(defaults["Start Year"])
+    work["End Year"] = work["End Year"].fillna(defaults["End Year"])
+
+    for column in ["Start Year", "End Year"]:
+        work[column] = work[column].round().astype("Int64")
+
+    ordered_cols = ["Start Year", "End Year"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _default_capital_financing_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Source": ["Bank Loan", "Equity"],
+            "Amount": [250000.0, 150000.0],
+            "Interest/Return %": [6.5, 0.0],
+            "Term (years)": [7, None],
+        }
+    )
+
+
+def _ensure_capital_financing_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_capital_financing_table()
+    else:
+        work = table.copy()
+
+    if "Source" not in work.columns:
+        work["Source"] = ""
+    work["Source"] = work.get("Source", "").astype(str).str.strip()
+    work.loc[work["Source"] == "", "Source"] = "Source"
+
+    for column in ["Amount", "Interest/Return %", "Term (years)"]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    ordered_cols = ["Source", "Amount", "Interest/Return %", "Term (years)"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _default_valuation_inputs_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Metric": list(DEFAULT_VALUATION_INPUTS.keys()),
+            "Value": list(DEFAULT_VALUATION_INPUTS.values()),
+        }
+    )
+
+
+def _ensure_valuation_inputs_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_valuation_inputs_table()
+    else:
+        work = table.copy()
+
+    if "Metric" not in work.columns:
+        work["Metric"] = ""
+    work["Metric"] = work.get("Metric", "").astype(str).str.strip()
+    work.loc[work["Metric"] == "", "Metric"] = "Metric"
+
+    if "Value" not in work.columns:
+        work["Value"] = np.nan
+    work["Value"] = pd.to_numeric(work.get("Value"), errors="coerce")
+
+    ordered_cols = ["Metric", "Value"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _valuation_table_to_inputs(table: pd.DataFrame) -> Dict[str, float]:
+    work = _ensure_valuation_inputs_table(table)
+    inputs: Dict[str, float] = {}
+    for _, row in work.iterrows():
+        metric = str(row.get("Metric", "")).strip()
+        value = pd.to_numeric(pd.Series([row.get("Value")]), errors="coerce").iloc[0]
+        if metric and not pd.isna(value):
+            inputs[metric] = float(value)
+    return inputs
+
+
 def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
     return {
-        "Production Horizon": pd.DataFrame(
-            {
-                "Start Year": [2024],
-                "End Year": [2030],
-            }
-        ),
+        "Scenario Controls": _default_scenario_controls_table(),
+        "Production Horizon": _default_production_horizon_table(),
         "Pricing": _default_pricing_table(),
         "Operating Costs": _default_operating_cost_table(),
-        "Capital & Financing": pd.DataFrame(
-            {
-                "Source": ["Bank Loan", "Equity"],
-                "Amount": [250000.0, 150000.0],
-                "Interest/Return %": [6.5, 0.0],
-                "Term (years)": [7, None],
-            }
-        ),
+        "Capital & Financing": _default_capital_financing_table(),
+        "Valuation Inputs": _default_valuation_inputs_table(),
     }
 
 
@@ -2761,6 +2949,10 @@ def main() -> None:
         st.session_state.supplementary = _default_supplementary_tables()
     if "assumptions" not in st.session_state:
         st.session_state.assumptions = _default_assumption_tables()
+    else:
+        defaults = _default_assumption_tables()
+        for name, table in defaults.items():
+            st.session_state.assumptions.setdefault(name, table.copy())
     if "results" not in st.session_state:
         st.session_state.results = None
 
@@ -3921,24 +4113,84 @@ def main() -> None:
         )
 
         with assumption_tabs[0]:
+            st.markdown("#### Scenario Controls")
+            scenario_table = _ensure_scenario_controls_table(
+                st.session_state.assumptions.get("Scenario Controls")
+            )
+            st.session_state.assumptions["Scenario Controls"] = scenario_table
+
+            def _save_scenario_controls(updated: pd.DataFrame) -> None:
+                ensured = _ensure_scenario_controls_table(updated)
+                st.session_state.assumptions["Scenario Controls"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::scenario_controls",
+                st.session_state.assumptions["Scenario Controls"],
+                _save_scenario_controls,
+            )
+
+            control_values = _scenario_controls_value_map(
+                st.session_state.assumptions["Scenario Controls"]
+            )
+            milk_default = control_values.get("Milk price change (%)", 0.0)
+            feed_default = control_values.get("Feed cost change (%)", 0.0)
+
             milk_price = st.slider(
-                "Milk price change (%)", min_value=-50, max_value=50, value=0, step=1
+                "Milk price change (%)",
+                min_value=-50,
+                max_value=50,
+                value=int(round(milk_default)),
+                step=1,
             )
+            if float(milk_price) != float(milk_default):
+                updated_table = _update_scenario_control_value(
+                    st.session_state.assumptions["Scenario Controls"],
+                    "Milk price change (%)",
+                    float(milk_price),
+                )
+                st.session_state.assumptions["Scenario Controls"] = updated_table
+                _clear_schedule_editor_state("assump::scenario_controls")
+
             feed_cost = st.slider(
-                "Feed cost change (%)", min_value=-50, max_value=50, value=0, step=1
+                "Feed cost change (%)",
+                min_value=-50,
+                max_value=50,
+                value=int(round(feed_default)),
+                step=1,
             )
+            if float(feed_cost) != float(feed_default):
+                updated_table = _update_scenario_control_value(
+                    st.session_state.assumptions["Scenario Controls"],
+                    "Feed cost change (%)",
+                    float(feed_cost),
+                )
+                st.session_state.assumptions["Scenario Controls"] = updated_table
+                _clear_schedule_editor_state("assump::scenario_controls")
+
+            assumption_tables["Scenario Controls"] = st.session_state.assumptions[
+                "Scenario Controls"
+            ]
             run_clicked = st.button("Run Scenario", type="primary")
 
         with assumption_tabs[1]:
             st.markdown("#### Production Time Horizon")
-            production_editor = st.data_editor(
-                st.session_state.assumptions["Production Horizon"],
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_production",
+            production_table = _ensure_production_horizon_table(
+                st.session_state.assumptions.get("Production Horizon")
             )
-            st.session_state.assumptions["Production Horizon"] = production_editor
-            assumption_tables["Production Horizon"] = production_editor
+            st.session_state.assumptions["Production Horizon"] = production_table
+
+            def _save_production(updated: pd.DataFrame) -> None:
+                ensured = _ensure_production_horizon_table(updated)
+                st.session_state.assumptions["Production Horizon"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::production_horizon",
+                st.session_state.assumptions["Production Horizon"],
+                _save_production,
+            )
+            assumption_tables["Production Horizon"] = st.session_state.assumptions[
+                "Production Horizon"
+            ]
 
         with assumption_tabs[2]:
             st.markdown("#### Pricing Assumptions")
@@ -3957,6 +4209,7 @@ def main() -> None:
             if add_col.button("Add Product", key="pricing_add_row"):
                 pricing_table = _add_pricing_row(pricing_table)
                 st.session_state.assumptions["Pricing"] = pricing_table
+                _clear_schedule_editor_state("assump::pricing")
 
             option_labels: list[str] = []
             option_index: Dict[str, int] = {}
@@ -3984,6 +4237,7 @@ def main() -> None:
                     )
                     st.session_state.assumptions["Pricing"] = pricing_table
                     st.session_state.pricing_remove_choice = "-- Select Row --"
+                    _clear_schedule_editor_state("assump::pricing")
 
             inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
                 [2, 1.5, 1, 1]
@@ -4026,25 +4280,17 @@ def main() -> None:
                     st.session_state.get("pricing_increment_target"),
                 )
                 st.session_state.assumptions["Pricing"] = pricing_table
+                _clear_schedule_editor_state("assump::pricing")
 
-            pricing_editor = st.data_editor(
-                pricing_table,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_pricing",
-                column_config={
-                    "Year": st.column_config.NumberColumn("Year", step=1),
-                    "Base Price": st.column_config.NumberColumn(
-                        "Base Price", format="%.2f"
-                    ),
-                    "Price Growth %": st.column_config.NumberColumn(
-                        "Price Growth (%)", format="%.2f"
-                    ),
-                },
+            def _save_pricing(updated: pd.DataFrame) -> None:
+                ensured = _ensure_pricing_table(updated)
+                st.session_state.assumptions["Pricing"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::pricing",
+                st.session_state.assumptions["Pricing"],
+                _save_pricing,
             )
-
-            pricing_table = _ensure_pricing_table(pricing_editor)
-            st.session_state.assumptions["Pricing"] = pricing_table
 
             st.session_state.setdefault("pricing_defaults_edit_mode", False)
             toggle_label = (
@@ -4107,26 +4353,26 @@ def main() -> None:
                     _set_template("pricing_rows", baseline_template)
                     pricing_table = _default_pricing_table()
                     st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state["assump_pricing"] = pricing_table
                     st.session_state["default_pricing_editor"] = _template_to_dataframe(
                         baseline_template, pricing_columns
                     )
                     st.success(
                         "Pricing defaults restored and assumptions refreshed."
                     )
+                    _clear_schedule_editor_state("assump::pricing")
 
                 if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
                     records = _dataframe_to_template(template_editor, pricing_columns)
                     _set_template("pricing_rows", records)
                     pricing_table = _default_pricing_table()
                     st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state["assump_pricing"] = pricing_table
                     st.session_state["default_pricing_editor"] = template_editor
                     st.success(
                         "Pricing assumptions refreshed from updated defaults."
                     )
+                    _clear_schedule_editor_state("assump::pricing")
 
-            assumption_tables["Pricing"] = pricing_table
+            assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
         with assumption_tabs[3]:
             st.markdown("#### Operating Cost Assumptions")
@@ -4145,6 +4391,7 @@ def main() -> None:
             if add_col.button("Add Item", key="operating_add_row"):
                 operating_table = _add_operating_cost_row(operating_table)
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                _clear_schedule_editor_state("assump::operating_costs")
 
             option_labels: list[str] = []
             option_index: Dict[str, int] = {}
@@ -4172,6 +4419,7 @@ def main() -> None:
                     )
                     st.session_state.assumptions["Operating Costs"] = operating_table
                     st.session_state["operating_remove_choice"] = "-- Select Item --"
+                    _clear_schedule_editor_state("assump::operating_costs")
 
             inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
                 [2, 1.5, 1, 1]
@@ -4214,27 +4462,17 @@ def main() -> None:
                     st.session_state.get("operating_increment_column", "Monthly Cost"),
                 )
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                _clear_schedule_editor_state("assump::operating_costs")
 
-            operating_editor = st.data_editor(
-                operating_table,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_operating",
-                column_config={
-                    "Year": st.column_config.NumberColumn(
-                        "Year", format="%d", step=1, min_value=1900
-                    ),
-                    "Monthly Cost": st.column_config.NumberColumn(
-                        "Monthly Cost", format="%.2f"
-                    ),
-                    "Inflation %": st.column_config.NumberColumn(
-                        "Inflation (%)", format="%.2f"
-                    ),
-                },
+            def _save_operating(updated: pd.DataFrame) -> None:
+                ensured = _ensure_operating_cost_table(updated)
+                st.session_state.assumptions["Operating Costs"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::operating_costs",
+                st.session_state.assumptions["Operating Costs"],
+                _save_operating,
             )
-
-            operating_table = _ensure_operating_cost_table(operating_editor)
-            st.session_state.assumptions["Operating Costs"] = operating_table
 
             st.session_state.setdefault("operating_defaults_edit_mode", False)
             toggle_label = (
@@ -4292,51 +4530,76 @@ def main() -> None:
                     _set_template("operating_rows", baseline_template)
                     operating_table = _default_operating_cost_table()
                     st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["assump_operating"] = operating_table
                     st.session_state["default_operating_editor"] = _template_to_dataframe(
                         baseline_template, operating_columns
                     )
                     st.success(
                         "Operating cost defaults restored and assumptions refreshed."
                     )
+                    _clear_schedule_editor_state("assump::operating_costs")
 
                 if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
                     records = _dataframe_to_template(template_editor, operating_columns)
                     _set_template("operating_rows", records)
                     operating_table = _default_operating_cost_table()
                     st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["assump_operating"] = operating_table
                     st.session_state["default_operating_editor"] = template_editor
                     st.success(
                         "Operating cost assumptions refreshed from updated defaults."
                     )
+                    _clear_schedule_editor_state("assump::operating_costs")
 
-            assumption_tables["Operating Costs"] = operating_table
+            assumption_tables["Operating Costs"] = st.session_state.assumptions[
+                "Operating Costs"
+            ]
 
         with assumption_tabs[4]:
             st.markdown("#### Capital & Financing Assumptions")
-            capital_editor = st.data_editor(
-                st.session_state.assumptions["Capital & Financing"],
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_capital",
+            capital_table = _ensure_capital_financing_table(
+                st.session_state.assumptions.get("Capital & Financing")
             )
-            st.session_state.assumptions["Capital & Financing"] = capital_editor
-            assumption_tables["Capital & Financing"] = capital_editor
+            st.session_state.assumptions["Capital & Financing"] = capital_table
+
+            def _save_capital(updated: pd.DataFrame) -> None:
+                ensured = _ensure_capital_financing_table(updated)
+                st.session_state.assumptions["Capital & Financing"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::capital_financing",
+                st.session_state.assumptions["Capital & Financing"],
+                _save_capital,
+            )
+            assumption_tables["Capital & Financing"] = st.session_state.assumptions[
+                "Capital & Financing"
+            ]
 
         with assumption_tabs[5]:
             include_valuation = st.checkbox("Include valuation inputs", value=True)
+            valuation_table = _ensure_valuation_inputs_table(
+                st.session_state.assumptions.get("Valuation Inputs")
+            )
+            st.session_state.assumptions["Valuation Inputs"] = valuation_table
+
+            def _save_valuation(updated: pd.DataFrame) -> None:
+                ensured = _ensure_valuation_inputs_table(updated)
+                st.session_state.assumptions["Valuation Inputs"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::valuation_inputs",
+                st.session_state.assumptions["Valuation Inputs"],
+                _save_valuation,
+            )
+
             if include_valuation:
-                wacc_pct = st.number_input("WACC (%)", value=12.0, step=0.1)
-                npv_value = st.number_input("NPV", value=750000.0, step=10000.0)
-                terminal_value = st.number_input(
-                    "Terminal Value", value=1500000.0, step=10000.0
+                valuation_inputs = _valuation_table_to_inputs(
+                    st.session_state.assumptions["Valuation Inputs"]
                 )
-                valuation_inputs = {
-                    "WACC": wacc_pct / 100.0,
-                    "NPV": npv_value,
-                    "Terminal Value": terminal_value,
-                }
+            else:
+                valuation_inputs = {}
+
+            assumption_tables["Valuation Inputs"] = st.session_state.assumptions[
+                "Valuation Inputs"
+            ]
 
     with tabs[2]:
         st.subheader("Financial Statements")
