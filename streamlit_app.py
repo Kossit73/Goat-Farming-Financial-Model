@@ -80,6 +80,9 @@ GEN_AI_LABEL_TO_CODE = {label: code for code, label in GEN_AI_FEATURE_LABELS.ite
 
 
 DEFAULT_MODEL_AUTHOR = "Goat Farmers United"
+MODEL_AUTHOR_KEY = "model_author"
+MODEL_AUTHOR_WIDGET_KEY = "_model_author_widget"
+MODEL_AUTHOR_CACHE_KEY = "_model_author_cached"
 
 
 def _sanitize_model_author_value(value: Any) -> str:
@@ -93,10 +96,13 @@ def _sanitize_model_author_value(value: Any) -> str:
 def _handle_model_author_change() -> None:
     """Persist author edits and clear cached exports when updated."""
 
-    sanitized = _sanitize_model_author_value(st.session_state.get("model_author", ""))
-    previous = st.session_state.get("_model_author_cached")
-    st.session_state.model_author = sanitized
-    st.session_state["_model_author_cached"] = sanitized
+    raw_value = st.session_state.get(MODEL_AUTHOR_WIDGET_KEY, "")
+    sanitized = _sanitize_model_author_value(raw_value)
+    previous = st.session_state.get(MODEL_AUTHOR_CACHE_KEY)
+    st.session_state[MODEL_AUTHOR_KEY] = sanitized
+    st.session_state[MODEL_AUTHOR_CACHE_KEY] = sanitized
+    if sanitized != raw_value:
+        st.session_state[MODEL_AUTHOR_WIDGET_KEY] = sanitized
     if previous is not None and sanitized != previous:
         st.session_state.pop("excel_bytes_map", None)
 
@@ -104,28 +110,33 @@ def _handle_model_author_change() -> None:
 def _current_model_author() -> str:
     """Return the active model author, applying defaults when necessary."""
 
-    current = st.session_state.get("model_author", DEFAULT_MODEL_AUTHOR)
+    current = st.session_state.get(MODEL_AUTHOR_KEY, DEFAULT_MODEL_AUTHOR)
     sanitized = _sanitize_model_author_value(current)
     if sanitized != current:
-        st.session_state.model_author = sanitized
-    st.session_state.setdefault("_model_author_cached", sanitized)
+        st.session_state[MODEL_AUTHOR_KEY] = sanitized
+    st.session_state.setdefault(MODEL_AUTHOR_CACHE_KEY, sanitized)
+    st.session_state.setdefault(MODEL_AUTHOR_WIDGET_KEY, sanitized)
+    widget_value = st.session_state.get(MODEL_AUTHOR_WIDGET_KEY)
+    if widget_value != sanitized:
+        st.session_state[MODEL_AUTHOR_WIDGET_KEY] = sanitized
     return sanitized
 
 
 def _render_model_author_editor() -> None:
     """Display an inline editor for the model author name."""
 
-    st.session_state.setdefault("model_author", DEFAULT_MODEL_AUTHOR)
+    author_value = _current_model_author()
+    st.session_state.setdefault(MODEL_AUTHOR_WIDGET_KEY, author_value)
     st.text_input(
         "Model author",
-        key="model_author",
+        value=st.session_state.get(MODEL_AUTHOR_WIDGET_KEY, author_value),
+        key=MODEL_AUTHOR_WIDGET_KEY,
         on_change=_handle_model_author_change,
         help=(
             "Name recorded in scenario outputs and Excel downloads. "
             "Leave blank to reset to the default."
         ),
     )
-    _handle_model_author_change()
 
 
 def _statement_series_by_suffix(
