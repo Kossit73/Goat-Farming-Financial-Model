@@ -3490,14 +3490,31 @@ def main() -> None:
             " deepen scenario insights:"
         )
         st.markdown(
-            "- **Sensitivity analysis** to quantify how key drivers such as milk prices,"
-            " feed costs, or herd productivity shift profitability.\n"
-            "- **Scenario stress testing** that applies severe but plausible shocks"
-            " (e.g., drought, disease outbreaks) to evaluate resilience.\n"
-            "- **Trend and seasonality decomposition** on production and revenue series"
-            " to isolate structural shifts from cyclical effects.\n"
-            "- **Customer and product segmentation analysis** to spotlight high-margin"
-            " channels and inform targeted growth initiatives."
+            """
+- **Sensitivity analysis** to quantify how key drivers such as milk prices, feed costs, or herd productivity shift profitability.
+- **Scenario stress testing** that applies severe but plausible shocks (e.g., drought, disease outbreaks) to evaluate resilience.
+- **Trend and seasonality decomposition** on production and revenue series to isolate structural shifts from cyclical effects.
+- **Customer and product segmentation analysis** to spotlight high-margin channels and inform targeted growth initiatives.
+- **Monte Carlo simulation** to capture probabilistic distributions for revenues, costs, and valuation metrics.
+- **What-if analysis** to interactively adjust assumptions and observe real-time impacts on key outputs.
+- **Goal seek** routines to solve for the input levels required to hit specific profitability or liquidity targets.
+- **Tornado charts & spider diagrams** to visualise which assumptions have the greatest impact on outputs like NPV or IRR.
+- **Regression modeling** to predict revenues, costs, or asset performance based on historical data.
+- **Time series analysis (ARIMA, Prophet, LSTM)** for modelling cyclical or seasonal patterns in revenues, commodity prices, or expenses.
+- **Classification models** for credit risk, churn, or customer segmentation in finance-related business models.
+- **Linear and nonlinear optimization** to maximise profit or minimise cost given resource or capital constraints.
+- **Portfolio optimization** applying mean-variance or robust techniques to balance risk versus return across herds or product lines.
+- **Real options analysis** to incorporate managerial flexibility around deferring, expanding, or abandoning initiatives.
+- **Value at Risk (VaR) / Conditional VaR** to estimate potential losses under adverse conditions.
+- **Stress testing** that simulates extreme yet plausible shocks such as commodity price collapses or rapid interest-rate hikes.
+- **Copula models** to capture correlations between multiple risk factors (e.g., FX and interest rates).
+- **Macroeconomic linking** that integrates inflation, GDP growth, or exchange rates into financial projections.
+- **ESG & sustainability metrics** to model the financial implications of emissions, carbon pricing, or renewable adoption.
+- **Market intelligence integration** blending sentiment data or industry forecasts for dynamic demand projections.
+- **Probabilistic valuation** to generate distributions of NPVs or IRRs rather than single-point estimates.
+- **Comparative valuation with clustering** to benchmark projects or farms against statistically similar peers.
+- **Machine learning–based valuation** that trains models on historical market data to predict multiples or fair values.
+            """
         )
         if results is None:
             st.info("Run the scenario to view advanced analytics.")
