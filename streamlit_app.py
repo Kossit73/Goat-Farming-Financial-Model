@@ -1735,8 +1735,17 @@ def _ensure_cogs_schedule(
 
 def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
-    totals = pd.to_numeric(core.get("Direct Wages"), errors="coerce")
-    total_values = totals.tolist() if totals is not None else []
+    totals_raw = core.get("Direct Wages", pd.Series(dtype=float))
+    totals = pd.to_numeric(totals_raw, errors="coerce")
+
+    if isinstance(totals, pd.Series):
+        total_series = totals.reset_index(drop=True)
+    else:
+        # When a scalar or unsupported type is returned, broadcast across periods
+        total_series = pd.Series([totals])
+
+    total_series = total_series.reindex(range(len(periods)), fill_value=np.nan)
+    total_values = total_series.to_list()
 
     rows: list[dict[str, object]] = []
     if periods:
