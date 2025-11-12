@@ -911,6 +911,184 @@ SCENARIO_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _default_scenario_preset_table(name: str) -> pd.DataFrame:
+    preset = SCENARIO_PRESETS.get(name, {})
+    adjustments = preset.get("adjustments", {})
+    if not adjustments:
+        return pd.DataFrame(columns=["Driver", "Change %"])
+    return pd.DataFrame(
+        {
+            "Driver": list(adjustments.keys()),
+            "Change %": [float(value) for value in adjustments.values()],
+        }
+    )
+
+
+def _scenario_preset_tables_store() -> Dict[str, pd.DataFrame]:
+    return st.session_state.setdefault("scenario_preset_tables", {})
+
+
+def _ensure_scenario_preset_table(
+    name: str, table: Optional[pd.DataFrame]
+) -> pd.DataFrame:
+    default_table = _default_scenario_preset_table(name)
+    if table is None or table.empty:
+        work = default_table.copy()
+    else:
+        work = table.copy()
+
+    if "Driver" not in work.columns:
+        work["Driver"] = ""
+    work["Driver"] = work.get("Driver", "").astype(str).str.strip()
+    work.loc[work["Driver"] == "", "Driver"] = "Driver"
+
+    if "Change %" not in work.columns:
+        work["Change %"] = np.nan
+    work["Change %"] = pd.to_numeric(work.get("Change %"), errors="coerce")
+
+    required_rows = []
+    for _, row in default_table.iterrows():
+        driver = str(row.get("Driver", "")).strip()
+        if not driver:
+            continue
+        mask = work["Driver"].str.casefold() == driver.casefold()
+        if not mask.any():
+            required_rows.append({
+                "Driver": driver,
+                "Change %": float(row.get("Change %", 0.0)),
+            })
+        else:
+            existing_index = work.index[mask][0]
+            if pd.isna(work.at[existing_index, "Change %"]):
+                work.at[existing_index, "Change %"] = float(row.get("Change %", 0.0))
+
+    if required_rows:
+        work = pd.concat([work, pd.DataFrame(required_rows)], ignore_index=True)
+
+    driver_order = [
+        str(val).casefold()
+        for val in default_table.get("Driver", pd.Series(dtype=str)).tolist()
+    ]
+    order_map = {driver: idx for idx, driver in enumerate(driver_order)}
+    work["__order__"] = work["Driver"].str.casefold().map(order_map)
+    work = work.sort_values(["__order__", "Driver"], na_position="last").drop(
+        columns=["__order__"], errors="ignore"
+    )
+
+    ordered_cols = ["Driver", "Change %"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _set_scenario_preset_table(name: str, table: pd.DataFrame) -> None:
+    store = _scenario_preset_tables_store()
+    store[name] = table.copy(deep=True)
+    st.session_state["scenario_preset_tables"] = store
+
+
+def _get_scenario_preset_table(name: str) -> pd.DataFrame:
+    store = _scenario_preset_tables_store()
+    ensured = _ensure_scenario_preset_table(name, store.get(name))
+    store[name] = ensured
+    st.session_state["scenario_preset_tables"] = store
+    return ensured
+
+
+def _scenario_preset_descriptions_store() -> Dict[str, str]:
+    store = st.session_state.setdefault("scenario_preset_descriptions", {})
+    for name, preset in SCENARIO_PRESETS.items():
+        store.setdefault(name, preset.get("description", ""))
+    st.session_state["scenario_preset_descriptions"] = store
+    return store
+
+
+def _set_scenario_preset_description(name: str, description: str) -> Optional[str]:
+    store = _scenario_preset_descriptions_store()
+    normalized = str(description or "").strip()
+    previous = store.get(name, "")
+    if normalized == previous:
+        return None
+    store[name] = normalized
+    st.session_state["scenario_preset_descriptions"] = store
+    _reset_cached_results()
+    return normalized
+
+
+def _scenario_preset_table_to_adjustments(
+    name: str, table: pd.DataFrame
+) -> Dict[str, float]:
+    base_adjustments = {
+        str(driver): float(value)
+        for driver, value in SCENARIO_PRESETS.get(name, {})
+        .get("adjustments", {})
+        .items()
+    }
+
+    ensured = _ensure_scenario_preset_table(name, table)
+    for _, row in ensured.iterrows():
+        driver = str(row.get("Driver", "")).strip()
+        if not driver:
+            continue
+        value = pd.to_numeric(pd.Series([row.get("Change %")]), errors="coerce").iloc[0]
+        if pd.isna(value):
+            continue
+        base_adjustments[driver] = float(value)
+    return base_adjustments
+
+
+def _current_scenario_presets() -> Dict[str, Dict[str, Any]]:
+    tables = _scenario_preset_tables_store()
+    descriptions = _scenario_preset_descriptions_store()
+    presets: Dict[str, Dict[str, Any]] = {}
+
+    for name in SCENARIO_PRESETS.keys():
+        table = _ensure_scenario_preset_table(name, tables.get(name))
+        tables[name] = table
+        adjustments = _scenario_preset_table_to_adjustments(name, table)
+        description = descriptions.get(name, SCENARIO_PRESETS[name].get("description", ""))
+        presets[name] = {
+            "adjustments": adjustments,
+            "description": description,
+        }
+
+    st.session_state["scenario_preset_tables"] = tables
+    st.session_state["scenario_preset_descriptions"] = descriptions
+    return presets
+
+
+def _render_scenario_preset_editors() -> None:
+    st.markdown("#### Scenario Presets")
+    preset_names = list(SCENARIO_PRESETS.keys())
+    tabs = st.tabs(preset_names)
+
+    for tab, name in zip(tabs, preset_names):
+        with tab:
+            table = _get_scenario_preset_table(name)
+
+            def _save(updated: pd.DataFrame, preset_name: str = name) -> None:
+                ensured = _ensure_scenario_preset_table(preset_name, updated)
+                _set_scenario_preset_table(preset_name, ensured)
+                _reset_cached_results()
+
+            _render_schedule_row_editor(
+                f"scenario_preset::{_scenario_key_suffix(name)}",
+                table,
+                _save,
+            )
+
+            description_store = _scenario_preset_descriptions_store()
+            default_description = SCENARIO_PRESETS[name].get("description", "")
+            stored_value = description_store.get(name, default_description)
+            desc_key = f"scenario_desc::{_scenario_key_suffix(name)}"
+            if desc_key not in st.session_state:
+                st.session_state[desc_key] = stored_value
+
+            st.text_area("Description", key=desc_key)
+            new_value = st.session_state.get(desc_key, "")
+            updated = _set_scenario_preset_description(name, new_value)
+            if updated is not None:
+                st.session_state[desc_key] = updated
+
 CAP_TABLE_COLUMNS = ["Year", "Shareholder", "Ownership %", "Investment"]
 
 
@@ -951,7 +1129,8 @@ def _build_scenario_suite(
     custom_adjustments: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     suite: Dict[str, Dict[str, Any]] = {}
-    for name, preset in SCENARIO_PRESETS.items():
+    presets = _current_scenario_presets()
+    for name, preset in presets.items():
         suite[name] = {
             "adjustments": deepcopy(preset["adjustments"]),
             "description": preset.get("description", ""),
@@ -3623,6 +3802,7 @@ def main() -> None:
         st.markdown("### Scenario Explorer")
         _render_model_author_editor()
         _render_scenario_selector()
+        _render_scenario_preset_editors()
 
     excel_download_container = st.container()
 
@@ -5464,6 +5644,7 @@ def main() -> None:
             "Feed cost change (%)": float(feed_cost),
         }
 
+        current_presets = _current_scenario_presets()
         matches_preset = any(
             np.isclose(
                 custom_adjustments["Milk price change (%)"],
@@ -5473,7 +5654,7 @@ def main() -> None:
                 custom_adjustments["Feed cost change (%)"],
                 preset["adjustments"].get("Feed cost change (%)", 0.0),
             )
-            for preset in SCENARIO_PRESETS.values()
+            for preset in current_presets.values()
         )
 
         scenario_suite = _build_scenario_suite()

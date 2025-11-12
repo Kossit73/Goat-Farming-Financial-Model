@@ -72,6 +72,35 @@ def test_build_scenario_suite_supports_custom_entries():
     )
 
 
+def test_current_scenario_presets_respect_overrides():
+    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
+    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
+
+    override_table = pd.DataFrame(
+        {
+            "Driver": ["Milk price change (%)", "Feed cost change (%)"],
+            "Change %": [2.5, -1.25],
+        }
+    )
+
+    streamlit_app.st.session_state["scenario_preset_tables"] = {
+        "Base Case Scenario": override_table
+    }
+    streamlit_app.st.session_state["scenario_preset_descriptions"] = {
+        "Base Case Scenario": "Custom base preset"
+    }
+
+    presets = streamlit_app._current_scenario_presets()
+
+    base_preset = presets["Base Case Scenario"]
+    assert base_preset["adjustments"]["Milk price change (%)"] == 2.5
+    assert base_preset["adjustments"]["Feed cost change (%)"] == -1.25
+    assert base_preset["description"] == "Custom base preset"
+
+    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
+    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
+
+
 def test_rebase_schedule_to_horizon_extends_periods():
     short_horizon = pd.DataFrame({"Start Year": [2024], "End Year": [2025]})
     core, details = streamlit_app._default_schedule_components(
