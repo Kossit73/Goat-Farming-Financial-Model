@@ -2129,6 +2129,374 @@ def main() -> None:
                 key="schedule_core",
             )
             st.session_state.core_schedule = core_editor
+            st.markdown("### Supplementary Tables")
+            for name in list(st.session_state.supplementary.keys()):
+                if name == "Capitalisation Table":
+                    st.markdown("#### Capitalisation Table Schedule")
+                    cap_table = _ensure_capitalisation_table(
+                        st.session_state.supplementary.get(name)
+                    )
+
+                    add_col, remove_select_col, remove_btn_col, inc_col_col, inc_pct_col = st.columns(
+                        [1, 2, 1, 2, 2]
+                    )
+
+                    with add_col:
+                        if st.button("Add Row", key="cap_table_add_row"):
+                            cap_table = _add_capitalisation_row(cap_table)
+
+                    option_labels = []
+                    option_map: Dict[str, int] = {}
+                    for idx, row in cap_table.iterrows():
+                        year = row.get("Year")
+                        shareholder = row.get("Shareholder") or "Unnamed"
+                        if pd.isna(year):
+                            label = f"{shareholder}"
+                        else:
+                            label = f"{int(year)} – {shareholder}"
+                        option_labels.append(label)
+                        option_map[label] = idx
+
+                    remove_choice = None
+                    with remove_select_col:
+                        if option_labels:
+                            remove_choice = st.selectbox(
+                                "Select row",
+                                options=["-- Select Row --"] + option_labels,
+                                key="cap_table_remove_choice",
+                            )
+                        else:
+                            st.write("No rows available to remove.")
+
+                    with remove_btn_col:
+                        if (
+                            st.button("Remove Row", key="cap_table_remove_button")
+                            and remove_choice
+                            and remove_choice in option_map
+                        ):
+                            cap_table = _remove_capitalisation_row(
+                                cap_table, option_map[remove_choice]
+                            )
+
+                    with inc_col_col:
+                        increment_column = st.selectbox(
+                            "Increment column",
+                            options=["Ownership %", "Investment"],
+                            key="cap_table_increment_column",
+                        )
+
+                    with inc_pct_col:
+                        increment_pct = st.number_input(
+                            "Yearly increment (%)",
+                            value=0.0,
+                            step=0.5,
+                            key="cap_table_increment_pct",
+                        )
+                        if st.button("Apply", key="cap_table_increment_button"):
+                            cap_table = _apply_capitalisation_increment(
+                                cap_table, increment_column, increment_pct
+                            )
+
+                    cap_editor = st.data_editor(
+                        cap_table,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key="supp_capitalisation_table",
+                        column_config={
+                            "Ownership %": st.column_config.NumberColumn(
+                                "Ownership %", format="%.2f", step=0.1
+                            ),
+                            "Investment": st.column_config.NumberColumn(
+                                "Investment", format="%.2f"
+                            ),
+                        },
+                    )
+
+                    cap_table = _ensure_capitalisation_table(cap_editor)
+                    st.session_state.supplementary[name] = cap_table
+
+                    cleaned_cap = _clean_editor_table(cap_table)
+                    if cleaned_cap is not None:
+                        supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
+                    continue
+                if name == "Capex Schedule":
+                    st.markdown("#### Capex Schedule")
+                    capex_table = _ensure_capex_schedule(
+                        st.session_state.supplementary.get(name)
+                    )
+
+                    rate_series = pd.to_numeric(
+                        capex_table.get("Depreciation Rate %"), errors="coerce"
+                    ).dropna()
+                    spend_series = pd.to_numeric(
+                        capex_table.get("Spend"), errors="coerce"
+                    ).dropna()
+
+                    default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 10.0
+                    default_spend = float(spend_series.iloc[0]) if not spend_series.empty else 0.0
+
+                    st.session_state.setdefault("capex_rate_default", round(default_rate, 2))
+                    st.session_state.setdefault("capex_default_spend", default_spend)
+                    st.session_state.setdefault("capex_remove_choice", "-- Select Row --")
+                    st.session_state.setdefault("capex_increment_column", "Spend")
+                    st.session_state.setdefault("capex_increment_pct", 0.0)
+
+                    rate_col, rate_btn_col, spend_col = st.columns([1, 1, 1])
+
+                    rate_value = rate_col.number_input(
+                        "Default depreciation rate (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="capex_rate_default",
+                    )
+                    if rate_btn_col.button("Apply rate to all", key="capex_apply_rate"):
+                        capex_table = _apply_capex_rate(capex_table, rate_value)
+
+                    spend_default = spend_col.number_input(
+                        "Default spend for new row",
+                        min_value=0.0,
+                        step=100.0,
+                        key="capex_default_spend",
+                    )
+
+                    add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+                    if add_col.button("Add Row", key="capex_add_row"):
+                        capex_table = _add_capex_row(
+                            capex_table,
+                            default_rate=rate_value,
+                            default_spend=spend_default,
+                        )
+
+                    option_labels: list[str] = []
+                    option_map: Dict[str, int] = {}
+                    for idx, row in capex_table.iterrows():
+                        label_year = row.get("Year")
+                        label_category = row.get("Category") or "Unnamed"
+                        if pd.notna(label_year):
+                            label = f"{int(label_year)} – {label_category}"
+                        else:
+                            label = str(label_category)
+                        option_labels.append(label)
+                        option_map[label] = idx
+
+                    remove_choice = remove_select_col.selectbox(
+                        "Select row",
+                        options=["-- Select Row --"] + option_labels,
+                        key="capex_remove_choice",
+                    )
+                    if remove_btn_col.button("Remove Row", key="capex_remove_row"):
+                        if remove_choice in option_map:
+                            capex_table = _remove_capex_row(
+                                capex_table, option_map[remove_choice]
+                            )
+                            st.session_state.capex_remove_choice = "-- Select Row --"
+
+                    inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
+
+                    increment_column = inc_col.selectbox(
+                        "Increment column",
+                        options=["Spend", "Depreciation Rate %"],
+                        key="capex_increment_column",
+                    )
+                    increment_pct = inc_pct_col.number_input(
+                        "Yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="capex_increment_pct",
+                    )
+                    if inc_btn_col.button("Apply increment", key="capex_apply_increment"):
+                        capex_table = _apply_capex_yearly_increment(
+                            capex_table, increment_column, increment_pct
+                        )
+
+                    capex_editor = st.data_editor(
+                        capex_table,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key="supp_capex_schedule",
+                        column_config={
+                            "Year": st.column_config.NumberColumn("Year", step=1),
+                            "Depreciation Rate %": st.column_config.NumberColumn(
+                                "Depreciation Rate (%)", format="%.2f", step=0.1
+                            ),
+                            "Spend": st.column_config.NumberColumn(
+                                "Spend", format="%.2f"
+                            ),
+                            "Depreciation": st.column_config.NumberColumn(
+                                "Depreciation", format="%.2f"
+                            ),
+                        },
+                    )
+
+                    synced_capex = _ensure_capex_schedule(capex_editor)
+                    st.session_state.supplementary[name] = synced_capex
+
+                    cleaned_capex = _clean_editor_table(synced_capex)
+                    if cleaned_capex is not None:
+                        supplementary_tables[name] = _ensure_capex_schedule(cleaned_capex)
+                    continue
+                if name == "Asset Schedules":
+                    st.markdown("#### Asset Schedule")
+                    asset_table = _ensure_asset_schedule(
+                        st.session_state.supplementary.get(name)
+                    )
+
+                    rate_series = pd.to_numeric(
+                        asset_table.get("Depreciation Rate %"), errors="coerce"
+                    ).dropna()
+                    addition_series = pd.to_numeric(
+                        asset_table.get("Additions"), errors="coerce"
+                    ).dropna()
+
+                    default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 5.0
+                    default_addition = (
+                        float(addition_series.iloc[0]) if not addition_series.empty else 0.0
+                    )
+
+                    st.session_state.setdefault("asset_rate_default", round(default_rate, 2))
+                    st.session_state.setdefault("asset_add_base", default_addition)
+                    st.session_state.setdefault("asset_add_increment", 0.0)
+                    st.session_state.setdefault("asset_increment_column", "Depreciation Rate %")
+                    st.session_state.setdefault("asset_increment_pct", 0.0)
+                    st.session_state.setdefault("asset_remove_choice", "-- Select Row --")
+
+                    rate_col, rate_btn_col, add_base_col, add_inc_col, add_btn_col = st.columns(
+                        [1, 1, 1, 1, 1]
+                    )
+
+                    rate_value = rate_col.number_input(
+                        "Default depreciation rate (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="asset_rate_default",
+                    )
+                    if rate_btn_col.button("Apply rate to all", key="asset_apply_rate"):
+                        asset_table = _apply_asset_rate(asset_table, rate_value)
+
+                    base_add_value = add_base_col.number_input(
+                        "Base additions",
+                        min_value=0.0,
+                        step=100.0,
+                        key="asset_add_base",
+                    )
+                    add_increment = add_inc_col.number_input(
+                        "Additions yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="asset_add_increment",
+                    )
+                    if add_btn_col.button(
+                        "Apply additions pattern", key="asset_apply_additions"
+                    ):
+                        asset_table = _apply_asset_additions_pattern(
+                            asset_table, base_add_value, add_increment
+                        )
+
+                    (
+                        add_row_col,
+                        remove_select_col,
+                        remove_btn_col,
+                        inc_column_col,
+                        inc_pct_col,
+                        inc_btn_col,
+                    ) = st.columns([1, 2, 1, 1.5, 1, 1])
+
+                    if add_row_col.button("Add Asset", key="asset_add_row"):
+                        asset_table = _add_asset_row(
+                            asset_table,
+                            default_rate=rate_value,
+                            default_additions=base_add_value,
+                        )
+
+                    option_labels: list[str] = []
+                    option_map: Dict[str, int] = {}
+                    for idx, row in asset_table.iterrows():
+                        label_year = row.get("Year")
+                        label_asset = row.get("Asset") or "Unnamed"
+                        if pd.notna(label_year):
+                            label = f"{int(label_year)} – {label_asset}"
+                        else:
+                            label = str(label_asset)
+                        option_labels.append(label)
+                        option_map[label] = idx
+
+                    remove_choice = remove_select_col.selectbox(
+                        "Select asset",
+                        options=["-- Select Row --"] + option_labels,
+                        key="asset_remove_choice",
+                    )
+                    if remove_btn_col.button("Remove Asset", key="asset_remove_row"):
+                        if remove_choice in option_map:
+                            asset_table = _remove_asset_row(
+                                asset_table, option_map[remove_choice]
+                            )
+                            st.session_state.asset_remove_choice = "-- Select Row --"
+
+                    increment_column = inc_column_col.selectbox(
+                        "Increment column",
+                        options=[
+                            "Depreciation Rate %",
+                            "Additions",
+                            "Opening NBV",
+                            "Depreciation",
+                        ],
+                        key="asset_increment_column",
+                    )
+                    increment_pct = inc_pct_col.number_input(
+                        "Yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="asset_increment_pct",
+                    )
+                    if inc_btn_col.button("Apply increment", key="asset_apply_increment"):
+                        asset_table = _apply_asset_yearly_increment(
+                            asset_table, increment_column, increment_pct
+                        )
+
+                    asset_editor = st.data_editor(
+                        asset_table,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key="supp_asset_schedule",
+                        column_config={
+                            "Year": st.column_config.NumberColumn("Year", step=1),
+                            "Depreciation Rate %": st.column_config.NumberColumn(
+                                "Depreciation Rate (%)", format="%.2f", step=0.1
+                            ),
+                            "Depreciation": st.column_config.NumberColumn(
+                                "Depreciation", format="%.2f"
+                            ),
+                            "Closing NBV": st.column_config.NumberColumn(
+                                "Closing NBV", format="%.2f"
+                            ),
+                        },
+                    )
+
+                    synced_asset = _ensure_asset_schedule(asset_editor)
+                    st.session_state.supplementary[name] = synced_asset
+
+                    cleaned_asset = _clean_editor_table(synced_asset)
+                    if cleaned_asset is not None:
+                        supplementary_tables[name] = _ensure_asset_schedule(cleaned_asset)
+                    continue
+
+                with st.expander(name, expanded=False):
+                    table = st.data_editor(
+                        st.session_state.supplementary.get(name, pd.DataFrame()),
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key=f"supp_{name}",
+                    )
+                cleaned = _clean_editor_table(table)
+                if cleaned is not None:
+                    supplementary_tables[name] = cleaned
+                st.session_state.supplementary[name] = table
 
         for idx, name in enumerate(schedule_tab_names[1:], start=1):
             with schedule_tabs[idx]:
@@ -2537,374 +2905,6 @@ def main() -> None:
                     st.session_state.detail_schedules[name] = table
                     detail_tables_for_run[name] = table
 
-        st.markdown("### Supplementary Tables")
-        for name in list(st.session_state.supplementary.keys()):
-            if name == "Capitalisation Table":
-                st.markdown("#### Capitalisation Table Schedule")
-                cap_table = _ensure_capitalisation_table(
-                    st.session_state.supplementary.get(name)
-                )
-
-                add_col, remove_select_col, remove_btn_col, inc_col_col, inc_pct_col = st.columns(
-                    [1, 2, 1, 2, 2]
-                )
-
-                with add_col:
-                    if st.button("Add Row", key="cap_table_add_row"):
-                        cap_table = _add_capitalisation_row(cap_table)
-
-                option_labels = []
-                option_map: Dict[str, int] = {}
-                for idx, row in cap_table.iterrows():
-                    year = row.get("Year")
-                    shareholder = row.get("Shareholder") or "Unnamed"
-                    if pd.isna(year):
-                        label = f"{shareholder}"
-                    else:
-                        label = f"{int(year)} – {shareholder}"
-                    option_labels.append(label)
-                    option_map[label] = idx
-
-                remove_choice = None
-                with remove_select_col:
-                    if option_labels:
-                        remove_choice = st.selectbox(
-                            "Select row",
-                            options=["-- Select Row --"] + option_labels,
-                            key="cap_table_remove_choice",
-                        )
-                    else:
-                        st.write("No rows available to remove.")
-
-                with remove_btn_col:
-                    if (
-                        st.button("Remove Row", key="cap_table_remove_button")
-                        and remove_choice
-                        and remove_choice in option_map
-                    ):
-                        cap_table = _remove_capitalisation_row(
-                            cap_table, option_map[remove_choice]
-                        )
-
-                with inc_col_col:
-                    increment_column = st.selectbox(
-                        "Increment column",
-                        options=["Ownership %", "Investment"],
-                        key="cap_table_increment_column",
-                    )
-
-                with inc_pct_col:
-                    increment_pct = st.number_input(
-                        "Yearly increment (%)",
-                        value=0.0,
-                        step=0.5,
-                        key="cap_table_increment_pct",
-                    )
-                    if st.button("Apply", key="cap_table_increment_button"):
-                        cap_table = _apply_capitalisation_increment(
-                            cap_table, increment_column, increment_pct
-                        )
-
-                cap_editor = st.data_editor(
-                    cap_table,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="supp_capitalisation_table",
-                    column_config={
-                        "Ownership %": st.column_config.NumberColumn(
-                            "Ownership %", format="%.2f", step=0.1
-                        ),
-                        "Investment": st.column_config.NumberColumn(
-                            "Investment", format="%.2f"
-                        ),
-                    },
-                )
-
-                cap_table = _ensure_capitalisation_table(cap_editor)
-                st.session_state.supplementary[name] = cap_table
-
-                cleaned_cap = _clean_editor_table(cap_table)
-                if cleaned_cap is not None:
-                    supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
-                continue
-            if name == "Capex Schedule":
-                st.markdown("#### Capex Schedule")
-                capex_table = _ensure_capex_schedule(
-                    st.session_state.supplementary.get(name)
-                )
-
-                rate_series = pd.to_numeric(
-                    capex_table.get("Depreciation Rate %"), errors="coerce"
-                ).dropna()
-                spend_series = pd.to_numeric(
-                    capex_table.get("Spend"), errors="coerce"
-                ).dropna()
-
-                default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 10.0
-                default_spend = float(spend_series.iloc[0]) if not spend_series.empty else 0.0
-
-                st.session_state.setdefault("capex_rate_default", round(default_rate, 2))
-                st.session_state.setdefault("capex_default_spend", default_spend)
-                st.session_state.setdefault("capex_remove_choice", "-- Select Row --")
-                st.session_state.setdefault("capex_increment_column", "Spend")
-                st.session_state.setdefault("capex_increment_pct", 0.0)
-
-                rate_col, rate_btn_col, spend_col = st.columns([1, 1, 1])
-
-                rate_value = rate_col.number_input(
-                    "Default depreciation rate (%)",
-                    min_value=0.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="capex_rate_default",
-                )
-                if rate_btn_col.button("Apply rate to all", key="capex_apply_rate"):
-                    capex_table = _apply_capex_rate(capex_table, rate_value)
-
-                spend_default = spend_col.number_input(
-                    "Default spend for new row",
-                    min_value=0.0,
-                    step=100.0,
-                    key="capex_default_spend",
-                )
-
-                add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
-
-                if add_col.button("Add Row", key="capex_add_row"):
-                    capex_table = _add_capex_row(
-                        capex_table,
-                        default_rate=rate_value,
-                        default_spend=spend_default,
-                    )
-
-                option_labels: list[str] = []
-                option_map: Dict[str, int] = {}
-                for idx, row in capex_table.iterrows():
-                    label_year = row.get("Year")
-                    label_category = row.get("Category") or "Unnamed"
-                    if pd.notna(label_year):
-                        label = f"{int(label_year)} – {label_category}"
-                    else:
-                        label = str(label_category)
-                    option_labels.append(label)
-                    option_map[label] = idx
-
-                remove_choice = remove_select_col.selectbox(
-                    "Select row",
-                    options=["-- Select Row --"] + option_labels,
-                    key="capex_remove_choice",
-                )
-                if remove_btn_col.button("Remove Row", key="capex_remove_row"):
-                    if remove_choice in option_map:
-                        capex_table = _remove_capex_row(
-                            capex_table, option_map[remove_choice]
-                        )
-                        st.session_state.capex_remove_choice = "-- Select Row --"
-
-                inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
-
-                increment_column = inc_col.selectbox(
-                    "Increment column",
-                    options=["Spend", "Depreciation Rate %"],
-                    key="capex_increment_column",
-                )
-                increment_pct = inc_pct_col.number_input(
-                    "Yearly increment (%)",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="capex_increment_pct",
-                )
-                if inc_btn_col.button("Apply increment", key="capex_apply_increment"):
-                    capex_table = _apply_capex_yearly_increment(
-                        capex_table, increment_column, increment_pct
-                    )
-
-                capex_editor = st.data_editor(
-                    capex_table,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="supp_capex_schedule",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Depreciation Rate %": st.column_config.NumberColumn(
-                            "Depreciation Rate (%)", format="%.2f", step=0.1
-                        ),
-                        "Spend": st.column_config.NumberColumn(
-                            "Spend", format="%.2f"
-                        ),
-                        "Depreciation": st.column_config.NumberColumn(
-                            "Depreciation", format="%.2f"
-                        ),
-                    },
-                )
-
-                synced_capex = _ensure_capex_schedule(capex_editor)
-                st.session_state.supplementary[name] = synced_capex
-
-                cleaned_capex = _clean_editor_table(synced_capex)
-                if cleaned_capex is not None:
-                    supplementary_tables[name] = _ensure_capex_schedule(cleaned_capex)
-                continue
-            if name == "Asset Schedules":
-                st.markdown("#### Asset Schedule")
-                asset_table = _ensure_asset_schedule(
-                    st.session_state.supplementary.get(name)
-                )
-
-                rate_series = pd.to_numeric(
-                    asset_table.get("Depreciation Rate %"), errors="coerce"
-                ).dropna()
-                addition_series = pd.to_numeric(
-                    asset_table.get("Additions"), errors="coerce"
-                ).dropna()
-
-                default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 5.0
-                default_addition = (
-                    float(addition_series.iloc[0]) if not addition_series.empty else 0.0
-                )
-
-                st.session_state.setdefault("asset_rate_default", round(default_rate, 2))
-                st.session_state.setdefault("asset_add_base", default_addition)
-                st.session_state.setdefault("asset_add_increment", 0.0)
-                st.session_state.setdefault("asset_increment_column", "Depreciation Rate %")
-                st.session_state.setdefault("asset_increment_pct", 0.0)
-                st.session_state.setdefault("asset_remove_choice", "-- Select Row --")
-
-                rate_col, rate_btn_col, add_base_col, add_inc_col, add_btn_col = st.columns(
-                    [1, 1, 1, 1, 1]
-                )
-
-                rate_value = rate_col.number_input(
-                    "Default depreciation rate (%)",
-                    min_value=0.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="asset_rate_default",
-                )
-                if rate_btn_col.button("Apply rate to all", key="asset_apply_rate"):
-                    asset_table = _apply_asset_rate(asset_table, rate_value)
-
-                base_add_value = add_base_col.number_input(
-                    "Base additions",
-                    min_value=0.0,
-                    step=100.0,
-                    key="asset_add_base",
-                )
-                add_increment = add_inc_col.number_input(
-                    "Additions yearly increment (%)",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="asset_add_increment",
-                )
-                if add_btn_col.button(
-                    "Apply additions pattern", key="asset_apply_additions"
-                ):
-                    asset_table = _apply_asset_additions_pattern(
-                        asset_table, base_add_value, add_increment
-                    )
-
-                (
-                    add_row_col,
-                    remove_select_col,
-                    remove_btn_col,
-                    inc_column_col,
-                    inc_pct_col,
-                    inc_btn_col,
-                ) = st.columns([1, 2, 1, 1.5, 1, 1])
-
-                if add_row_col.button("Add Asset", key="asset_add_row"):
-                    asset_table = _add_asset_row(
-                        asset_table,
-                        default_rate=rate_value,
-                        default_additions=base_add_value,
-                    )
-
-                option_labels: list[str] = []
-                option_map: Dict[str, int] = {}
-                for idx, row in asset_table.iterrows():
-                    label_year = row.get("Year")
-                    label_asset = row.get("Asset") or "Unnamed"
-                    if pd.notna(label_year):
-                        label = f"{int(label_year)} – {label_asset}"
-                    else:
-                        label = str(label_asset)
-                    option_labels.append(label)
-                    option_map[label] = idx
-
-                remove_choice = remove_select_col.selectbox(
-                    "Select asset",
-                    options=["-- Select Row --"] + option_labels,
-                    key="asset_remove_choice",
-                )
-                if remove_btn_col.button("Remove Asset", key="asset_remove_row"):
-                    if remove_choice in option_map:
-                        asset_table = _remove_asset_row(
-                            asset_table, option_map[remove_choice]
-                        )
-                        st.session_state.asset_remove_choice = "-- Select Row --"
-
-                increment_column = inc_column_col.selectbox(
-                    "Increment column",
-                    options=[
-                        "Depreciation Rate %",
-                        "Additions",
-                        "Opening NBV",
-                        "Depreciation",
-                    ],
-                    key="asset_increment_column",
-                )
-                increment_pct = inc_pct_col.number_input(
-                    "Yearly increment (%)",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="asset_increment_pct",
-                )
-                if inc_btn_col.button("Apply increment", key="asset_apply_increment"):
-                    asset_table = _apply_asset_yearly_increment(
-                        asset_table, increment_column, increment_pct
-                    )
-
-                asset_editor = st.data_editor(
-                    asset_table,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="supp_asset_schedule",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Depreciation Rate %": st.column_config.NumberColumn(
-                            "Depreciation Rate (%)", format="%.2f", step=0.1
-                        ),
-                        "Depreciation": st.column_config.NumberColumn(
-                            "Depreciation", format="%.2f"
-                        ),
-                        "Closing NBV": st.column_config.NumberColumn(
-                            "Closing NBV", format="%.2f"
-                        ),
-                    },
-                )
-
-                synced_asset = _ensure_asset_schedule(asset_editor)
-                st.session_state.supplementary[name] = synced_asset
-
-                cleaned_asset = _clean_editor_table(synced_asset)
-                if cleaned_asset is not None:
-                    supplementary_tables[name] = _ensure_asset_schedule(cleaned_asset)
-                continue
-
-            with st.expander(name, expanded=False):
-                table = st.data_editor(
-                    st.session_state.supplementary.get(name, pd.DataFrame()),
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key=f"supp_{name}",
-                )
-            cleaned = _clean_editor_table(table)
-            if cleaned is not None:
-                supplementary_tables[name] = cleaned
-            st.session_state.supplementary[name] = table
 
     if core_editor is None:
         core_editor = st.session_state.core_schedule
