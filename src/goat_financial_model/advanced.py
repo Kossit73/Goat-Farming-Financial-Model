@@ -769,10 +769,18 @@ class AdvancedAnalyticsSuite:
             )
 
         weights = segments["Revenue"].values
-        returns = segments["Margin %"].replace({np.nan: 0.0}).to_numpy()
-        risk = 1 - returns
-        inv_risk = np.where(risk > 1e-6, 1 / risk, 0.0)
-        optimal_weights = inv_risk / inv_risk.sum() if inv_risk.sum() else np.ones_like(inv_risk) / len(inv_risk)
+        returns = segments["Margin %"].astype(float).replace({np.nan: 0.0}).to_numpy()
+        risk = np.clip(1 - returns, 1e-6, None)
+        inv_risk = np.zeros_like(risk)
+        valid = risk > 0
+        inv_risk[valid] = 1.0 / risk[valid]
+        if not valid.any():
+            inv_risk = np.ones_like(risk)
+        weight_sum = inv_risk.sum()
+        if weight_sum <= 0:
+            optimal_weights = np.ones_like(inv_risk) / len(inv_risk)
+        else:
+            optimal_weights = inv_risk / weight_sum
 
         table = pd.DataFrame(
             {

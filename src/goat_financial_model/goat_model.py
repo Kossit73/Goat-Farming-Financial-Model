@@ -1213,6 +1213,10 @@ class GoatModel:
                 "NPAT": df[npat_col],
             }
         )
+
+        cogs_col = "COGS_adj" if "COGS_adj" in df else "COGS"
+        if cogs_col in df:
+            work["COGS"] = df[cogs_col]
         for candidate in (
             "Variable Expenses",
             "Direct Wages",

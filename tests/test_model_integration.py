@@ -134,6 +134,23 @@ def test_scenario_and_statements_pipeline():
     assert "Break-even Revenue" in break_even.columns
 
 
+def test_monthly_advanced_analytics_uses_costs():
+    model = _build_model()
+    scenario = model.scenario()
+
+    analytics = model.advanced_analytics(scenario, window=3, annual=False)
+
+    segments = analytics["segmentation"]["tables"]["Segment Contribution"]
+    assert not segments.empty
+    assert pytest.approx(0.55, rel=1e-6) == segments.iloc[0]["Margin %"]
+
+    allocation = analytics["portfolio"]["tables"]["Allocation"]
+    assert not allocation.empty
+    assert pytest.approx(segments.iloc[0]["Margin %"], rel=1e-6) == allocation.iloc[0][
+        "Expected Margin"
+    ]
+
+
 def test_input_schedule_rejects_non_numeric_columns():
     periods = pd.date_range("2024-01-31", periods=2, freq="ME")
     schedule = pd.DataFrame({"Revenue": ["one", "two"]}, index=periods)
