@@ -3549,6 +3549,8 @@ def main() -> None:
         st.markdown("### Scenario Explorer")
         _render_scenario_selector()
 
+    excel_download_container = st.container()
+
     ai_payload = st.session_state.setdefault("ai_payload", {})
 
     milk_price = 0
@@ -5441,6 +5443,9 @@ def main() -> None:
     results = st.session_state.results
 
     if results is None:
+        with excel_download_container:
+            st.info("Run a scenario to enable the Excel model download.")
+
         st.info(
             "Update the input schedule, adjust the sliders, and press *Run Scenarios* "
             "to evaluate alternative assumptions."
@@ -5471,12 +5476,11 @@ def main() -> None:
                     summary_cols[idx].metric(label, f"{value:,.2f}")
                 idx += 1
 
-        download_container = st.container()
         excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
         excel_bytes = excel_map.get(selected_scenario)
         key_suffix = _scenario_key_suffix(selected_scenario)
 
-        with download_container:
+        with excel_download_container:
             st.markdown("#### Excel Model Download")
             if not excel_bytes:
                 if st.button(
