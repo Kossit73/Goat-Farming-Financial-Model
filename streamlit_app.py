@@ -21,6 +21,12 @@ st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 
 AI_PROVIDER_OPTIONS = ("OpenAI", "Azure OpenAI", "Anthropic")
 
+DEFAULT_VALUATION_INPUTS = {
+    "WACC": 0.12,
+    "NPV": 750000.0,
+    "Terminal Value": 1500000.0,
+}
+
 ML_METHOD_LABELS = {
     "linear_regression": "Linear Regression",
     "random_forest": "Random Forest",
@@ -2064,6 +2070,90 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
     }
 
 
+def _ensure_default_results_loaded() -> None:
+    """Populate the dashboard with default results for the initial view."""
+
+    if st.session_state.get("results") is not None:
+        return
+
+    core_table = st.session_state.get("core_schedule")
+    detail_tables = st.session_state.get("detail_schedules")
+    supplementary_tables = st.session_state.get("supplementary")
+
+    if core_table is None or detail_tables is None:
+        return
+
+    try:
+        core_clean = _clean_editor_table(core_table)
+        if core_clean is None:
+            return
+        core_prepared = _prepare_timeline_table(core_clean)
+    except ValueError:
+        return
+
+    prepared_details: Dict[str, pd.DataFrame] = {}
+    for name, table in detail_tables.items():
+        cleaned = _clean_editor_table(table)
+        if cleaned is None:
+            continue
+        try:
+            prepared = _prepare_timeline_table(cleaned)
+        except ValueError:
+            continue
+
+        expected_cols = DETAIL_SCHEDULE_COLUMNS.get(name)
+        if expected_cols:
+            missing = [col for col in expected_cols if col not in prepared.columns]
+            if missing:
+                continue
+            prepared = prepared[expected_cols]
+
+        prepared_details[name] = prepared
+
+    try:
+        schedule_df = _assemble_schedule(core_prepared, prepared_details)
+    except ValueError:
+        return
+
+    valuation_inputs = dict(DEFAULT_VALUATION_INPUTS)
+    supplementary_copy = {
+        name: table.copy()
+        for name, table in (supplementary_tables or {}).items()
+        if isinstance(table, pd.DataFrame)
+    }
+
+    try:
+        (
+            model,
+            base,
+            scenario,
+            kpis,
+            break_even,
+        ) = _run_model(
+            schedule_df,
+            valuation_inputs,
+            supplementary_copy,
+            0.0,
+            0.0,
+        )
+    except ValueError:
+        return
+
+    st.session_state.results = {
+        "model": model,
+        "base": base,
+        "scenario": scenario,
+        "kpis": kpis,
+        "break_even": break_even,
+        "supplementary": supplementary_copy,
+        "selected_scenario": _format_scenario_label(0, 0),
+        "scenario_inputs": {
+            "Milk price change (%)": 0,
+            "Feed cost change (%)": 0,
+        },
+    }
+
+
 def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
     if "Period" not in df.columns:
         raise ValueError("The schedule must include a 'Period' column with dates.")
@@ -2486,6 +2576,8 @@ def main() -> None:
         st.session_state.assumptions = _default_assumption_tables()
     if "results" not in st.session_state:
         st.session_state.results = None
+
+    _ensure_default_results_loaded()
 
     ai_payload = st.session_state.setdefault("ai_payload", {})
 
