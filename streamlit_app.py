@@ -3202,6 +3202,8 @@ def main() -> None:
                 ]
             )
 
+            scenario_label = results.get("selected_scenario", "Scenario")
+
             with financial_tabs[0]:
                 try:
                     sop_base = results["model"].statement_of_financial_performance(
@@ -3211,7 +3213,9 @@ def main() -> None:
                         results["scenario"], annual=True
                     )
                     st.dataframe(
-                        pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
+                        pd.concat(
+                            {"Base": sop_base, scenario_label: sop_scenario}, axis=1
+                        )
                         .swaplevel(axis=1)
                         .sort_index(axis=1, level=0)
                     )
@@ -3220,19 +3224,37 @@ def main() -> None:
 
             with financial_tabs[1]:
                 try:
-                    sofp = results["model"].statement_of_financial_position(
+                    sofp_base = results["model"].statement_of_financial_position(
                         results["base"], annual=True
                     )
-                    st.dataframe(sofp)
+                    sofp_scenario = results["model"].statement_of_financial_position(
+                        results["scenario"], annual=True
+                    )
+                    st.dataframe(
+                        pd.concat(
+                            {"Base": sofp_base, scenario_label: sofp_scenario}, axis=1
+                        )
+                        .swaplevel(axis=1)
+                        .sort_index(axis=1, level=0)
+                    )
                 except ValueError as exc:
                     st.info(str(exc))
 
             with financial_tabs[2]:
                 try:
-                    socf = results["model"].statement_of_cash_flow(
+                    socf_base = results["model"].statement_of_cash_flow(
                         results["base"], annual=True
                     )
-                    st.dataframe(socf)
+                    socf_scenario = results["model"].statement_of_cash_flow(
+                        results["scenario"], annual=True
+                    )
+                    st.dataframe(
+                        pd.concat(
+                            {"Base": socf_base, scenario_label: socf_scenario}, axis=1
+                        )
+                        .swaplevel(axis=1)
+                        .sort_index(axis=1, level=0)
+                    )
                 except ValueError as exc:
                     st.info(str(exc))
 
