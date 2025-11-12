@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from importlib.util import find_spec
 from io import BytesIO
 import re
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
@@ -1084,6 +1085,17 @@ def _prepare_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def _resolve_excel_writer_engine() -> str:
+    if find_spec("xlsxwriter") is not None:
+        return "xlsxwriter"
+    if find_spec("openpyxl") is not None:
+        return "openpyxl"
+    raise RuntimeError(
+        "Excel export requires the XlsxWriter or openpyxl package. "
+        "Install one of them to enable downloads."
+    )
+
+
 def _generate_excel_bytes(
     model: GoatModel,
     results: Dict[str, Any],
@@ -1112,7 +1124,9 @@ def _generate_excel_bytes(
             index=False,
         )
 
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+    engine = _resolve_excel_writer_engine()
+
+    with pd.ExcelWriter(buffer, engine=engine) as writer:
         if base_df is not None:
             write_sheet("Input Schedule", base_df)
 

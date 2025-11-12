@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 app = [
     "streamlit>=1.32",
+    "XlsxWriter>=3.1",
 ]
 
 [project.scripts]
