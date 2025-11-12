@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from io import BytesIO
 import re
 from typing import Any, Dict, Optional
@@ -362,46 +363,177 @@ def _generate_excel_bytes(
     return buffer.getvalue()
 
 
-VARIABLE_DEFAULT_ITEMS = [
-    ("Feed & Supplements", 0.05),
-    ("Veterinary & Healthcare", 0.04),
-    ("Distribution & Logistics", 0.03),
+DEFAULT_VARIABLE_ITEMS = [
+    {"Item": "Feed & Supplements", "Share %": 5.0},
+    {"Item": "Veterinary & Healthcare", "Share %": 4.0},
+    {"Item": "Distribution & Logistics", "Share %": 3.0},
 ]
 
 
-DIRECT_WAGE_DEFAULT_ITEMS = [
-    ("Milking Crew", 0.6),
-    ("Herd Management", 0.4),
+DEFAULT_DIRECT_WAGE_ITEMS = [
+    {"Role": "Milking Crew", "Share %": 60.0},
+    {"Role": "Herd Management", "Share %": 40.0},
 ]
 
 
-ADMIN_WAGE_DEFAULT_ITEMS = [
-    ("Administration", 0.4),
-    ("Finance & Compliance", 0.35),
-    ("Sales & Support", 0.25),
+DEFAULT_ADMIN_WAGE_ITEMS = [
+    {"Function": "Administration", "Share %": 40.0},
+    {"Function": "Finance & Compliance", "Share %": 35.0},
+    {"Function": "Sales & Support", "Share %": 25.0},
 ]
 
 
-PRICING_DEFAULT_ROWS = [
-    (2024, "Milk", "Litre", 1.85, 3.0),
-    (2025, "Cheese", "Kg", 12.50, 2.5),
-    (2024, "Pelt", "Kg", 8.00, 2.0),
-    (2024, "Meat", "Kg", 10.50, 2.8),
+DEFAULT_PRICING_ROWS = [
+    {
+        "Year": 2024,
+        "Product": "Milk",
+        "Unit": "Litre",
+        "Base Price": 1.85,
+        "Price Growth %": 3.0,
+    },
+    {
+        "Year": 2025,
+        "Product": "Cheese",
+        "Unit": "Kg",
+        "Base Price": 12.50,
+        "Price Growth %": 2.5,
+    },
+    {
+        "Year": 2024,
+        "Product": "Pelt",
+        "Unit": "Kg",
+        "Base Price": 8.00,
+        "Price Growth %": 2.0,
+    },
+    {
+        "Year": 2024,
+        "Product": "Meat",
+        "Unit": "Kg",
+        "Base Price": 10.50,
+        "Price Growth %": 2.8,
+    },
 ]
 
 
-OPERATING_COST_DEFAULT_ROWS = [
-    (2024, "Feed", 8500.0, 4.0),
-    (2025, "Feed", 8840.0, 4.0),
-    (2024, "Healthcare", 1800.0, 3.5),
-    (2025, "Healthcare", 1863.0, 3.5),
-    (2024, "Utilities", 1200.0, 2.0),
-    (2025, "Utilities", 1224.0, 2.0),
+DEFAULT_OPERATING_COST_ROWS = [
+    {"Year": 2024, "Category": "Feed", "Monthly Cost": 8500.0, "Inflation %": 4.0},
+    {"Year": 2025, "Category": "Feed", "Monthly Cost": 8840.0, "Inflation %": 4.0},
+    {
+        "Year": 2024,
+        "Category": "Healthcare",
+        "Monthly Cost": 1800.0,
+        "Inflation %": 3.5,
+    },
+    {
+        "Year": 2025,
+        "Category": "Healthcare",
+        "Monthly Cost": 1863.0,
+        "Inflation %": 3.5,
+    },
+    {
+        "Year": 2024,
+        "Category": "Utilities",
+        "Monthly Cost": 1200.0,
+        "Inflation %": 2.0,
+    },
+    {
+        "Year": 2025,
+        "Category": "Utilities",
+        "Monthly Cost": 1224.0,
+        "Inflation %": 2.0,
+    },
 ]
+
+
+DEFAULT_INPUT_CONFIG_KEY = "default_input_templates"
+
+
+def _default_input_template_config() -> Dict[str, list[dict[str, object]]]:
+    return {
+        "variable_items": deepcopy(DEFAULT_VARIABLE_ITEMS),
+        "direct_wage_items": deepcopy(DEFAULT_DIRECT_WAGE_ITEMS),
+        "admin_wage_items": deepcopy(DEFAULT_ADMIN_WAGE_ITEMS),
+        "pricing_rows": deepcopy(DEFAULT_PRICING_ROWS),
+        "operating_rows": deepcopy(DEFAULT_OPERATING_COST_ROWS),
+    }
+
+
+def _ensure_default_templates() -> Dict[str, list[dict[str, object]]]:
+    if DEFAULT_INPUT_CONFIG_KEY not in st.session_state:
+        st.session_state[DEFAULT_INPUT_CONFIG_KEY] = _default_input_template_config()
+    return st.session_state[DEFAULT_INPUT_CONFIG_KEY]
+
+
+def _template_copy(template: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [dict(row) for row in template]
+
+
+def _get_template(name: str, fallback: list[dict[str, object]]) -> list[dict[str, object]]:
+    templates = _ensure_default_templates()
+    rows = templates.get(name)
+    if rows:
+        return deepcopy(rows)
+    return deepcopy(fallback)
+
+
+def _set_template(name: str, rows: list[dict[str, object]]) -> None:
+    templates = _ensure_default_templates()
+    templates[name] = deepcopy(rows)
+    st.session_state[DEFAULT_INPUT_CONFIG_KEY] = templates
+
+
+def _template_to_dataframe(
+    rows: list[dict[str, object]], columns: list[str]
+) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(rows)
+    for column in columns:
+        if column not in df.columns:
+            df[column] = np.nan
+    return df[columns]
+
+
+def _dataframe_to_template(df: pd.DataFrame, columns: list[str]) -> list[dict[str, object]]:
+    if df is None or df.empty:
+        return []
+
+    work = df.copy()
+    for column in columns:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    records: list[dict[str, object]] = []
+    for _, row in work[columns].iterrows():
+        record: dict[str, object] = {}
+        empty = True
+        for column in columns:
+            value = row[column]
+            if isinstance(value, str):
+                cleaned = value.strip()
+                record[column] = cleaned or None
+                if cleaned:
+                    empty = False
+            else:
+                if pd.isna(value):
+                    record[column] = None
+                else:
+                    record[column] = float(value)
+                    empty = False
+        if not empty:
+            records.append(record)
+    return records
 
 
 def _default_pricing_table() -> pd.DataFrame:
-    if not PRICING_DEFAULT_ROWS:
+    rows = _get_template("pricing_rows", DEFAULT_PRICING_ROWS)
+    table = _template_to_dataframe(
+        rows,
+        ["Year", "Product", "Unit", "Base Price", "Price Growth %"],
+    )
+
+    if table.empty:
         return pd.DataFrame(
             {
                 "Year": [pd.Timestamp.today().year],
@@ -412,15 +544,55 @@ def _default_pricing_table() -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(
-        {
-            "Year": [row[0] for row in PRICING_DEFAULT_ROWS],
-            "Product": [row[1] for row in PRICING_DEFAULT_ROWS],
-            "Unit": [row[2] for row in PRICING_DEFAULT_ROWS],
-            "Base Price": [row[3] for row in PRICING_DEFAULT_ROWS],
-            "Price Growth %": [row[4] for row in PRICING_DEFAULT_ROWS],
-        }
-    )
+    return table.reset_index(drop=True)
+
+
+def _variable_default_items() -> list[tuple[str, Optional[float]]]:
+    items: list[tuple[str, Optional[float]]] = []
+    for row in _get_template("variable_items", DEFAULT_VARIABLE_ITEMS):
+        item = str(row.get("Item", "")).strip() or "Variable Expense"
+        share_value = pd.to_numeric(
+            pd.Series([row.get("Share %")]), errors="coerce"
+        ).iloc[0]
+        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+        items.append((item, share))
+
+    if not items:
+        items.append(("Variable Expense", None))
+
+    return items
+
+
+def _direct_wage_default_items() -> list[tuple[str, Optional[float]]]:
+    roles: list[tuple[str, Optional[float]]] = []
+    for row in _get_template("direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS):
+        role = str(row.get("Role", "")).strip() or "Direct Wage"
+        share_value = pd.to_numeric(
+            pd.Series([row.get("Share %")]), errors="coerce"
+        ).iloc[0]
+        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+        roles.append((role, share))
+
+    if not roles:
+        roles.append(("Direct Wage", None))
+
+    return roles
+
+
+def _admin_wage_default_items() -> list[tuple[str, Optional[float]]]:
+    functions: list[tuple[str, Optional[float]]] = []
+    for row in _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS):
+        function = str(row.get("Function", "")).strip() or "Admin Wage"
+        share_value = pd.to_numeric(
+            pd.Series([row.get("Share %")]), errors="coerce"
+        ).iloc[0]
+        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+        functions.append((function, share))
+
+    if not functions:
+        functions.append(("Admin Wage", None))
+
+    return functions
 
 
 def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -539,7 +711,13 @@ def _apply_pricing_yearly_increment(
 
 
 def _default_operating_cost_table() -> pd.DataFrame:
-    if not OPERATING_COST_DEFAULT_ROWS:
+    rows = _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS)
+    table = _template_to_dataframe(
+        rows,
+        ["Year", "Category", "Monthly Cost", "Inflation %"],
+    )
+
+    if table.empty:
         return pd.DataFrame(
             {
                 "Year": [pd.Timestamp.today().year],
@@ -549,14 +727,7 @@ def _default_operating_cost_table() -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(
-        {
-            "Year": [row[0] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Category": [row[1] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Monthly Cost": [row[2] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Inflation %": [row[3] for row in OPERATING_COST_DEFAULT_ROWS],
-        }
-    )
+    return table.reset_index(drop=True)
 
 
 def _ensure_operating_cost_table(
@@ -758,9 +929,11 @@ def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     if periods:
         for idx, period in enumerate(periods):
             total = total_values[idx] if idx < len(total_values) else np.nan
-            for role, share in DIRECT_WAGE_DEFAULT_ITEMS:
+            for role, share in _direct_wage_default_items():
                 amount = (
-                    total * share if total is not None and not np.isnan(total) else np.nan
+                    total * share
+                    if share is not None and total is not None and not np.isnan(total)
+                    else np.nan
                 )
                 rows.append(
                     {
@@ -912,9 +1085,11 @@ def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     if periods:
         for idx, period in enumerate(periods):
             total = total_values[idx] if idx < len(total_values) else np.nan
-            for function, share in ADMIN_WAGE_DEFAULT_ITEMS:
+            for function, share in _admin_wage_default_items():
                 amount = (
-                    total * share if total is not None and not np.isnan(total) else np.nan
+                    total * share
+                    if share is not None and total is not None and not np.isnan(total)
+                    else np.nan
                 )
                 rows.append(
                     {
@@ -944,9 +1119,11 @@ def _ensure_admin_wage_table(
         reconstructed: list[dict[str, object]] = []
         for idx, period in enumerate(periods):
             total = totals.iloc[idx] if idx < len(totals) else np.nan
-            for function, share in ADMIN_WAGE_DEFAULT_ITEMS:
+            for function, share in _admin_wage_default_items():
                 amount = (
-                    total * share if total is not None and not np.isnan(total) else np.nan
+                    total * share
+                    if share is not None and total is not None and not np.isnan(total)
+                    else np.nan
                 )
                 reconstructed.append(
                     {
@@ -1087,8 +1264,11 @@ def _default_variable_expense_table(core: pd.DataFrame) -> pd.DataFrame:
     if periods:
         for idx, period in enumerate(periods):
             rev = revenue_values[idx] if idx < len(revenue_values) else np.nan
-            for item, pct in VARIABLE_DEFAULT_ITEMS:
-                amount = rev * pct if rev is not None and not np.isnan(rev) else np.nan
+            for item, share in _variable_default_items():
+                amount = (
+                    rev * share if share is not None and rev is not None and not np.isnan(rev)
+                    else np.nan
+                )
                 rows.append({
                     "Period": period,
                     "Item": item,
@@ -2066,11 +2246,233 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
     st.dataframe(table)
 
 
+def _render_default_input_manager(core_df: pd.DataFrame) -> None:
+    st.markdown("### Default Input Templates")
+    with st.expander("Edit default inputs", expanded=False):
+        st.caption(
+            "Adjust the templates used to pre-populate schedules and assumptions. "
+            "Changes persist for the current session and are applied when tables are regenerated."
+        )
+
+        tabs = st.tabs(
+            [
+                "Variable Expenses",
+                "Direct Wages",
+                "Admin Wages",
+                "Pricing Assumptions",
+                "Operating Costs",
+            ]
+        )
+
+        # Variable expenses defaults
+        with tabs[0]:
+            variable_columns = ["Item", "Share %"]
+            variable_defaults = _template_to_dataframe(
+                _get_template("variable_items", DEFAULT_VARIABLE_ITEMS),
+                variable_columns,
+            )
+            variable_editor = st.data_editor(
+                variable_defaults,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_variable_items_editor",
+                column_config={
+                    "Share %": st.column_config.NumberColumn(
+                        "Share (%)", format="%.2f", step=0.1
+                    )
+                },
+            )
+
+            save_col, reset_col, apply_col = st.columns(3)
+
+            if save_col.button("Save defaults", key="save_variable_defaults"):
+                records = _dataframe_to_template(variable_editor, variable_columns)
+                _set_template("variable_items", records)
+                st.success("Variable expense defaults updated.")
+
+            if reset_col.button("Restore baseline", key="reset_variable_defaults"):
+                _set_template("variable_items", _template_copy(DEFAULT_VARIABLE_ITEMS))
+                st.success("Variable expense defaults restored.")
+
+            if apply_col.button("Apply to schedule", key="apply_variable_defaults"):
+                new_table = _default_variable_expense_table(core_df)
+                if "detail_schedules" in st.session_state:
+                    st.session_state.detail_schedules[
+                        "Variable Expenses Schedule"
+                    ] = new_table
+                st.success("Variable expenses schedule regenerated from defaults.")
+
+        # Direct wages defaults
+        with tabs[1]:
+            direct_columns = ["Role", "Share %"]
+            direct_defaults = _template_to_dataframe(
+                _get_template("direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS),
+                direct_columns,
+            )
+            direct_editor = st.data_editor(
+                direct_defaults,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_direct_wage_editor",
+                column_config={
+                    "Share %": st.column_config.NumberColumn(
+                        "Share (%)", format="%.2f", step=0.1
+                    )
+                },
+            )
+
+            save_col, reset_col, apply_col = st.columns(3)
+
+            if save_col.button("Save defaults", key="save_direct_wage_defaults"):
+                records = _dataframe_to_template(direct_editor, direct_columns)
+                _set_template("direct_wage_items", records)
+                st.success("Direct wage defaults updated.")
+
+            if reset_col.button("Restore baseline", key="reset_direct_wage_defaults"):
+                _set_template("direct_wage_items", _template_copy(DEFAULT_DIRECT_WAGE_ITEMS))
+                st.success("Direct wage defaults restored.")
+
+            if apply_col.button("Apply to schedule", key="apply_direct_wage_defaults"):
+                new_table = _default_direct_wage_table(core_df)
+                if "detail_schedules" in st.session_state:
+                    st.session_state.detail_schedules[
+                        "Direct Wages Schedule"
+                    ] = new_table
+                st.success("Direct wages schedule regenerated from defaults.")
+
+        # Admin wages defaults
+        with tabs[2]:
+            admin_columns = ["Function", "Share %"]
+            admin_defaults = _template_to_dataframe(
+                _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS),
+                admin_columns,
+            )
+            admin_editor = st.data_editor(
+                admin_defaults,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_admin_wage_editor",
+                column_config={
+                    "Share %": st.column_config.NumberColumn(
+                        "Share (%)", format="%.2f", step=0.1
+                    )
+                },
+            )
+
+            save_col, reset_col, apply_col = st.columns(3)
+
+            if save_col.button("Save defaults", key="save_admin_wage_defaults"):
+                records = _dataframe_to_template(admin_editor, admin_columns)
+                _set_template("admin_wage_items", records)
+                st.success("Admin wage defaults updated.")
+
+            if reset_col.button("Restore baseline", key="reset_admin_wage_defaults"):
+                _set_template("admin_wage_items", _template_copy(DEFAULT_ADMIN_WAGE_ITEMS))
+                st.success("Admin wage defaults restored.")
+
+            if apply_col.button("Apply to schedule", key="apply_admin_wage_defaults"):
+                new_table = _default_admin_wage_table(core_df)
+                if "detail_schedules" in st.session_state:
+                    st.session_state.detail_schedules[
+                        "Admin Wages Schedule"
+                    ] = new_table
+                st.success("Admin wages schedule regenerated from defaults.")
+
+        # Pricing defaults
+        with tabs[3]:
+            pricing_columns = [
+                "Year",
+                "Product",
+                "Unit",
+                "Base Price",
+                "Price Growth %",
+            ]
+            pricing_defaults = _template_to_dataframe(
+                _get_template("pricing_rows", DEFAULT_PRICING_ROWS),
+                pricing_columns,
+            )
+            pricing_editor = st.data_editor(
+                pricing_defaults,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_pricing_editor",
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Base Price": st.column_config.NumberColumn(
+                        "Base Price", format="%.2f"
+                    ),
+                    "Price Growth %": st.column_config.NumberColumn(
+                        "Price Growth (%)", format="%.2f"
+                    ),
+                },
+            )
+
+            save_col, reset_col, apply_col = st.columns(3)
+
+            if save_col.button("Save defaults", key="save_pricing_defaults"):
+                records = _dataframe_to_template(pricing_editor, pricing_columns)
+                _set_template("pricing_rows", records)
+                st.success("Pricing defaults updated.")
+
+            if reset_col.button("Restore baseline", key="reset_pricing_defaults"):
+                _set_template("pricing_rows", _template_copy(DEFAULT_PRICING_ROWS))
+                st.success("Pricing defaults restored.")
+
+            if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
+                new_table = _default_pricing_table()
+                if "assumptions" in st.session_state:
+                    st.session_state.assumptions["Pricing"] = new_table
+                st.success("Pricing assumptions refreshed from defaults.")
+
+        # Operating cost defaults
+        with tabs[4]:
+            operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
+            operating_defaults = _template_to_dataframe(
+                _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
+                operating_columns,
+            )
+            operating_editor = st.data_editor(
+                operating_defaults,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_operating_editor",
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Monthly Cost": st.column_config.NumberColumn(
+                        "Monthly Cost", format="%.2f"
+                    ),
+                    "Inflation %": st.column_config.NumberColumn(
+                        "Inflation (%)", format="%.2f"
+                    ),
+                },
+            )
+
+            save_col, reset_col, apply_col = st.columns(3)
+
+            if save_col.button("Save defaults", key="save_operating_defaults"):
+                records = _dataframe_to_template(operating_editor, operating_columns)
+                _set_template("operating_rows", records)
+                st.success("Operating cost defaults updated.")
+
+            if reset_col.button("Restore baseline", key="reset_operating_defaults"):
+                _set_template("operating_rows", _template_copy(DEFAULT_OPERATING_COST_ROWS))
+                st.success("Operating cost defaults restored.")
+
+            if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
+                new_table = _default_operating_cost_table()
+                if "assumptions" in st.session_state:
+                    st.session_state.assumptions["Operating Costs"] = new_table
+                st.success("Operating cost assumptions refreshed from defaults.")
+
+
 def main() -> None:
     st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
 
     if "schedule" in st.session_state:
         st.session_state.pop("schedule")
+
+    if DEFAULT_INPUT_CONFIG_KEY not in st.session_state:
+        st.session_state[DEFAULT_INPUT_CONFIG_KEY] = _default_input_template_config()
 
     if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
         core_default, detail_defaults = _default_schedule_components()
@@ -2906,6 +3308,9 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = table
                     detail_tables_for_run[name] = table
+
+
+        _render_default_input_manager(st.session_state.core_schedule)
 
 
     if core_editor is None:
