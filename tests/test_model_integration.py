@@ -6,7 +6,7 @@ from goat_financial_model import GoatModel, InputSchedule
 
 
 def _build_sample_schedule() -> pd.DataFrame:
-    periods = pd.date_range("2024-01-31", periods=12, freq="ME")
+    periods = pd.date_range("2024-01-31", periods=12, freq="M")
     revenue = pd.Series(100000 + (periods.month - 1) * 5000, index=periods)
     cogs = revenue * 0.45
     gross_profit = revenue - cogs
@@ -136,7 +136,7 @@ def test_scenario_and_statements_pipeline():
 
 
 def test_input_schedule_rejects_non_numeric_columns():
-    periods = pd.date_range("2024-01-31", periods=2, freq="ME")
+    periods = pd.date_range("2024-01-31", periods=2, freq="M")
     schedule = pd.DataFrame({"Revenue": ["one", "two"]}, index=periods)
 
     with pytest.raises(ValueError):
@@ -144,7 +144,7 @@ def test_input_schedule_rejects_non_numeric_columns():
 
 
 def test_ratios_mask_zero_or_negative_denominators():
-    periods = pd.date_range("2024-01-31", periods=3, freq="ME")
+    periods = pd.date_range("2024-01-31", periods=3, freq="M")
     schedule = pd.DataFrame(
         {
             "Revenue": [1000.0, 0.0, -500.0],
