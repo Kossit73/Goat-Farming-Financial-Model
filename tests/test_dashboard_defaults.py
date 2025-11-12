@@ -48,3 +48,25 @@ def test_default_schedule_uses_builtin_horizon():
     assert periods.min().year == start_year
     assert periods.max().year == end_year
     assert len(periods) == (end_year - start_year + 1) * 12
+
+
+def test_scenario_presets_cover_key_cases():
+    names = set(streamlit_app.SCENARIO_PRESETS.keys())
+    assert {"Base Case Scenario", "Best Case Scenario", "Worst Case Scenario"}.issubset(
+        names
+    )
+
+
+def test_build_scenario_suite_supports_custom_entries():
+    custom_adjustments = {"Milk price change (%)": 5.0, "Feed cost change (%)": -3.0}
+    custom_label = "Custom Scenario – Milk +5%, Feed -3%"
+
+    base_suite = streamlit_app._build_scenario_suite()
+    assert custom_label not in base_suite
+
+    custom_suite = streamlit_app._build_scenario_suite(custom_label, custom_adjustments)
+    assert custom_label in custom_suite
+    assert (
+        custom_suite[custom_label]["adjustments"]["Milk price change (%)"]
+        == custom_adjustments["Milk price change (%)"]
+    )

@@ -1,6 +1,15 @@
+import importlib.util
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
+
+_STREAMLIT_APP_PATH = Path(__file__).resolve().parents[1] / "streamlit_app.py"
+_spec = importlib.util.spec_from_file_location("streamlit_app", _STREAMLIT_APP_PATH)
+assert _spec and _spec.loader  # type: ignore[truthy-bool]
+streamlit_app = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(streamlit_app)
 
 from goat_financial_model import GoatModel, InputSchedule
 
@@ -210,3 +219,26 @@ def test_discounted_cash_flow_summary():
 
     pv_total = cash_flows["Present Value"].sum() + summary["terminal_value_pv"]
     assert summary["enterprise_value"] == pytest.approx(pv_total, rel=1e-6)
+
+
+def test_execute_scenario_suite_runs_presets():
+    schedule = _build_sample_schedule()
+    suite = streamlit_app._build_scenario_suite()
+
+    model, base, results = streamlit_app._execute_scenario_suite(
+        schedule,
+        {},
+        {},
+        suite,
+    )
+
+    pd.testing.assert_frame_equal(base, model.to_tidy())
+    assert {
+        "Base Case Scenario",
+        "Best Case Scenario",
+        "Worst Case Scenario",
+    }.issubset(results.keys())
+
+    for payload in results.values():
+        assert "scenario" in payload
+        assert "Revenue_adj" in payload["scenario"].columns

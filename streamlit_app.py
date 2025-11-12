@@ -7,6 +7,8 @@ from io import BytesIO
 import re
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from copy import deepcopy
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -594,6 +596,31 @@ DETAIL_SCHEDULE_COLUMNS = {
 }
 
 
+SCENARIO_PRESETS: Dict[str, Dict[str, Any]] = {
+    "Base Case Scenario": {
+        "adjustments": {
+            "Milk price change (%)": 0.0,
+            "Feed cost change (%)": 0.0,
+        },
+        "description": "Baseline view using the model inputs without additional shocks.",
+    },
+    "Best Case Scenario": {
+        "adjustments": {
+            "Milk price change (%)": 12.0,
+            "Feed cost change (%)": -8.0,
+        },
+        "description": "Upside case with stronger milk pricing and more efficient feed spend.",
+    },
+    "Worst Case Scenario": {
+        "adjustments": {
+            "Milk price change (%)": -12.0,
+            "Feed cost change (%)": 10.0,
+        },
+        "description": "Downside case featuring pricing pressure and higher feed costs.",
+    },
+}
+
+
 CAP_TABLE_COLUMNS = ["Year", "Shareholder", "Ownership %", "Investment"]
 
 
@@ -627,6 +654,141 @@ def _format_scenario_label(milk_pct: int, feed_pct: int) -> str:
     if milk_pct == 0 and feed_pct == 0:
         return "Base Scenario"
     return f"Milk {milk_pct:+d}%, Feed {feed_pct:+d}%"
+
+
+def _build_scenario_suite(
+    custom_label: Optional[str] = None,
+    custom_adjustments: Optional[Dict[str, float]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    suite: Dict[str, Dict[str, Any]] = {}
+    for name, preset in SCENARIO_PRESETS.items():
+        suite[name] = {
+            "adjustments": deepcopy(preset["adjustments"]),
+            "description": preset.get("description", ""),
+        }
+
+    if custom_label and custom_adjustments:
+        suite[custom_label] = {
+            "adjustments": {
+                key: float(value)
+                for key, value in custom_adjustments.items()
+            },
+            "description": "Custom scenario defined via scenario controls.",
+        }
+
+    return suite
+
+
+def _execute_scenario_suite(
+    schedule_df: pd.DataFrame,
+    valuation_inputs: Dict[str, float],
+    supplementary_tables: Dict[str, pd.DataFrame],
+    scenario_suite: Dict[str, Dict[str, Any]],
+) -> Tuple[GoatModel, pd.DataFrame, Dict[str, Dict[str, Any]]]:
+    schedule = InputSchedule(
+        data=schedule_df,
+        valuation_inputs=valuation_inputs,
+        supplementary_tables=supplementary_tables,
+    )
+    model = schedule.to_model()
+    base = model.to_tidy()
+
+    base_supplementary = {
+        name: table.copy()
+        for name, table in (supplementary_tables or {}).items()
+        if isinstance(table, pd.DataFrame)
+    }
+
+    results: Dict[str, Dict[str, Any]] = {}
+    for name, config in scenario_suite.items():
+        adjustments = config.get("adjustments", {})
+        milk_pct = float(adjustments.get("Milk price change (%)", 0.0))
+        feed_pct = float(adjustments.get("Feed cost change (%)", 0.0))
+
+        scenario_df = model.scenario(
+            milk_price_pct=milk_pct / 100.0,
+            feed_cost_pct=feed_pct / 100.0,
+        )
+
+        scenario_supplementary = {
+            key: value.copy() for key, value in base_supplementary.items()
+        }
+
+        results[name] = {
+            "model": model,
+            "base": base,
+            "scenario": scenario_df,
+            "kpis": model.kpis(scenario_df, annual=True),
+            "break_even": model.break_even(scenario_df, annual=True),
+            "supplementary": scenario_supplementary,
+            "selected_scenario": name,
+            "scenario_inputs": {
+                "Milk price change (%)": milk_pct,
+                "Feed cost change (%)": feed_pct,
+            },
+            "preset_description": config.get("description", ""),
+        }
+
+    return model, base, results
+
+
+def _ensure_active_scenario_selection() -> None:
+    scenario_results = st.session_state.get("all_scenario_results") or {}
+    if not scenario_results:
+        return
+
+    selected = st.session_state.get("selected_scenario_name")
+    if selected not in scenario_results:
+        selected = next(iter(scenario_results))
+        st.session_state.selected_scenario_name = selected
+
+    current = st.session_state.get("results")
+    if not isinstance(current, dict) or current.get("selected_scenario") != selected:
+        st.session_state.results = scenario_results[selected]
+
+
+def _render_scenario_selector(prefix: str = "main") -> None:
+    scenario_results = st.session_state.get("all_scenario_results") or {}
+    if not scenario_results:
+        st.info("Run the scenario suite to enable comparisons.")
+        return
+
+    options = list(scenario_results.keys())
+    selected_name = st.session_state.get("selected_scenario_name")
+    try:
+        default_index = options.index(selected_name)
+    except ValueError:
+        default_index = 0
+        st.session_state.selected_scenario_name = options[0]
+        selected_name = options[0]
+
+    selected = st.selectbox(
+        "Select scenario",
+        options,
+        index=default_index,
+        key=f"scenario_selector::{prefix}",
+    )
+
+    if selected != selected_name:
+        st.session_state.selected_scenario_name = selected
+        st.session_state.results = scenario_results[selected]
+        selected_name = selected
+
+    description = scenario_results[selected_name].get("preset_description")
+    adjustments = scenario_results[selected_name].get("scenario_inputs", {})
+
+    details: list[str] = []
+    if description:
+        details.append(description)
+
+    if adjustments:
+        formatted = ", ".join(
+            f"{driver}: {value:+.1f}%" for driver, value in adjustments.items()
+        )
+        details.append(f"Adjustments – {formatted}")
+
+    if details:
+        st.caption(" \n".join(details))
 
 
 def _scenario_key_suffix(label: str) -> str:
@@ -2707,7 +2869,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
 def _ensure_default_results_loaded() -> None:
     """Populate the dashboard with default results for the initial view."""
 
-    if st.session_state.get("results") is not None:
+    if st.session_state.get("all_scenario_results"):
         return
 
     core_table = st.session_state.get("core_schedule")
@@ -2757,35 +2919,24 @@ def _ensure_default_results_loaded() -> None:
     }
 
     try:
-        (
-            model,
-            base,
-            scenario,
-            kpis,
-            break_even,
-        ) = _run_model(
+        scenario_suite = _build_scenario_suite()
+        model, _, scenario_results = _execute_scenario_suite(
             schedule_df,
             valuation_inputs,
             supplementary_copy,
-            0.0,
-            0.0,
+            scenario_suite,
         )
     except ValueError:
         return
 
-    st.session_state.results = {
-        "model": model,
-        "base": base,
-        "scenario": scenario,
-        "kpis": kpis,
-        "break_even": break_even,
-        "supplementary": supplementary_copy,
-        "selected_scenario": _format_scenario_label(0, 0),
-        "scenario_inputs": {
-            "Milk price change (%)": 0,
-            "Feed cost change (%)": 0,
-        },
-    }
+    st.session_state.all_scenario_results = scenario_results
+
+    preferred = st.session_state.get("selected_scenario_name")
+    if preferred not in scenario_results:
+        preferred = next(iter(scenario_results))
+
+    st.session_state.selected_scenario_name = preferred
+    st.session_state.results = scenario_results[preferred]
 
 
 def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -2934,34 +3085,6 @@ def _clean_editor_table(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     return work.reset_index(drop=True)
 
 
-def _run_model(
-    schedule_df: pd.DataFrame,
-    valuation_inputs: Dict[str, float],
-    supplementary_tables: Dict[str, pd.DataFrame],
-    milk_pct: float,
-    feed_pct: float,
-):
-    schedule = InputSchedule(
-        data=schedule_df,
-        valuation_inputs=valuation_inputs,
-        supplementary_tables=supplementary_tables,
-    )
-    model = schedule.to_model()
-    base = model.to_tidy()
-    scenario = model.scenario(milk_price_pct=milk_pct, feed_cost_pct=feed_pct)
-
-    kpis = model.kpis(scenario, annual=True)
-    break_even = model.break_even(scenario, annual=True)
-
-    return (
-        model,
-        base,
-        scenario,
-        kpis,
-        break_even,
-    )
-
-
 def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
     if table is None:
         st.info(f"No **{title}** data was provided.")
@@ -2999,10 +3122,21 @@ def main() -> None:
             st.session_state.detail_schedules = detail_defaults
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
+    if "all_scenario_results" not in st.session_state:
+        st.session_state.all_scenario_results = {}
+    if "selected_scenario_name" not in st.session_state:
+        st.session_state.selected_scenario_name = next(iter(SCENARIO_PRESETS))
     if "results" not in st.session_state:
         st.session_state.results = None
 
     _ensure_default_results_loaded()
+
+    _ensure_active_scenario_selection()
+
+    scenario_selector = st.container()
+    with scenario_selector:
+        st.markdown("### Scenario Explorer")
+        _render_scenario_selector()
 
     ai_payload = st.session_state.setdefault("ai_payload", {})
 
@@ -4216,7 +4350,7 @@ def main() -> None:
             assumption_tables["Scenario Controls"] = st.session_state.assumptions[
                 "Scenario Controls"
             ]
-            run_clicked = st.button("Run Scenario", type="primary")
+            run_clicked = st.button("Run Scenarios", type="primary")
 
         with assumption_tabs[1]:
             st.markdown("#### Production Time Horizon")
@@ -4650,7 +4784,7 @@ def main() -> None:
     with tabs[2]:
         st.subheader("Financial Statements")
         if st.session_state.results is None:
-            st.info("Run the scenario to generate the financial statements.")
+            st.info("Run the scenarios to generate the financial statements.")
         else:
             results = st.session_state.results
             financial_tabs = st.tabs(
@@ -4792,48 +4926,67 @@ def main() -> None:
             if cleaned is not None:
                 combined_supplementary[f"Assumptions - {name}"] = cleaned
 
+        custom_adjustments = {
+            "Milk price change (%)": float(milk_price),
+            "Feed cost change (%)": float(feed_cost),
+        }
+
+        matches_preset = any(
+            np.isclose(
+                custom_adjustments["Milk price change (%)"],
+                preset["adjustments"].get("Milk price change (%)", 0.0),
+            )
+            and np.isclose(
+                custom_adjustments["Feed cost change (%)"],
+                preset["adjustments"].get("Feed cost change (%)", 0.0),
+            )
+            for preset in SCENARIO_PRESETS.values()
+        )
+
+        scenario_suite = _build_scenario_suite()
+
+        if not matches_preset:
+            suffix = _format_scenario_label(
+                int(round(custom_adjustments["Milk price change (%)"])),
+                int(round(custom_adjustments["Feed cost change (%)"])),
+            )
+            custom_label = (
+                "Custom Scenario"
+                if suffix == "Base Scenario"
+                else f"Custom Scenario – {suffix}"
+            )
+            scenario_suite = _build_scenario_suite(custom_label, custom_adjustments)
+
         try:
-            (
-                model,
-                base,
-                scenario,
-                kpis,
-                break_even,
-            ) = _run_model(
+            model, _, scenario_results = _execute_scenario_suite(
                 schedule_df,
                 valuation_inputs,
                 combined_supplementary,
-                milk_price / 100.0,
-                feed_cost / 100.0,
+                scenario_suite,
             )
         except ValueError as exc:
             st.error(str(exc))
             return
 
-        st.success("Scenario complete")
+        st.success("Scenario suite complete")
 
-        selected_scenario = _format_scenario_label(milk_price, feed_cost)
-        scenario_inputs = {
-            "Milk price change (%)": milk_price,
-            "Feed cost change (%)": feed_cost,
-        }
+        st.session_state.all_scenario_results = scenario_results
 
-        st.session_state.results = {
-            "model": model,
-            "base": base,
-            "scenario": scenario,
-            "kpis": kpis,
-            "break_even": break_even,
-            "supplementary": combined_supplementary,
-            "selected_scenario": selected_scenario,
-            "scenario_inputs": scenario_inputs,
-        }
+        previous_selection = st.session_state.get("selected_scenario_name")
+        if previous_selection not in scenario_results:
+            previous_selection = "Base Case Scenario"
+            if previous_selection not in scenario_results:
+                previous_selection = next(iter(scenario_results))
+
+        st.session_state.selected_scenario_name = previous_selection
+        st.session_state.results = scenario_results[previous_selection]
+        st.session_state.excel_bytes_map = {}
 
     results = st.session_state.results
 
     if results is None:
         st.info(
-            "Update the input schedule, adjust the sliders, and press *Run Scenario* "
+            "Update the input schedule, adjust the sliders, and press *Run Scenarios* "
             "to evaluate alternative assumptions."
         )
     else:
@@ -4904,7 +5057,7 @@ def main() -> None:
     with tabs[3]:
         st.subheader("Dashboard")
         if results is None:
-            st.info("Run the scenario to populate the dashboard charts.")
+            st.info("Run the scenarios to populate the dashboard charts.")
         else:
             scenario = results["scenario"]
             break_even = results["break_even"]
@@ -4976,7 +5129,7 @@ def main() -> None:
             """
         )
         if results is None:
-            st.info("Run the scenario to view advanced analytics.")
+            st.info("Run the scenarios to view advanced analytics.")
         else:
             scenario = results["scenario"]
             model = results["model"]
