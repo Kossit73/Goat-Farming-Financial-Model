@@ -385,6 +385,8 @@ ADMIN_WAGE_DEFAULT_ITEMS = [
 PRICING_DEFAULT_ROWS = [
     (2024, "Milk", "Litre", 1.85, 3.0),
     (2025, "Cheese", "Kg", 12.50, 2.5),
+    (2024, "Pelt", "Kg", 8.00, 2.0),
+    (2024, "Meat", "Kg", 10.50, 2.8),
 ]
 
 
