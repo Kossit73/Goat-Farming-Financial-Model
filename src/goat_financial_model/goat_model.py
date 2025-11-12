@@ -602,6 +602,8 @@ class GoatModel:
         df: Optional[pd.DataFrame] = None,
         annual: bool = True,
     ) -> pd.DataFrame:
+        """Return an IFRS-style statement of profit or loss."""
+
         if df is None:
             df = self.to_tidy()
 
@@ -612,56 +614,102 @@ class GoatModel:
         ebit_col = "EBIT_adj" if "EBIT_adj" in df else "EBIT"
         npbt_col = "NPBT"
         npat_col = "NPAT_adj" if "NPAT_adj" in df else "NPAT"
+
         work = pd.DataFrame(index=df.index)
+        presence: Dict[str, bool] = {}
 
-        def _maybe_add(column: str, series: Optional[pd.Series]) -> None:
-            if series is None:
-                return
-            work[column] = pd.to_numeric(series, errors="coerce")
+        def _assign_first(target: str, *candidates: str) -> bool:
+            for name in candidates:
+                series = df.get(name)
+                if series is None:
+                    continue
+                numeric = pd.to_numeric(series, errors="coerce")
+                if target not in work:
+                    work[target] = numeric
+                    presence[target] = True
+                    return True
+            presence.setdefault(target, False)
+            return False
 
-        _maybe_add("Revenue", df.get(rev_col))
-        _maybe_add("COGS", df.get(cogs_col))
+        def _accumulate(target: str, *candidates: str) -> bool:
+            found = False
+            for name in candidates:
+                series = df.get(name)
+                if series is None:
+                    continue
+                numeric = pd.to_numeric(series, errors="coerce")
+                if target in work:
+                    work[target] = work[target].add(numeric, fill_value=0.0)
+                else:
+                    work[target] = numeric
+                found = True
+            if found:
+                presence[target] = True
+            else:
+                presence.setdefault(target, False)
+            return found
 
-        if "Revenue" in work and "COGS" in work:
-            work["Gross Profit"] = work["Revenue"] - work["COGS"]
-        else:
-            _maybe_add("Gross Profit", df.get(gm_col))
-
-        _maybe_add("Variable Expenses", df.get("Variable Expenses"))
-        _maybe_add("Direct Wages", df.get("Direct Wages"))
-        _maybe_add("EBITDA", df.get(ebitda_col))
-        _maybe_add("Fixed Expenses", df.get("Fixed Expenses"))
-        _maybe_add("Admin Wages", df.get("Admin Wages"))
-        _maybe_add("Depreciation", df.get("Depreciation & Amortization"))
-        _maybe_add("EBIT", df.get(ebit_col))
-
-        npbt_series = df.get(npbt_col)
-        npat_series = df.get(npat_col)
-        _maybe_add("Net Profit", npat_series)
-
-        interest_series = None
-        for interest_col in ("Interest Expense", "Interest", "Finance Costs"):
-            candidate = df.get(interest_col)
-            if candidate is not None:
-                interest_series = candidate
-                break
-        if interest_series is None and "EBIT" in work and npbt_series is not None:
-            interest_series = pd.to_numeric(work["EBIT"], errors="coerce") - pd.to_numeric(
-                npbt_series, errors="coerce"
-            )
-        _maybe_add("Interest", interest_series)
-
-        tax_series = None
-        for tax_col in ("Tax Expense", "Income Tax Expense", "Tax"):
-            candidate = df.get(tax_col)
-            if candidate is not None:
-                tax_series = candidate
-                break
-        if tax_series is None and npbt_series is not None and npat_series is not None:
-            tax_series = pd.to_numeric(npbt_series, errors="coerce") - pd.to_numeric(
-                npat_series, errors="coerce"
-            )
-        _maybe_add("Tax", tax_series)
+        _assign_first("Revenue", rev_col, "Revenue")
+        _assign_first("Cost of sales", cogs_col, "Cost of Sales", "COGS")
+        _assign_first("Gross profit", gm_col, "Gross Profit")
+        _accumulate(
+            "Other income",
+            "Other Income",
+            "Other Revenue",
+            "Non-operating Income",
+            "Investment Income",
+        )
+        _accumulate(
+            "Distribution costs",
+            "Variable Expenses",
+            "Distribution Costs",
+            "Selling Expenses",
+            "Sales and Marketing",
+            "Direct Wages",
+        )
+        _accumulate(
+            "Administrative expenses",
+            "Fixed Expenses",
+            "Admin Wages",
+            "Administrative Expenses",
+            "General & Administrative Expenses",
+            "Overheads",
+        )
+        _accumulate(
+            "Depreciation and amortisation",
+            "Depreciation & Amortization",
+            "Depreciation",
+            "Amortization",
+        )
+        _accumulate(
+            "Other operating expenses",
+            "Other Operating Expenses",
+            "Operating Expenses",
+            "Research and Development",
+        )
+        _assign_first("EBITDA", ebitda_col, "EBITDA")
+        _assign_first("Operating profit (EBIT)", ebit_col, "EBIT", "Operating Profit", "Operating Income")
+        _accumulate(
+            "Finance costs",
+            "Interest Expense",
+            "Finance Costs",
+            "Interest",
+        )
+        _assign_first("Profit before tax", npbt_col, "Profit Before Tax", "Earnings Before Tax")
+        _accumulate(
+            "Income tax expense",
+            "Tax Expense",
+            "Income Tax Expense",
+            "Tax",
+        )
+        _assign_first(
+            "Profit for the period",
+            npat_col,
+            "Net Profit",
+            "Profit for the Period",
+            "Profit After Tax",
+            "Net Income",
+        )
 
         if work.empty:
             raise ValueError("No income-statement data available in the schedule.")
@@ -670,37 +718,140 @@ class GoatModel:
         if agg.empty:
             raise ValueError("No income-statement data available in the schedule.")
 
-        ordered = [
-            "Revenue",
-            "COGS",
-            "Gross Profit",
-            "Gross Profit Margin",
-            "Variable Expenses",
-            "Direct Wages",
-            "EBITDA",
-            "Fixed Expenses",
-            "Admin Wages",
+        index = agg.index
+
+        def _series(name: str, *, default: float = np.nan) -> pd.Series:
+            if name in agg:
+                return pd.to_numeric(agg[name], errors="coerce")
+            if np.isnan(default):
+                return pd.Series(np.nan, index=index, dtype=float)
+            return pd.Series(default, index=index, dtype=float)
+
+        def _series_with_presence(name: str, *, default: float = np.nan) -> pd.Series:
+            series = _series(name, default=default)
+            if not presence.get(name, False):
+                return pd.Series(np.nan, index=index, dtype=float)
+            return series
+
+        revenue = _series_with_presence("Revenue")
+        cost_of_sales = _series_with_presence("Cost of sales")
+        gross_profit_reported = _series_with_presence("Gross profit")
+        other_income = _series_with_presence("Other income", default=0.0)
+        distribution_costs = _series_with_presence("Distribution costs", default=0.0)
+        administrative_expenses = _series_with_presence("Administrative expenses", default=0.0)
+        depreciation = _series_with_presence("Depreciation and amortisation", default=0.0)
+        other_operating = _series_with_presence("Other operating expenses", default=0.0)
+        finance_costs = _series_with_presence("Finance costs", default=0.0)
+        profit_before_tax = _series_with_presence("Profit before tax")
+        income_tax = _series_with_presence("Income tax expense", default=0.0)
+        profit_for_period = _series_with_presence("Profit for the period")
+        ebitda_series = _series_with_presence("EBITDA")
+        operating_profit_reported = _series_with_presence("Operating profit (EBIT)")
+
+        computed_gross = revenue.subtract(cost_of_sales, fill_value=0.0)
+        if presence.get("Revenue", False) and presence.get("Cost of sales", False):
+            gross_profit = computed_gross
+        elif gross_profit_reported.notna().any():
+            gross_profit = gross_profit_reported
+        else:
+            gross_profit = computed_gross
+
+        expenses_components = pd.concat(
+            [
+                distribution_costs,
+                administrative_expenses,
+                depreciation,
+                other_operating,
+            ],
+            axis=1,
+        )
+        expenses_components.columns = [
+            "Distribution",
+            "Administrative",
             "Depreciation",
-            "EBIT",
-            "Interest",
-            "Tax",
-            "Net Profit",
+            "Other",
         ]
 
-        out = pd.DataFrame(index=agg.index)
-        for column in ordered:
-            if column == "Gross Profit Margin":
-                continue
-            if column in agg:
-                out[column] = agg[column]
-            else:
-                out[column] = np.nan
+        operating_expenses_total = expenses_components.sum(axis=1, min_count=1)
+        operating_expenses_total = operating_expenses_total.where(
+            expenses_components.notna().any(axis=1), np.nan
+        )
 
-        if "Gross Profit" in agg and "Revenue" in agg:
-            margin = self._safe_divide(agg["Gross Profit"], agg["Revenue"])
-        else:
-            margin = pd.Series(np.nan, index=agg.index)
-        out["Gross Profit Margin"] = margin
+        computed_operating = (
+            gross_profit.fillna(0.0)
+            + other_income.fillna(0.0)
+            - operating_expenses_total.fillna(0.0)
+        )
+        has_operating_inputs = (
+            gross_profit.notna()
+            | other_income.notna()
+            | expenses_components.notna().any(axis=1)
+        )
+        operating_profit = computed_operating.mask(~has_operating_inputs, np.nan)
+        operating_profit = operating_profit.where(
+            operating_profit.notna(), operating_profit_reported
+        )
+
+        computed_ebitda = operating_profit.add(
+            depreciation.fillna(0.0), fill_value=0.0
+        )
+        if operating_profit.notna().any() or depreciation.notna().any():
+            ebitda_series = ebitda_series.where(ebitda_series.notna(), computed_ebitda)
+
+        computed_profit_before_tax = operating_profit.subtract(
+            finance_costs.fillna(0.0), fill_value=0.0
+        )
+        if operating_profit.notna().any() or finance_costs.notna().any():
+            profit_before_tax = profit_before_tax.where(
+                profit_before_tax.notna(), computed_profit_before_tax
+            )
+
+        computed_profit_for_period = profit_before_tax.subtract(
+            income_tax.fillna(0.0), fill_value=0.0
+        )
+        if profit_before_tax.notna().any() or income_tax.notna().any():
+            profit_for_period = profit_for_period.where(
+                profit_for_period.notna(), computed_profit_for_period
+            )
+
+        gross_profit_margin = self._safe_divide(gross_profit, revenue)
+
+        ordered = [
+            "Revenue",
+            "Cost of sales",
+            "Gross profit",
+            "Gross profit margin",
+            "Other income",
+            "Operating expenses – Distribution costs",
+            "Operating expenses – Administrative expenses",
+            "Operating expenses – Depreciation and amortisation",
+            "Operating expenses – Other",
+            "Operating expenses – Total",
+            "Operating profit (EBIT)",
+            "EBITDA",
+            "Finance costs",
+            "Profit before tax",
+            "Income tax expense",
+            "Profit for the period",
+        ]
+
+        out = pd.DataFrame(index=index)
+        out["Revenue"] = revenue
+        out["Cost of sales"] = cost_of_sales
+        out["Gross profit"] = gross_profit
+        out["Gross profit margin"] = gross_profit_margin
+        out["Other income"] = other_income
+        out["Operating expenses – Distribution costs"] = distribution_costs
+        out["Operating expenses – Administrative expenses"] = administrative_expenses
+        out["Operating expenses – Depreciation and amortisation"] = depreciation
+        out["Operating expenses – Other"] = other_operating
+        out["Operating expenses – Total"] = operating_expenses_total
+        out["Operating profit (EBIT)"] = operating_profit
+        out["EBITDA"] = ebitda_series
+        out["Finance costs"] = finance_costs
+        out["Profit before tax"] = profit_before_tax
+        out["Income tax expense"] = income_tax
+        out["Profit for the period"] = profit_for_period
 
         return out[ordered]
 

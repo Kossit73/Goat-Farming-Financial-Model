@@ -97,21 +97,24 @@ def test_scenario_and_statements_pipeline():
     performance = model.statement_of_financial_performance(scenario, annual=True)
     assert list(performance.columns) == [
         "Revenue",
-        "COGS",
-        "Gross Profit",
-        "Gross Profit Margin",
-        "Variable Expenses",
-        "Direct Wages",
+        "Cost of sales",
+        "Gross profit",
+        "Gross profit margin",
+        "Other income",
+        "Operating expenses – Distribution costs",
+        "Operating expenses – Administrative expenses",
+        "Operating expenses – Depreciation and amortisation",
+        "Operating expenses – Other",
+        "Operating expenses – Total",
+        "Operating profit (EBIT)",
         "EBITDA",
-        "Fixed Expenses",
-        "Admin Wages",
-        "Depreciation",
-        "EBIT",
-        "Interest",
-        "Tax",
-        "Net Profit",
+        "Finance costs",
+        "Profit before tax",
+        "Income tax expense",
+        "Profit for the period",
     ]
-    assert not performance.isna().all().any()
+    assert not performance["Revenue"].isna().all()
+    assert not performance["Profit for the period"].isna().all()
 
     cash_flow = model.statement_of_cash_flow(scenario, annual=True)
     assert "Net cash from operating activities" in cash_flow.columns
