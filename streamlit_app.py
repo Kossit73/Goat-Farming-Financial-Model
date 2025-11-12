@@ -30,6 +30,11 @@ try:
 except Exception:  # pragma: no cover - fallback for older Streamlit builds
     get_script_run_ctx = None
 
+try:  # pragma: no cover - import guard for Streamlit API variations
+    from streamlit.errors import StreamlitAPIException
+except Exception:  # pragma: no cover - older versions exposed the exception elsewhere
+    StreamlitAPIException = Exception
+
 
 def _can_rerun() -> bool:
     """Return True when the app is executing within a Streamlit runtime."""
@@ -49,6 +54,51 @@ def _maybe_rerun() -> None:
     if rerun_fn is None or not _can_rerun():
         return
     rerun_fn()
+
+
+def _safe_session_state_get(key: str, default: Any = None) -> Any:
+    """Return a session state value without raising outside a Streamlit run."""
+
+    try:
+        return st.session_state.get(key, default)
+    except StreamlitAPIException:
+        return default
+
+
+def _safe_session_state_setdefault(key: str, value: Any) -> Any:
+    """Set a default session state value when a runtime context exists."""
+
+    try:
+        return st.session_state.setdefault(key, value)
+    except StreamlitAPIException:
+        return value
+
+
+def _safe_session_state_set(key: str, value: Any) -> None:
+    """Assign a session state value when supported by the runtime."""
+
+    try:
+        st.session_state[key] = value
+    except StreamlitAPIException:
+        pass
+
+
+def _safe_session_state_contains(key: str) -> bool:
+    """Return True when the session state currently tracks the key."""
+
+    try:
+        return key in st.session_state
+    except StreamlitAPIException:
+        return False
+
+
+def _safe_session_state_pop(key: str, default: Any = None) -> Any:
+    """Remove a session state key without raising when unavailable."""
+
+    try:
+        return st.session_state.pop(key, default)
+    except StreamlitAPIException:
+        return default
 
 
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
@@ -1190,10 +1240,10 @@ def _render_scenario_preset_editors() -> None:
             add_cols = st.columns([2, 1, 1])
             driver_key = f"scenario_preset::{_scenario_key_suffix(name)}::new_driver"
             change_key = f"scenario_preset::{_scenario_key_suffix(name)}::new_change"
-            if driver_key not in st.session_state:
-                st.session_state[driver_key] = ""
-            if change_key not in st.session_state:
-                st.session_state[change_key] = 0.0
+            if not _safe_session_state_contains(driver_key):
+                _safe_session_state_setdefault(driver_key, "")
+            if not _safe_session_state_contains(change_key):
+                _safe_session_state_setdefault(change_key, 0.0)
 
             new_driver = add_cols[0].text_input(
                 "Driver name",
@@ -1207,8 +1257,8 @@ def _render_scenario_preset_editors() -> None:
             )
             if add_cols[2].button("Add variable", key=f"{driver_key}::add"):
                 _add_scenario_preset_driver(name, new_driver, float(new_change))
-                st.session_state[driver_key] = ""
-                st.session_state[change_key] = 0.0
+                _safe_session_state_set(driver_key, "")
+                _safe_session_state_set(change_key, 0.0)
                 _maybe_rerun()
                 return
 
@@ -1224,7 +1274,7 @@ def _render_scenario_preset_editors() -> None:
             if remove_cols[1].button("Remove variable", key=f"{remove_key}::remove"):
                 if remove_selection and remove_selection != "-- Select --":
                     _remove_scenario_preset_driver(name, remove_selection)
-                    st.session_state[remove_key] = "-- Select --"
+                    _safe_session_state_set(remove_key, "-- Select --")
                     _maybe_rerun()
                     return
 
@@ -1243,14 +1293,14 @@ def _render_scenario_preset_editors() -> None:
             default_description = SCENARIO_PRESETS[name].get("description", "")
             stored_value = description_store.get(name, default_description)
             desc_key = f"scenario_desc::{_scenario_key_suffix(name)}"
-            if desc_key not in st.session_state:
-                st.session_state[desc_key] = stored_value
+            if not _safe_session_state_contains(desc_key):
+                _safe_session_state_setdefault(desc_key, stored_value)
 
             st.text_area("Description", key=desc_key)
-            new_value = st.session_state.get(desc_key, "")
+            new_value = _safe_session_state_get(desc_key, "")
             updated = _set_scenario_preset_description(name, new_value)
             if updated is not None:
-                st.session_state[desc_key] = updated
+                _safe_session_state_set(desc_key, updated)
 
 CAP_TABLE_COLUMNS = ["Year", "Shareholder", "Ownership %", "Investment"]
 
