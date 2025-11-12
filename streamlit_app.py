@@ -10,6 +10,12 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+from pandas.api.types import (
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_integer_dtype,
+    is_numeric_dtype,
+)
 from pandas.tseries.offsets import MonthEnd
 from streamlit.delta_generator import DeltaGenerator
 
@@ -337,6 +343,76 @@ def _restore_editor_table(edited: pd.DataFrame, meta: Dict[str, Any]) -> pd.Data
     # Default to a simple RangeIndex
     restored.index = pd.RangeIndex(len(restored))
     return restored
+
+
+def _format_row_label(df: pd.DataFrame, idx: int) -> str:
+    """Return a compact label describing a row for the row selector."""
+
+    if df.empty:
+        return "Row"
+
+    row = df.iloc[idx]
+    parts: list[str] = []
+    for column in df.columns[:3]:
+        value = row[column]
+        if pd.isna(value):
+            continue
+        text = str(value)
+        if text.strip() == "":
+            continue
+        parts.append(f"{column}: {text}")
+        if len(parts) == 2:
+            break
+
+    if not parts:
+        return f"Row {idx + 1}"
+    return " | ".join(parts)
+
+
+def _coerce_row_value(raw: Any, dtype: pd.Series.dtype) -> Any:
+    """Coerce a raw editor input back to the column's dtype."""
+
+    if is_bool_dtype(dtype):
+        return bool(raw)
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text == "":
+            if is_numeric_dtype(dtype) or is_datetime64_any_dtype(dtype):
+                return np.nan
+            return ""
+
+        if is_datetime64_any_dtype(dtype):
+            try:
+                return pd.to_datetime(text)
+            except (TypeError, ValueError):
+                return text
+
+        if is_numeric_dtype(dtype):
+            coerced = pd.to_numeric([text], errors="coerce")[0]
+            if pd.isna(coerced):
+                return np.nan
+            if is_integer_dtype(dtype):
+                return int(round(coerced))
+            return float(coerced)
+
+        return text
+
+    return raw
+
+
+def _render_row_input(
+    column: str, value: Any, dtype: pd.Series.dtype, widget_key: str
+) -> Any:
+    """Render an appropriate widget for a single row cell."""
+
+    if is_bool_dtype(dtype):
+        default = bool(value) if not pd.isna(value) else False
+        return st.checkbox(column, value=default, key=widget_key)
+
+    display_value = "" if pd.isna(value) else str(value)
+    return st.text_input(column, value=display_value, key=widget_key)
+
 
 DETAIL_SCHEDULE_COLUMNS = {
     "COGS Schedule": ["COGS"],
@@ -4416,29 +4492,83 @@ def main() -> None:
 
                                     if editing:
                                         editor_df, meta = _prepare_editor_table(display_df)
-                                        st.data_editor(
-                                            editor_df,
-                                            num_rows="dynamic",
-                                            key=editor_key,
-                                        )
+                                        working_key = f"{editor_key}::working"
+                                        working_df = st.session_state.get(working_key)
+                                        if working_df is None:
+                                            working_df = editor_df.copy(deep=True)
+                                            st.session_state[working_key] = working_df
+
+                                        st.dataframe(working_df)
+                                        if working_df.empty:
+                                            st.info(
+                                                "This table has no rows to edit. Update the model inputs to populate it."
+                                            )
+                                        else:
+                                            row_indices = list(range(len(working_df)))
+                                            selected_row = st.selectbox(
+                                                "Select a row to edit",
+                                                row_indices,
+                                                format_func=lambda idx: _format_row_label(
+                                                    working_df, idx
+                                                ),
+                                                key=f"{editor_key}_row_selector",
+                                            )
+                                            dtype_map = working_df.dtypes.to_dict()
+                                            row_series = working_df.iloc[selected_row]
+                                            with st.form(f"{editor_key}_row_form"):
+                                                updated_values: Dict[str, Any] = {}
+                                                for column in working_df.columns:
+                                                    widget_key = (
+                                                        f"{editor_key}::{selected_row}::{column}"
+                                                    )
+                                                    cell_value = row_series[column]
+                                                    updated_values[column] = _render_row_input(
+                                                        column,
+                                                        cell_value,
+                                                        dtype_map[column],
+                                                        widget_key,
+                                                    )
+
+                                                submitted = st.form_submit_button(
+                                                    "Apply Row Changes"
+                                                )
+                                                if submitted:
+                                                    for column, raw_value in (
+                                                        updated_values.items()
+                                                    ):
+                                                        coerced = _coerce_row_value(
+                                                            raw_value, dtype_map[column]
+                                                        )
+                                                        working_df.iat[
+                                                            selected_row,
+                                                            working_df.columns.get_loc(
+                                                                column
+                                                            ),
+                                                        ] = coerced
+                                                    st.session_state[working_key] = (
+                                                        working_df
+                                                    )
+                                                    _maybe_rerun()
+
                                         action_cols = st.columns(3)
                                         if action_cols[0].button(
                                             "Save Changes",
                                             key=f"save_{editor_key}",
                                         ):
-                                            edited_df = st.session_state.get(editor_key)
-                                            if isinstance(edited_df, pd.DataFrame):
-                                                restored = _restore_editor_table(
-                                                    edited_df, meta
-                                                )
-                                                _set_analytics_override(
-                                                    scenario_label,
-                                                    block_name,
-                                                    key,
-                                                    table_name,
-                                                    restored,
-                                                )
-                                            st.session_state.pop(editor_key, None)
+                                            current_df = st.session_state.get(
+                                                working_key, editor_df
+                                            )
+                                            restored = _restore_editor_table(
+                                                current_df, meta
+                                            )
+                                            _set_analytics_override(
+                                                scenario_label,
+                                                block_name,
+                                                key,
+                                                table_name,
+                                                restored,
+                                            )
+                                            st.session_state.pop(working_key, None)
                                             st.session_state[edit_flag_key] = False
                                             _maybe_rerun()
 
@@ -4446,7 +4576,7 @@ def main() -> None:
                                             "Cancel",
                                             key=f"cancel_{editor_key}",
                                         ):
-                                            st.session_state.pop(editor_key, None)
+                                            st.session_state.pop(working_key, None)
                                             st.session_state[edit_flag_key] = False
                                             _maybe_rerun()
 
@@ -4460,7 +4590,7 @@ def main() -> None:
                                                 key,
                                                 table_name,
                                             )
-                                            st.session_state.pop(editor_key, None)
+                                            st.session_state.pop(working_key, None)
                                             st.session_state[edit_flag_key] = False
                                             _maybe_rerun()
                                     else:
