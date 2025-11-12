@@ -118,14 +118,31 @@ class AdvancedAnalyticsSuite:
             index = numeric.index
             if not isinstance(index, pd.DatetimeIndex):
                 index = pd.to_datetime(index, errors="coerce")
-            period_index = index.to_period("A")
+            period_index = index.to_period("Y")
             grouped = numeric.groupby(period_index).sum(min_count=1)
             numeric = grouped
             try:
-                numeric.index = numeric.index.to_timestamp("A")
+                numeric.index = numeric.index.to_timestamp("Y")
             except Exception:  # pragma: no cover - defensive fallback
                 numeric.index = pd.to_datetime([f"{val}-12-31" for val in numeric.index])
         return numeric
+
+    @staticmethod
+    def _normalise_frequency_code(freq: Optional[str]) -> Optional[str]:
+        if not freq:
+            return None
+        freq_str = str(freq).upper()
+        replacements = [
+            ("BQE", "BQ"),
+            ("QE", "Q"),
+            ("SME", "SM"),
+            ("BME", "BM"),
+            ("ME", "M"),
+        ]
+        for alias, replacement in replacements:
+            if alias in freq_str:
+                freq_str = freq_str.replace(alias, replacement)
+        return freq_str
 
     def _periods_per_year(self) -> int:
         if len(self.index) <= 1:
@@ -136,7 +153,8 @@ class AdvancedAnalyticsSuite:
         elif isinstance(self.index, pd.PeriodIndex) and self.index.freqstr:
             freq = self.index.freqstr
         if freq:
-            freq = freq.upper()
+            freq = self._normalise_frequency_code(freq)
+            base_freq = freq.split("-")[0] if freq else None
             mapping = {
                 "A": 1,
                 "Y": 1,
@@ -149,7 +167,7 @@ class AdvancedAnalyticsSuite:
                 "D": 365,
             }
             for key, value in mapping.items():
-                if freq.startswith(key):
+                if base_freq and base_freq.startswith(key):
                     return value
         if isinstance(self.index, pd.DatetimeIndex) and len(self.index) > 1:
             deltas = np.diff(self.index.asi8)
@@ -623,7 +641,7 @@ class AdvancedAnalyticsSuite:
         residual = revenue - smoothing
         seasonal = residual.groupby(residual.index.month if hasattr(residual.index, "month") else residual.index).mean()
 
-        freq = pd.infer_freq(revenue.index)
+        freq = self._normalise_frequency_code(pd.infer_freq(revenue.index))
         if freq is None:
             freq = "M" if len(revenue) > 12 else "A"
         horizon = min(6, len(revenue))
@@ -631,7 +649,12 @@ class AdvancedAnalyticsSuite:
         try:
             last_period = last_timestamp.to_period(freq)
         except (ValueError, AttributeError):
-            last_period = pd.Period(last_timestamp, freq=freq)
+            try:
+                last_period = pd.Period(last_timestamp, freq=freq)
+            except (ValueError, TypeError):
+                fallback = "M" if len(revenue) > 12 else "A"
+                freq = fallback
+                last_period = pd.Period(last_timestamp, freq=fallback)
         future_periods = pd.period_range(last_period + 1, periods=horizon, freq=freq)
         future_index = future_periods.to_timestamp(last_timestamp.tz)
         future_trend = intercept + slope * np.arange(len(revenue), len(revenue) + horizon)
