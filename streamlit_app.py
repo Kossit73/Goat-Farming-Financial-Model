@@ -3019,6 +3019,154 @@ def _ensure_production_horizon_table(
     return work[ordered_cols + remainder].reset_index(drop=True)
 
 
+def _production_year_options(start_year: int, end_year: int) -> list[int]:
+    """Return a flexible list of year options covering the supplied range."""
+
+    current_year = pd.Timestamp.today().year
+    minimum = min(start_year, end_year, current_year - 10, 2000)
+    maximum = max(start_year, end_year, current_year + 20)
+    return list(range(minimum, maximum + 1))
+
+
+def _safe_timeline(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Convert a schedule dataframe into a timeline index, ignoring errors."""
+
+    if isinstance(table, pd.DataFrame) and not table.empty:
+        try:
+            return _prepare_timeline_table(table)
+        except ValueError:
+            return pd.DataFrame(index=pd.DatetimeIndex([], name="Period"))
+    return pd.DataFrame(index=pd.DatetimeIndex([], name="Period"))
+
+
+def _timeline_to_schedule_frame(
+    timeline: pd.DataFrame, column_order: Optional[Sequence[str]] = None
+) -> pd.DataFrame:
+    """Convert a datetime-indexed timeline back into a schedule dataframe."""
+
+    if timeline.empty:
+        base_columns: list[str] = ["Period"]
+        if column_order:
+            base_columns.extend(
+                [col for col in column_order if col not in {"Period"}]
+            )
+        return pd.DataFrame(columns=base_columns)
+
+    ordered = timeline.sort_index()
+    frame = ordered.reset_index()
+    first_column = frame.columns[0]
+    if first_column != "Period":
+        frame = frame.rename(columns={first_column: "Period"})
+
+    frame["Period"] = _normalize_period(frame.get("Period", pd.Series(dtype=str)))
+
+    if column_order:
+        normalized_order = [
+            col for col in column_order if col not in {"Period"} and col in frame.columns
+        ]
+    else:
+        normalized_order = []
+
+    remainder = [
+        col
+        for col in frame.columns
+        if col not in {"Period", *normalized_order}
+    ]
+    return frame[["Period", *normalized_order, *remainder]]
+
+
+def _merge_schedule_table(
+    existing: Optional[pd.DataFrame],
+    defaults: Optional[pd.DataFrame],
+    period_index: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Merge an existing schedule with defaults to match the target horizon."""
+
+    column_order: list[str] = []
+    if isinstance(existing, pd.DataFrame) and not existing.empty:
+        column_order = list(existing.columns)
+    elif isinstance(defaults, pd.DataFrame) and not defaults.empty:
+        column_order = list(defaults.columns)
+
+    existing_timeline = _safe_timeline(existing)
+    default_timeline = _safe_timeline(defaults)
+
+    aligned_defaults = default_timeline.reindex(period_index)
+    aligned_existing = existing_timeline.reindex(period_index)
+
+    merged = aligned_defaults.copy()
+    if not aligned_existing.empty:
+        merged = merged.combine_first(aligned_existing)
+        merged.update(aligned_existing)
+
+    merged = merged.reindex(period_index)
+    return _timeline_to_schedule_frame(merged, column_order)
+
+
+def _rebase_schedule_to_horizon(
+    core: Optional[pd.DataFrame],
+    detail_tables: Optional[Dict[str, pd.DataFrame]],
+    start_year: int,
+    end_year: int,
+) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    """Return schedule tables that span the requested production horizon."""
+
+    if start_year > end_year:
+        start_year, end_year = end_year, start_year
+
+    horizon_table = pd.DataFrame({"Start Year": [start_year], "End Year": [end_year]})
+    default_core, default_details = _default_schedule_components(
+        production_horizon=horizon_table
+    )
+
+    start_date = (pd.Timestamp(start_year, 1, 1) + MonthEnd(0))
+    end_date = (pd.Timestamp(end_year, 12, 1) + MonthEnd(0))
+    period_index = pd.date_range(start=start_date, end=end_date, freq=MonthEnd())
+
+    merged_core = _merge_schedule_table(core, default_core, period_index)
+
+    existing_details = detail_tables or {}
+    detail_names = set(default_details.keys()) | set(existing_details.keys())
+
+    merged_details: Dict[str, pd.DataFrame] = {}
+    for name in detail_names:
+        merged_details[name] = _merge_schedule_table(
+            existing_details.get(name),
+            default_details.get(name),
+            period_index,
+        )
+
+    return merged_core, merged_details
+
+
+def _reset_cached_results() -> None:
+    """Clear cached scenario results so defaults regenerate with fresh inputs."""
+
+    st.session_state.all_scenario_results = {}
+    st.session_state.results = None
+    st.session_state.selected_scenario_name = next(iter(SCENARIO_PRESETS))
+
+
+def _sync_production_horizon(start_year: int, end_year: int) -> None:
+    """Ensure schedules and cached results reflect the selected horizon."""
+
+    core_table = st.session_state.get("core_schedule")
+    detail_tables = st.session_state.get("detail_schedules")
+
+    merged_core, merged_details = _rebase_schedule_to_horizon(
+        core_table, detail_tables, start_year, end_year
+    )
+
+    st.session_state.core_schedule = merged_core
+    st.session_state.detail_schedules = merged_details
+
+    _clear_schedule_editor_state("core_schedule")
+    for name in merged_details:
+        identifier = f"detail::{_scenario_key_suffix(name)}"
+        _clear_schedule_editor_state(identifier)
+
+    _reset_cached_results()
+
 def _default_capital_financing_table() -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -4599,18 +4747,54 @@ def main() -> None:
             )
             st.session_state.assumptions["Production Horizon"] = production_table
 
-            def _save_production(updated: pd.DataFrame) -> None:
-                ensured = _ensure_production_horizon_table(updated)
-                st.session_state.assumptions["Production Horizon"] = ensured
+            defaults = production_table.iloc[0]
+            start_default = int(defaults.get("Start Year", 2024))
+            end_default = int(defaults.get("End Year", start_default))
 
-            _render_schedule_row_editor(
-                "assump::production_horizon",
-                st.session_state.assumptions["Production Horizon"],
-                _save_production,
+            st.session_state.setdefault("production_start_year", start_default)
+            st.session_state.setdefault("production_end_year", end_default)
+
+            year_options = _production_year_options(start_default, end_default)
+            if st.session_state.production_start_year not in year_options:
+                st.session_state.production_start_year = start_default
+
+            start_col, end_col = st.columns(2)
+
+            start_value = start_col.selectbox(
+                "Start year",
+                options=year_options,
+                key="production_start_year",
             )
-            assumption_tables["Production Horizon"] = st.session_state.assumptions[
-                "Production Horizon"
-            ]
+
+            valid_end_options = [year for year in year_options if year >= start_value]
+            if not valid_end_options:
+                valid_end_options = [start_value]
+
+            if st.session_state.production_end_year not in valid_end_options:
+                st.session_state.production_end_year = valid_end_options[0]
+
+            end_value = end_col.selectbox(
+                "End year",
+                options=valid_end_options,
+                key="production_end_year",
+            )
+
+            if end_value < start_value:
+                st.session_state.production_end_year = start_value
+                end_value = start_value
+
+            if start_value != start_default or end_value != end_default:
+                updated_table = pd.DataFrame(
+                    {"Start Year": [start_value], "End Year": [end_value]}
+                )
+                st.session_state.assumptions["Production Horizon"] = updated_table
+                assumption_tables["Production Horizon"] = updated_table
+                _sync_production_horizon(start_value, end_value)
+                _ensure_default_results_loaded()
+                _ensure_active_scenario_selection()
+                _maybe_rerun()
+            else:
+                assumption_tables["Production Horizon"] = production_table
 
         with assumption_tabs[2]:
             st.markdown("#### Pricing Assumptions")

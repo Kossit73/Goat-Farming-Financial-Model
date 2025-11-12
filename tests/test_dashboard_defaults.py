@@ -70,3 +70,35 @@ def test_build_scenario_suite_supports_custom_entries():
         custom_suite[custom_label]["adjustments"]["Milk price change (%)"]
         == custom_adjustments["Milk price change (%)"]
     )
+
+
+def test_rebase_schedule_to_horizon_extends_periods():
+    short_horizon = pd.DataFrame({"Start Year": [2024], "End Year": [2025]})
+    core, details = streamlit_app._default_schedule_components(
+        production_horizon=short_horizon
+    )
+
+    core.at[0, "Revenue"] = 123456.0
+    details["COGS Schedule"].at[0, "COGS"] = 654321.0
+
+    extended_core, extended_details = streamlit_app._rebase_schedule_to_horizon(
+        core, details, 2024, 2027
+    )
+
+    periods = pd.to_datetime(extended_core["Period"], errors="coerce").dropna()
+    assert periods.min().year == 2024
+    assert periods.max().year == 2027
+    assert len(periods) == (2027 - 2024 + 1) * 12
+
+    january_2024 = periods == pd.Timestamp(2024, 1, 31)
+    assert not january_2024.empty
+    assert (
+        extended_core.loc[january_2024, "Revenue"].iloc[0]
+        == core.loc[0, "Revenue"]
+    )
+
+    cogs_table = extended_details.get("COGS Schedule")
+    assert cogs_table is not None
+    cogs_periods = pd.to_datetime(cogs_table["Period"], errors="coerce").dropna()
+    assert cogs_periods.max().year == 2027
+    assert not cogs_table.loc[cogs_periods.dt.year == 2027, "COGS"].isna().all()
