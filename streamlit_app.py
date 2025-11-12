@@ -79,6 +79,55 @@ GEN_AI_FEATURE_LABELS = {
 GEN_AI_LABEL_TO_CODE = {label: code for code, label in GEN_AI_FEATURE_LABELS.items()}
 
 
+DEFAULT_MODEL_AUTHOR = "Goat Farmers United"
+
+
+def _sanitize_model_author_value(value: Any) -> str:
+    """Return a cleaned author string using the default when empty."""
+
+    if not isinstance(value, str):
+        value = str(value)
+    return value.strip() or DEFAULT_MODEL_AUTHOR
+
+
+def _handle_model_author_change() -> None:
+    """Persist author edits and clear cached exports when updated."""
+
+    sanitized = _sanitize_model_author_value(st.session_state.get("model_author", ""))
+    previous = st.session_state.get("_model_author_cached")
+    st.session_state.model_author = sanitized
+    st.session_state["_model_author_cached"] = sanitized
+    if previous is not None and sanitized != previous:
+        st.session_state.pop("excel_bytes_map", None)
+
+
+def _current_model_author() -> str:
+    """Return the active model author, applying defaults when necessary."""
+
+    current = st.session_state.get("model_author", DEFAULT_MODEL_AUTHOR)
+    sanitized = _sanitize_model_author_value(current)
+    if sanitized != current:
+        st.session_state.model_author = sanitized
+    st.session_state.setdefault("_model_author_cached", sanitized)
+    return sanitized
+
+
+def _render_model_author_editor() -> None:
+    """Display an inline editor for the model author name."""
+
+    st.session_state.setdefault("model_author", DEFAULT_MODEL_AUTHOR)
+    st.text_input(
+        "Model author",
+        key="model_author",
+        on_change=_handle_model_author_change,
+        help=(
+            "Name recorded in scenario outputs and Excel downloads. "
+            "Leave blank to reset to the default."
+        ),
+    )
+    _handle_model_author_change()
+
+
 def _statement_series_by_suffix(
     df: Optional[pd.DataFrame], suffixes: Sequence[str]
 ) -> Optional[pd.Series]:
@@ -941,6 +990,7 @@ def _execute_scenario_suite(
     }
 
     results: Dict[str, Dict[str, Any]] = {}
+    author_name = _current_model_author()
     for name, config in scenario_suite.items():
         adjustments = config.get("adjustments", {})
         milk_pct = float(adjustments.get("Milk price change (%)", 0.0))
@@ -955,6 +1005,13 @@ def _execute_scenario_suite(
             key: value.copy() for key, value in base_supplementary.items()
         }
 
+        scenario_inputs: Dict[str, Any] = {
+            "Milk price change (%)": milk_pct,
+            "Feed cost change (%)": feed_pct,
+        }
+        if author_name:
+            scenario_inputs["Model author"] = author_name
+
         results[name] = {
             "model": model,
             "base": base,
@@ -963,10 +1020,8 @@ def _execute_scenario_suite(
             "break_even": model.break_even(scenario_df, annual=True),
             "supplementary": scenario_supplementary,
             "selected_scenario": name,
-            "scenario_inputs": {
-                "Milk price change (%)": milk_pct,
-                "Feed cost change (%)": feed_pct,
-            },
+            "scenario_inputs": scenario_inputs,
+            "model_author": author_name,
             "preset_description": config.get("description", ""),
         }
 
@@ -1017,16 +1072,23 @@ def _render_scenario_selector(prefix: str = "main") -> None:
 
     description = scenario_results[selected_name].get("preset_description")
     adjustments = scenario_results[selected_name].get("scenario_inputs", {})
+    author_name = scenario_results[selected_name].get("model_author")
 
     details: list[str] = []
     if description:
         details.append(description)
 
     if adjustments:
-        formatted = ", ".join(
-            f"{driver}: {value:+.1f}%" for driver, value in adjustments.items()
-        )
-        details.append(f"Adjustments – {formatted}")
+        numeric_adjustments = [
+            f"{driver}: {value:+.1f}%"
+            for driver, value in adjustments.items()
+            if isinstance(value, (int, float)) and not pd.isna(value)
+        ]
+        if numeric_adjustments:
+            details.append(f"Adjustments – {', '.join(numeric_adjustments)}")
+
+    if isinstance(author_name, str) and author_name.strip():
+        details.append(f"Prepared by – {author_name.strip()}")
 
     if details:
         st.caption(" \n".join(details))
@@ -1100,6 +1162,7 @@ def _generate_excel_bytes(
     model: GoatModel,
     results: Dict[str, Any],
     scenario_name: str,
+    author_name: Optional[str] = None,
 ) -> bytes:
     buffer = BytesIO()
 
@@ -1125,8 +1188,19 @@ def _generate_excel_bytes(
         )
 
     engine = _resolve_excel_writer_engine()
+    author = (author_name or "").strip() or DEFAULT_MODEL_AUTHOR
 
     with pd.ExcelWriter(buffer, engine=engine) as writer:
+        workbook = getattr(writer, "book", None)
+        if workbook is not None and author:
+            if engine == "xlsxwriter" and hasattr(workbook, "set_properties"):
+                workbook.set_properties({"author": author})
+            elif engine == "openpyxl":
+                try:
+                    workbook.properties.creator = author
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
         if base_df is not None:
             write_sheet("Input Schedule", base_df)
 
@@ -3547,6 +3621,7 @@ def main() -> None:
     scenario_selector = st.container()
     with scenario_selector:
         st.markdown("### Scenario Explorer")
+        _render_model_author_editor()
         _render_scenario_selector()
 
     excel_download_container = st.container()
@@ -5489,7 +5564,10 @@ def main() -> None:
                 ):
                     with st.spinner("Preparing Excel workbook..."):
                         excel_bytes = _generate_excel_bytes(
-                            model, results, selected_scenario
+                            model,
+                            results,
+                            selected_scenario,
+                            _current_model_author(),
                         )
                     excel_map[selected_scenario] = excel_bytes
                     st.session_state.excel_bytes_map = excel_map
