@@ -11,6 +11,26 @@ import pandas as pd
 SeriesLabels = Sequence[str]
 
 
+def _coerce_numeric_frame(df: pd.DataFrame, *, context: str) -> pd.DataFrame:
+    """Convert frame to numeric, raising if columns lose all data."""
+
+    raw = df.copy()
+    numeric = df.apply(pd.to_numeric, errors="coerce")
+
+    problematic = [
+        column
+        for column in numeric.columns
+        if numeric[column].notna().sum() == 0 and raw[column].notna().sum() > 0
+    ]
+    if problematic:
+        columns = ", ".join(problematic)
+        raise ValueError(
+            f"{context} columns contain no numeric values after coercion: {columns}."
+        )
+
+    return numeric
+
+
 @dataclass
 class InputSchedule:
     """Container for manually entered time-series data and supplementary tables."""
@@ -26,7 +46,7 @@ class InputSchedule:
             raise ValueError("Input schedule periods must be unique.")
         self.data = self.data.sort_index()
         self.data.index.name = "Period"
-        self.data = self.data.apply(pd.to_numeric, errors="coerce")
+        self.data = _coerce_numeric_frame(self.data, context="Input schedule")
 
         cleaned_tables: Dict[str, pd.DataFrame] = {}
         for name, table in self.supplementary_tables.items():
@@ -54,7 +74,8 @@ class InputSchedule:
         if periods.isna().any():
             raise ValueError("Unable to parse one or more period values into dates.")
 
-        values = frame.drop(columns=[period_col]).apply(pd.to_numeric, errors="coerce")
+        values = frame.drop(columns=[period_col])
+        values = _coerce_numeric_frame(values, context="Input schedule")
         values.index = pd.DatetimeIndex(periods)
         values.index.name = "Period"
 
@@ -89,13 +110,37 @@ class GoatModel:
             raise ValueError("Model periods must be unique.")
         self.data = self.data.sort_index()
         self.data.index.name = "Period"
-        self.data = self.data.apply(pd.to_numeric, errors="coerce")
+        self.data = _coerce_numeric_frame(self.data, context="Model data")
 
     @property
     def dates(self) -> pd.DatetimeIndex:
         return self.data.index
 
     # ---------- Internal helpers ----------
+    @staticmethod
+    def _safe_divide(
+        numerator: pd.Series,
+        denominator: pd.Series,
+        *,
+        min_abs: float = 1e-9,
+        allow_negative: bool = False,
+    ) -> pd.Series:
+        """Safely divide two aligned series, masking unstable denominators."""
+
+        num_aligned, denom_aligned = numerator.align(denominator, join="outer")
+        result = pd.Series(np.nan, index=num_aligned.index, dtype=float)
+
+        valid_mask = denom_aligned.notna() & (denom_aligned.abs() >= min_abs)
+        if not allow_negative:
+            valid_mask &= denom_aligned > 0
+
+        if valid_mask.any():
+            result.loc[valid_mask] = (
+                num_aligned.loc[valid_mask] / denom_aligned.loc[valid_mask]
+            )
+
+        return result
+
     def _get_series(self, labels: SeriesLabels) -> Optional[pd.Series]:
         for label in labels:
             if label in self.data.columns:
@@ -318,6 +363,72 @@ class GoatModel:
             return None
         return pd.Series(values[mask].to_numpy(), index=pd.DatetimeIndex(idx[mask]), name="Unlevered Free Cash Flow")
 
+    def discounted_cash_flow(self) -> Dict[str, object]:
+        """Compute the discounted cash-flow valuation using stored assumptions."""
+
+        cash_flows = self.ufcf()
+        if cash_flows is None or cash_flows.empty:
+            raise ValueError("UFCF schedule is required for discounted cash-flow analysis.")
+
+        rate = self.wacc()
+        if rate is None:
+            raise ValueError("WACC is required for discounted cash-flow analysis.")
+
+        if rate > 1:
+            rate = rate / 100.0
+        if rate <= 0:
+            raise ValueError("WACC must be positive to compute discounted cash flow.")
+
+        cash_flows = cash_flows.sort_index()
+        diffs = cash_flows.index.to_series().diff().dt.days.astype(float) / 365.25
+        if len(diffs) > 1 and np.isfinite(diffs.iloc[1:]).any():
+            fallback = diffs.iloc[1:][np.isfinite(diffs.iloc[1:])].median()
+        else:
+            fallback = 1.0
+        if not np.isfinite(fallback) or fallback <= 0:
+            fallback = 1.0
+        diffs.iloc[0] = fallback
+        diffs = diffs.fillna(fallback)
+        diffs = diffs.clip(lower=1e-9)
+
+        periods = diffs.cumsum().to_numpy()
+        discount_factors = 1 / np.power(1 + rate, periods)
+        pv_cash_flows = cash_flows.to_numpy() * discount_factors
+
+        cash_flow_df = pd.DataFrame(
+            {
+                "UFCF": cash_flows.to_numpy(),
+                "Discount Factor": discount_factors,
+                "Present Value": pv_cash_flows,
+            },
+            index=cash_flows.index,
+        )
+
+        terminal_value = self.terminal_value()
+        terminal_value_pv = None
+        if terminal_value is not None:
+            last_step = diffs.iloc[-1]
+            horizon = periods[-1] + last_step
+            terminal_value_pv = float(terminal_value) / ((1 + rate) ** horizon)
+
+        total_pv = float(np.nansum(pv_cash_flows))
+        enterprise_value = total_pv + (terminal_value_pv or 0.0)
+
+        summary: Dict[str, object] = {
+            "cash_flows": cash_flow_df,
+            "discount_rate": rate,
+            "enterprise_value": enterprise_value,
+        }
+
+        if terminal_value_pv is not None:
+            summary["terminal_value_pv"] = terminal_value_pv
+
+        npv_value = self.npv()
+        if npv_value is not None:
+            summary["npv"] = float(npv_value)
+
+        return summary
+
     # ---------- Supplementary schedules ----------
     def capitalisation_table(self) -> Optional[pd.DataFrame]:
         return self.supplementary_tables.get("Capitalisation Table")
@@ -400,9 +511,14 @@ class GoatModel:
         npbt = self.npbt()
         npat = self.npat()
         if npbt is not None and npat is not None and npbt.notna().any() and npat.notna().any():
-            idx = npbt.notna() & npat.notna()
-            eff_tax = 1 - (npat[idx] / npbt[idx]).median()
-            eff_tax = float(np.clip(eff_tax, 0.0, 0.5))
+            aligned = pd.concat([npbt, npat], axis=1).dropna()
+            aligned = aligned[aligned.iloc[:, 0].abs() > 1e-9]
+            aligned = aligned[aligned.iloc[:, 0] > 0]
+            if not aligned.empty:
+                eff_tax = 1 - (aligned.iloc[:, 1] / aligned.iloc[:, 0]).median()
+                eff_tax = float(np.clip(eff_tax, 0.0, 0.5))
+            else:
+                eff_tax = 0.28
         else:
             eff_tax = 0.28
         df["NPAT_adj"] = df["EBIT_adj"] * (1 - eff_tax)
@@ -440,10 +556,10 @@ class GoatModel:
             grp = work.copy()
 
         out = pd.DataFrame(index=grp.index)
-        out["Gross Margin %"] = grp["Gross Margin"] / grp["Revenue"]
-        out["EBITDA Margin %"] = grp["EBITDA"] / grp["Revenue"]
-        out["Net Margin %"] = grp["NPAT"] / grp["Revenue"]
-        out["COGS % of Revenue"] = grp["COGS"] / grp["Revenue"]
+        out["Gross Margin %"] = self._safe_divide(grp["Gross Margin"], grp["Revenue"])
+        out["EBITDA Margin %"] = self._safe_divide(grp["EBITDA"], grp["Revenue"])
+        out["Net Margin %"] = self._safe_divide(grp["NPAT"], grp["Revenue"])
+        out["COGS % of Revenue"] = self._safe_divide(grp["COGS"], grp["Revenue"])
         out["Revenue YoY %"] = grp["Revenue"].pct_change()
         return out
 
@@ -456,15 +572,15 @@ class GoatModel:
         gm = df["Gross Margin_adj"] if "Gross Margin_adj" in df else df["Gross Margin"]
         ebitda = df["EBITDA_adj"] if "EBITDA_adj" in df else df["EBITDA"]
 
-        cm_ratio = gm / rev
-        fixed_costs = gm - ebitda
-
         if annual:
             idx = rev.index.year
-            cm_ratio = (gm.groupby(idx).sum(min_count=1) / rev.groupby(idx).sum(min_count=1))
-            fixed_costs = fixed_costs.groupby(idx).sum(min_count=1)
+            rev = rev.groupby(idx).sum(min_count=1)
+            gm = gm.groupby(idx).sum(min_count=1)
+            ebitda = ebitda.groupby(idx).sum(min_count=1)
 
-        be_rev = fixed_costs / cm_ratio
+        cm_ratio = self._safe_divide(gm, rev)
+        fixed_costs = gm - ebitda
+        be_rev = self._safe_divide(fixed_costs, cm_ratio)
         return pd.DataFrame(
             {
                 "Contribution Margin %": cm_ratio,
@@ -581,9 +697,7 @@ class GoatModel:
                 out[column] = np.nan
 
         if "Gross Profit" in agg and "Revenue" in agg:
-            with np.errstate(divide="ignore", invalid="ignore"):
-                margin = agg["Gross Profit"] / agg["Revenue"]
-            margin = margin.replace({np.inf: np.nan, -np.inf: np.nan})
+            margin = self._safe_divide(agg["Gross Profit"], agg["Revenue"])
         else:
             margin = pd.Series(np.nan, index=agg.index)
         out["Gross Profit Margin"] = margin
@@ -821,19 +935,21 @@ class GoatModel:
         out = pd.DataFrame(index=work.index)
         out["Revenue Growth %"] = work["Revenue"].pct_change()
         out["Rolling Revenue (window)"] = work["Revenue"].rolling(window, min_periods=1).mean()
-        out["Gross Margin %"] = work["Gross Margin"] / work["Revenue"]
-        out["EBITDA Margin %"] = work["EBITDA"] / work["Revenue"]
-        out["Net Margin %"] = work["NPAT"] / work["Revenue"]
+        out["Gross Margin %"] = self._safe_divide(work["Gross Margin"], work["Revenue"])
+        out["EBITDA Margin %"] = self._safe_divide(work["EBITDA"], work["Revenue"])
+        out["Net Margin %"] = self._safe_divide(work["NPAT"], work["Revenue"])
         if "Variable Expenses" in df:
             var = df["Variable Expenses"]
             var = var.groupby(var.index.year).sum(min_count=1) if annual else var
-            out["Variable Cost %"] = var / work["Revenue"]
+            out["Variable Cost %"] = self._safe_divide(var, work["Revenue"])
         if "Fixed Expenses" in df:
             fixed = df["Fixed Expenses"]
             fixed = fixed.groupby(fixed.index.year).sum(min_count=1) if annual else fixed
-            out["Fixed Cost %"] = fixed / work["Revenue"]
+            out["Fixed Cost %"] = self._safe_divide(fixed, work["Revenue"])
         if "EBITDA" in work:
-            out["EBITDA Conversion"] = work["EBITDA"] / work["Gross Margin"]
+            out["EBITDA Conversion"] = self._safe_divide(
+                work["EBITDA"], work["Gross Margin"]
+            )
         return out
 
     def to_tidy(self) -> pd.DataFrame:
