@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from io import BytesIO
 import re
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from copy import deepcopy
 
@@ -76,6 +76,246 @@ GEN_AI_FEATURE_LABELS = {
 }
 
 GEN_AI_LABEL_TO_CODE = {label: code for code, label in GEN_AI_FEATURE_LABELS.items()}
+
+
+def _statement_series_by_suffix(
+    df: Optional[pd.DataFrame], suffixes: Sequence[str]
+) -> Optional[pd.Series]:
+    """Return the first numeric series whose column label ends with any suffix."""
+
+    if df is None or df.empty:
+        return None
+
+    for suffix in suffixes:
+        for column in df.columns:
+            if not isinstance(column, str):
+                continue
+            if column.endswith(suffix):
+                series = pd.to_numeric(df[column], errors="coerce")
+                if series.notna().any():
+                    return series
+    return None
+
+
+def _statement_scenario_frames(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> Dict[str, pd.DataFrame]:
+    """Assemble labelled dataframes for the base case and selected scenario."""
+
+    frames: Dict[str, pd.DataFrame] = {}
+
+    if base_df is not None and not base_df.empty:
+        frames["Base Case"] = base_df
+
+    if scenario_df is not None and not scenario_df.empty:
+        label = (scenario_label or "Selected Scenario").strip()
+        if label.lower() in {"base", "base case", "base case scenario"}:
+            label = "Selected Scenario"
+        if label in frames:
+            label = f"{label} (Selected)"
+        frames[label] = scenario_df
+
+    return frames
+
+
+def _build_statement_chart_frame(
+    frames: Dict[str, pd.DataFrame],
+    metrics: Sequence[Tuple[str, Sequence[str]]],
+) -> Optional[pd.DataFrame]:
+    """Construct a combined dataframe for charting the requested metrics."""
+
+    chart_frames: list[pd.DataFrame] = []
+
+    for scenario_label, df in frames.items():
+        if df is None or df.empty:
+            continue
+
+        scenario_columns: Dict[str, pd.Series] = {}
+        for display_name, suffixes in metrics:
+            series = _statement_series_by_suffix(df, suffixes)
+            if series is None:
+                continue
+            scenario_columns[f"{scenario_label} – {display_name}"] = series
+
+        if scenario_columns:
+            chart_frames.append(pd.DataFrame(scenario_columns))
+
+    if not chart_frames:
+        return None
+
+    combined = pd.concat(chart_frames, axis=1)
+    combined = combined.loc[:, ~combined.columns.duplicated()]
+    return combined.sort_index()
+
+
+def _build_margin_chart_frame(
+    frames: Dict[str, pd.DataFrame]
+) -> Optional[pd.DataFrame]:
+    """Compute gross and profit margin percentages for available scenarios."""
+
+    margin_frames: list[pd.DataFrame] = []
+
+    for scenario_label, df in frames.items():
+        revenue = _statement_series_by_suffix(df, ("Income – Revenue",))
+        if revenue is None:
+            continue
+        revenue = revenue.replace({0.0: np.nan})
+
+        gross_profit = _statement_series_by_suffix(
+            df, ("Cost of sales – Gross profit",)
+        )
+        profit_for_period = _statement_series_by_suffix(
+            df, ("Profit – Profit for the period",)
+        )
+
+        margin_columns: Dict[str, pd.Series] = {}
+
+        if gross_profit is not None:
+            gross_margin = gross_profit.divide(revenue) * 100.0
+            margin_columns[f"{scenario_label} – Gross margin (%)"] = gross_margin
+
+        if profit_for_period is not None:
+            profit_margin = profit_for_period.divide(revenue) * 100.0
+            margin_columns[f"{scenario_label} – Profit margin (%)"] = profit_margin
+
+        if margin_columns:
+            margin_frames.append(pd.DataFrame(margin_columns))
+
+    if not margin_frames:
+        return None
+
+    combined = pd.concat(margin_frames, axis=1)
+    combined = combined.loc[:, ~combined.columns.duplicated()]
+    return combined.sort_index()
+
+
+def _render_financial_performance_charts(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> None:
+    frames = _statement_scenario_frames(base_df, scenario_df, scenario_label)
+    if not frames:
+        return
+
+    trend_metrics = [
+        ("Revenue", ("Income – Revenue",)),
+        ("Gross profit", ("Cost of sales – Gross profit",)),
+        ("Profit for the period", ("Profit – Profit for the period",)),
+    ]
+
+    expense_metrics = [
+        ("Distribution costs", ("Operating expenses – Distribution costs",)),
+        ("Administrative expenses", ("Operating expenses – Administrative expenses",)),
+        (
+            "Depreciation and amortisation",
+            ("Operating expenses – Depreciation and amortisation",),
+        ),
+        ("Other operating expenses", ("Operating expenses – Other operating expenses",)),
+    ]
+
+    trend_data = _build_statement_chart_frame(frames, trend_metrics)
+    expense_data = _build_statement_chart_frame(frames, expense_metrics)
+    margin_data = _build_margin_chart_frame(frames)
+
+    if trend_data is not None:
+        st.markdown("###### Income and profit trends")
+        st.line_chart(trend_data)
+
+    if expense_data is not None:
+        st.markdown("###### Operating expense mix")
+        st.bar_chart(expense_data)
+
+    if margin_data is not None:
+        st.markdown("###### Margin analysis")
+        st.line_chart(margin_data)
+
+
+def _render_financial_position_charts(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> None:
+    frames = _statement_scenario_frames(base_df, scenario_df, scenario_label)
+    if not frames:
+        return
+
+    balance_metrics = [
+        ("Total assets", ("Assets – Total assets",)),
+        ("Total liabilities", ("Equity and liabilities – Total liabilities",)),
+        ("Equity", ("Equity and liabilities – Equity",)),
+    ]
+
+    net_metrics = [
+        ("Net assets", ("Key metrics – Net assets",)),
+        ("Net current assets", ("Key metrics – Net current assets",)),
+    ]
+
+    balance_data = _build_statement_chart_frame(frames, balance_metrics)
+    net_data = _build_statement_chart_frame(frames, net_metrics)
+
+    if balance_data is not None:
+        st.markdown("###### Balance sheet totals")
+        st.line_chart(balance_data)
+
+    if net_data is not None:
+        st.markdown("###### Net asset metrics")
+        st.bar_chart(net_data)
+
+
+def _render_cash_flow_charts(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> None:
+    frames = _statement_scenario_frames(base_df, scenario_df, scenario_label)
+    if not frames:
+        return
+
+    activity_metrics = [
+        (
+            "Operating activities",
+            ("Operating activities – Net cash from operating activities",),
+        ),
+        (
+            "Investing activities",
+            ("Investing activities – Net cash used in investing activities",),
+        ),
+        (
+            "Financing activities",
+            ("Financing activities – Net cash from financing activities",),
+        ),
+    ]
+
+    cash_balance_metrics = [
+        (
+            "Opening cash",
+            ("Net change – Cash and cash equivalents at beginning of period",),
+        ),
+        (
+            "Closing cash",
+            ("Net change – Cash and cash equivalents at end of period",),
+        ),
+        (
+            "Net change",
+            (
+                "Net change – Net increase/(decrease) in cash and cash equivalents",
+            ),
+        ),
+    ]
+
+    activity_data = _build_statement_chart_frame(frames, activity_metrics)
+    cash_balance_data = _build_statement_chart_frame(frames, cash_balance_metrics)
+
+    if activity_data is not None:
+        st.markdown("###### Cash flow by activity")
+        st.bar_chart(activity_data)
+
+    if cash_balance_data is not None:
+        st.markdown("###### Cash balance reconciliation")
+        st.line_chart(cash_balance_data)
 
 
 def _payload_to_ai_settings(payload: dict) -> Dict[str, Any]:
@@ -4812,6 +5052,9 @@ def main() -> None:
                         .swaplevel(axis=1)
                         .sort_index(axis=1, level=0)
                     )
+                    _render_financial_performance_charts(
+                        sop_base, sop_scenario, scenario_label
+                    )
                 except ValueError as exc:
                     st.info(str(exc))
 
@@ -4830,6 +5073,9 @@ def main() -> None:
                         .swaplevel(axis=1)
                         .sort_index(axis=1, level=0)
                     )
+                    _render_financial_position_charts(
+                        sofp_base, sofp_scenario, scenario_label
+                    )
                 except ValueError as exc:
                     st.info(str(exc))
 
@@ -4847,6 +5093,9 @@ def main() -> None:
                         )
                         .swaplevel(axis=1)
                         .sort_index(axis=1, level=0)
+                    )
+                    _render_cash_flow_charts(
+                        socf_base, socf_scenario, scenario_label
                     )
                 except ValueError as exc:
                     st.info(str(exc))
