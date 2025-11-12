@@ -96,13 +96,25 @@ def _sanitize_model_author_value(value: Any) -> str:
 def _handle_model_author_change() -> None:
     """Persist author edits and clear cached exports when updated."""
 
+    if MODEL_AUTHOR_WIDGET_KEY not in st.session_state:
+        return
+
     raw_value = st.session_state.get(MODEL_AUTHOR_WIDGET_KEY, "")
     sanitized = _sanitize_model_author_value(raw_value)
     previous = st.session_state.get(MODEL_AUTHOR_CACHE_KEY)
-    st.session_state[MODEL_AUTHOR_KEY] = sanitized
+
+    # Streamlit raises when callbacks mutate keys that have not been declared yet
+    # in bare execution. Ensure the storage key exists before assignment.
+    if MODEL_AUTHOR_KEY not in st.session_state:
+        st.session_state.setdefault(MODEL_AUTHOR_KEY, sanitized)
+    else:
+        st.session_state[MODEL_AUTHOR_KEY] = sanitized
+
     st.session_state[MODEL_AUTHOR_CACHE_KEY] = sanitized
+
     if sanitized != raw_value:
         st.session_state[MODEL_AUTHOR_WIDGET_KEY] = sanitized
+
     if previous is not None and sanitized != previous:
         st.session_state.pop("excel_bytes_map", None)
 
@@ -131,12 +143,12 @@ def _render_model_author_editor() -> None:
         "Model author",
         value=st.session_state.get(MODEL_AUTHOR_WIDGET_KEY, author_value),
         key=MODEL_AUTHOR_WIDGET_KEY,
-        on_change=_handle_model_author_change,
         help=(
             "Name recorded in scenario outputs and Excel downloads. "
             "Leave blank to reset to the default."
         ),
     )
+    _handle_model_author_change()
 
 
 def _statement_series_by_suffix(
