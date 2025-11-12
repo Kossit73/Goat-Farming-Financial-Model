@@ -1,0 +1,50 @@
+import importlib.util
+from pathlib import Path
+
+import pandas as pd
+
+
+_STREAMLIT_APP_PATH = Path(__file__).resolve().parents[1] / "streamlit_app.py"
+_spec = importlib.util.spec_from_file_location("streamlit_app", _STREAMLIT_APP_PATH)
+assert _spec and _spec.loader  # type: ignore[truthy-bool]
+streamlit_app = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(streamlit_app)
+
+
+def test_default_schedule_spans_production_horizon():
+    horizon = pd.DataFrame({"Start Year": [2025], "End Year": [2027]})
+
+    core, details = streamlit_app._default_schedule_components(
+        production_horizon=horizon
+    )
+
+    periods = pd.to_datetime(core["Period"], errors="coerce").dropna()
+
+    assert not periods.empty
+    assert periods.min().year == 2025
+    assert periods.max().year == 2027
+    assert len(periods) == (2027 - 2025 + 1) * 12
+
+    # Ensure detail schedules inherit the same period coverage
+    for table in details.values():
+        detail_periods = pd.to_datetime(table["Period"], errors="coerce").dropna()
+        if detail_periods.empty:
+            continue
+        assert detail_periods.min().year == 2025
+        assert detail_periods.max().year == 2027
+
+
+def test_default_schedule_uses_builtin_horizon():
+    horizon = streamlit_app._default_production_horizon_table()
+    core, _ = streamlit_app._default_schedule_components(
+        production_horizon=horizon
+    )
+
+    periods = pd.to_datetime(core["Period"], errors="coerce").dropna()
+
+    start_year = int(horizon["Start Year"].iloc[0])
+    end_year = int(horizon["End Year"].iloc[0])
+
+    assert periods.min().year == start_year
+    assert periods.max().year == end_year
+    assert len(periods) == (end_year - start_year + 1) * 12

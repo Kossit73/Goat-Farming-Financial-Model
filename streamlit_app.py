@@ -2296,7 +2296,7 @@ def _remove_capex_row(table: Optional[pd.DataFrame], index: int) -> pd.DataFrame
 
 
 def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
-    dates = pd.date_range(start, periods=periods, freq="M")
+    dates = pd.date_range(start, periods=periods, freq=MonthEnd(1))
     revenue = np.linspace(45000, 70000, periods)
     cogs = revenue * 0.45
     variable = revenue * 0.12
@@ -2362,9 +2362,50 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
     return df
 
 
+def _derive_horizon_years(
+    production_horizon: Optional[pd.DataFrame],
+) -> tuple[int, int]:
+    """Return start and end years inferred from the production horizon table."""
+
+    default_start = 2024
+    default_end = 2024
+
+    if production_horizon is None or production_horizon.empty:
+        return default_start, default_end
+
+    start_years = pd.to_numeric(
+        production_horizon.get("Start Year"), errors="coerce"
+    ).dropna()
+    end_years = pd.to_numeric(
+        production_horizon.get("End Year"), errors="coerce"
+    ).dropna()
+
+    start_year = int(start_years.iloc[0]) if not start_years.empty else default_start
+    end_year = int(end_years.iloc[0]) if not end_years.empty else default_end
+
+    if end_year < start_year:
+        end_year = start_year
+
+    return start_year, end_year
+
+
 def _default_schedule_components(
-    periods: int = 12, start: str = "2024-01-31"
+    periods: Optional[int] = None,
+    start: Optional[str] = None,
+    production_horizon: Optional[pd.DataFrame] = None,
 ) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    if production_horizon is None:
+        production_horizon = _default_production_horizon_table()
+
+    start_year, end_year = _derive_horizon_years(production_horizon)
+
+    if periods is None:
+        periods = max(1, (end_year - start_year + 1) * 12)
+
+    if start is None:
+        start_date = pd.Timestamp(start_year, 1, 1) + pd.offsets.MonthEnd(0)
+        start = start_date.strftime("%Y-%m-%d")
+
     base = _default_income_schedule(periods=periods, start=start)
 
     core_columns = [
@@ -2939,20 +2980,25 @@ def main() -> None:
     if DEFAULT_INPUT_CONFIG_KEY not in st.session_state:
         st.session_state[DEFAULT_INPUT_CONFIG_KEY] = _default_input_template_config()
 
-    if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
-        core_default, detail_defaults = _default_schedule_components()
-        if "core_schedule" not in st.session_state:
-            st.session_state.core_schedule = core_default
-        if "detail_schedules" not in st.session_state:
-            st.session_state.detail_schedules = detail_defaults
-    if "supplementary" not in st.session_state:
-        st.session_state.supplementary = _default_supplementary_tables()
     if "assumptions" not in st.session_state:
         st.session_state.assumptions = _default_assumption_tables()
     else:
         defaults = _default_assumption_tables()
         for name, table in defaults.items():
             st.session_state.assumptions.setdefault(name, table.copy())
+
+    production_horizon_defaults = st.session_state.assumptions.get("Production Horizon")
+
+    if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
+        core_default, detail_defaults = _default_schedule_components(
+            production_horizon=production_horizon_defaults
+        )
+        if "core_schedule" not in st.session_state:
+            st.session_state.core_schedule = core_default
+        if "detail_schedules" not in st.session_state:
+            st.session_state.detail_schedules = detail_defaults
+    if "supplementary" not in st.session_state:
+        st.session_state.supplementary = _default_supplementary_tables()
     if "results" not in st.session_state:
         st.session_state.results = None
 
