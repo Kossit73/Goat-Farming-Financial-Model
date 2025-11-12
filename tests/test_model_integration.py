@@ -127,6 +127,7 @@ def test_scenario_and_statements_pipeline():
     assert {"Revenue", "EBITDA", "NPAT"}.issubset(sensitivity.columns)
     monte_carlo = analytics["monte_carlo"]["tables"]["Summary Statistics"]
     assert "Mean" in monte_carlo.index
+    assert "NPV" in monte_carlo.columns
 
     kpis = model.kpis(scenario, annual=True)
     assert "Gross Margin %" in kpis.columns

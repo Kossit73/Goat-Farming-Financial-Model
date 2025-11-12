@@ -38,14 +38,28 @@ class AnalysisResult:
 class AdvancedAnalyticsSuite:
     """Compute an extended catalogue of advanced analytics for a scenario."""
 
-    def __init__(self, data: pd.DataFrame, window: int, annual: bool) -> None:
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        window: int,
+        annual: bool,
+        assumptions: Optional[Mapping[str, float]] = None,
+    ) -> None:
         self.original = data.copy()
         self.window = max(int(window), 1)
         self.annual = annual
         self.random = np.random.default_rng(42)
 
+        self.assumptions = self._normalise_assumptions(assumptions)
+        self.discount_rate = float(self.assumptions.get("wacc", self.assumptions.get("discount rate", 0.1)))
+        self.discount_rate = float(np.clip(self.discount_rate, 1e-6, 1.0))
+        self.terminal_value = self.assumptions.get("terminal value")
+        self.terminal_growth = self.assumptions.get("terminal growth rate")
+
         self.data = self._prepare_data()
         self.index = self.data.index
+        self.periods_per_year = self._periods_per_year()
+        self.period_rate = self._period_discount_rate()
 
         self.revenue = self._series("Revenue")
         self.cogs = self._series("COGS")
@@ -81,12 +95,75 @@ class AdvancedAnalyticsSuite:
 
         self._cached_monte_carlo: Optional[pd.DataFrame] = None
 
+    @staticmethod
+    def _normalise_assumptions(
+        assumptions: Optional[Mapping[str, float]]
+    ) -> Dict[str, float]:
+        if not assumptions:
+            return {}
+        normalised: Dict[str, float] = {}
+        for key, value in assumptions.items():
+            if value is None:
+                continue
+            try:
+                normalised[str(key).lower()] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return normalised
+
     def _prepare_data(self) -> pd.DataFrame:
         work = self.original.copy()
         numeric = work.apply(pd.to_numeric, errors="coerce")
         if self.annual:
-            numeric = numeric.groupby(numeric.index.year).sum(min_count=1)
+            index = numeric.index
+            if not isinstance(index, pd.DatetimeIndex):
+                index = pd.to_datetime(index, errors="coerce")
+            period_index = index.to_period("A")
+            grouped = numeric.groupby(period_index).sum(min_count=1)
+            numeric = grouped
+            try:
+                numeric.index = numeric.index.to_timestamp("A")
+            except Exception:  # pragma: no cover - defensive fallback
+                numeric.index = pd.to_datetime([f"{val}-12-31" for val in numeric.index])
         return numeric
+
+    def _periods_per_year(self) -> int:
+        if len(self.index) <= 1:
+            return 1
+        freq = None
+        if isinstance(self.index, pd.DatetimeIndex):
+            freq = pd.infer_freq(self.index)
+        elif isinstance(self.index, pd.PeriodIndex) and self.index.freqstr:
+            freq = self.index.freqstr
+        if freq:
+            freq = freq.upper()
+            mapping = {
+                "A": 1,
+                "Y": 1,
+                "M": 12,
+                "MS": 12,
+                "BM": 12,
+                "Q": 4,
+                "QS": 4,
+                "W": 52,
+                "D": 365,
+            }
+            for key, value in mapping.items():
+                if freq.startswith(key):
+                    return value
+        if isinstance(self.index, pd.DatetimeIndex) and len(self.index) > 1:
+            deltas = np.diff(self.index.asi8)
+            median_delta = np.median(deltas)
+            if median_delta <= 0:
+                return 1
+            year_delta = pd.Timedelta(days=365).value
+            periods = int(round(year_delta / median_delta))
+            return max(periods, 1)
+        return 1
+
+    def _period_discount_rate(self) -> float:
+        periods = max(self.periods_per_year, 1)
+        return float((1 + self.discount_rate) ** (1 / periods) - 1)
 
     def _series(self, name: str) -> pd.Series:
         if name in self.data.columns:
@@ -194,12 +271,24 @@ class AdvancedAnalyticsSuite:
         npat_sim = npbt_sim - tax_sim
         cash_flow_sim = ebitda_sim - (self.capex_total / max(periods, 1))
 
+        discount_factors = 1 / (1 + self.period_rate) ** np.arange(1, periods + 1)
+        npv = (cash_flow_sim * discount_factors).sum(axis=1)
+        if self.terminal_value is not None:
+            npv += float(self.terminal_value) / ((1 + self.period_rate) ** periods)
+        elif self.terminal_growth is not None and self.period_rate > self.terminal_growth:
+            terminal_cash = cash_flow_sim[:, -1]
+            terminal_val = terminal_cash * (1 + self.terminal_growth) / (
+                self.period_rate - self.terminal_growth
+            )
+            npv += terminal_val / ((1 + self.period_rate) ** periods)
+
         summary = pd.DataFrame(
             {
                 "Total Revenue": revenue_sim.sum(axis=1),
                 "Total EBITDA": ebitda_sim.sum(axis=1),
                 "Total NPAT": npat_sim.sum(axis=1),
                 "Operating Cash Flow": cash_flow_sim.sum(axis=1),
+                "NPV": npv,
             }
         )
         self._cached_monte_carlo = summary
@@ -380,7 +469,7 @@ class AdvancedAnalyticsSuite:
 
         return AnalysisResult(
             title="Monte Carlo Simulation",
-            description="Simulates profitability distributions by stochastically varying revenue and cost drivers.",
+            description="Simulates profitability and valuation distributions by stochastically varying revenue and cost drivers.",
             tables={"Summary Statistics": summary},
         )
 
@@ -715,9 +804,21 @@ class AdvancedAnalyticsSuite:
                 }
             ).set_index("Metric")
 
+        if not table.empty and "NPV" in distribution:
+            npv_series = distribution["NPV"]
+            var_95 = np.percentile(npv_series, 5)
+            cvar_95 = (
+                npv_series[npv_series <= var_95].mean()
+                if np.any(npv_series <= var_95)
+                else var_95
+            )
+            table.loc["VaR (95%)", "NPV"] = var_95
+            table.loc["CVaR (95%)", "NPV"] = cvar_95
+            table.loc["Mean", "NPV"] = npv_series.mean()
+
         return AnalysisResult(
             title="Value at Risk",
-            description="Estimates VaR and CVaR for NPAT using Monte Carlo distributions.",
+            description="Estimates VaR and CVaR for NPAT and simulated valuation outcomes using Monte Carlo distributions.",
             tables={"Risk Metrics": table},
         )
 
@@ -838,17 +939,19 @@ class AdvancedAnalyticsSuite:
         if distribution.empty:
             table = pd.DataFrame()
         else:
-            discount_rate = 0.1
-            horizon = 5
-            npat = distribution["Total NPAT"].to_numpy()
-            cash_flows = np.tile(npat[:, None] / horizon, (1, horizon))
-            factors = 1 / (1 + discount_rate) ** np.arange(1, horizon + 1)
-            npvs = cash_flows @ factors
-            stats = pd.Series(npvs).describe(percentiles=[0.05, 0.5, 0.95])
+            if "NPV" in distribution:
+                series = distribution["NPV"]
+            else:
+                npat = distribution["Total NPAT"].to_numpy()
+                horizon = min(len(self.index), 5) or 5
+                cash_flows = np.tile(npat[:, None] / horizon, (1, horizon))
+                factors = 1 / (1 + self.discount_rate) ** np.arange(1, horizon + 1)
+                series = pd.Series(cash_flows @ factors)
+            stats = series.describe(percentiles=[0.05, 0.5, 0.95])
             table = stats.to_frame(name="NPV Distribution")
         return AnalysisResult(
             title="Probabilistic Valuation",
-            description="Converts simulated NPAT into an NPV distribution to quantify valuation uncertainty.",
+            description="Converts simulated cash flows into an NPV distribution using the supplied discount assumptions to quantify valuation uncertainty.",
             tables={"Valuation Distribution": table},
         )
 
@@ -940,9 +1043,19 @@ class AdvancedAnalyticsSuite:
         }
 
 
-def run_advanced_analytics(data: pd.DataFrame, window: int, annual: bool) -> Mapping[str, AnalysisResult]:
+def run_advanced_analytics(
+    data: pd.DataFrame,
+    window: int,
+    annual: bool,
+    assumptions: Optional[Mapping[str, float]] = None,
+) -> Mapping[str, AnalysisResult]:
     """Utility wrapper to compute all advanced analytics."""
 
-    suite = AdvancedAnalyticsSuite(data=data, window=window, annual=annual)
+    suite = AdvancedAnalyticsSuite(
+        data=data,
+        window=window,
+        annual=annual,
+        assumptions=assumptions,
+    )
     return suite.run_all()
 

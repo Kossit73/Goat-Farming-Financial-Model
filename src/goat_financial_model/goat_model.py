@@ -944,7 +944,12 @@ class GoatModel:
 
         from .advanced import run_advanced_analytics
 
-        results = run_advanced_analytics(work, window=window, annual=annual)
+        results = run_advanced_analytics(
+            work,
+            window=window,
+            annual=annual,
+            assumptions=self.valuation_inputs,
+        )
         payload: Dict[str, object] = {}
         for key, analysis in results.items():
             payload[key] = {
