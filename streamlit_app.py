@@ -2468,224 +2468,6 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
     st.dataframe(table)
 
 
-def _render_default_input_manager(core_df: pd.DataFrame) -> None:
-    st.markdown("### Default Input Templates")
-    with st.expander("Edit default inputs", expanded=False):
-        st.caption(
-            "Adjust the templates used to pre-populate schedules and assumptions. "
-            "Changes persist for the current session and are applied when tables are regenerated."
-        )
-
-        tabs = st.tabs(
-            [
-                "Variable Expenses",
-                "Direct Wages",
-                "Admin Wages",
-                "Pricing Assumptions",
-                "Operating Costs",
-            ]
-        )
-
-        # Variable expenses defaults
-        with tabs[0]:
-            variable_columns = ["Item", "Share %"]
-            variable_defaults = _template_to_dataframe(
-                _get_template("variable_items", DEFAULT_VARIABLE_ITEMS),
-                variable_columns,
-            )
-            variable_editor = st.data_editor(
-                variable_defaults,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="default_variable_items_editor",
-                column_config={
-                    "Share %": st.column_config.NumberColumn(
-                        "Share (%)", format="%.2f", step=0.1
-                    )
-                },
-            )
-
-            save_col, reset_col, apply_col = st.columns(3)
-
-            if save_col.button("Save defaults", key="save_variable_defaults"):
-                records = _dataframe_to_template(variable_editor, variable_columns)
-                _set_template("variable_items", records)
-                st.success("Variable expense defaults updated.")
-
-            if reset_col.button("Restore baseline", key="reset_variable_defaults"):
-                _set_template("variable_items", _template_copy(DEFAULT_VARIABLE_ITEMS))
-                st.success("Variable expense defaults restored.")
-
-            if apply_col.button("Apply to schedule", key="apply_variable_defaults"):
-                new_table = _default_variable_expense_table(core_df)
-                if "detail_schedules" in st.session_state:
-                    st.session_state.detail_schedules[
-                        "Variable Expenses Schedule"
-                    ] = new_table
-                st.success("Variable expenses schedule regenerated from defaults.")
-
-        # Direct wages defaults
-        with tabs[1]:
-            direct_columns = ["Role", "Share %"]
-            direct_defaults = _template_to_dataframe(
-                _get_template("direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS),
-                direct_columns,
-            )
-            direct_editor = st.data_editor(
-                direct_defaults,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="default_direct_wage_editor",
-                column_config={
-                    "Share %": st.column_config.NumberColumn(
-                        "Share (%)", format="%.2f", step=0.1
-                    )
-                },
-            )
-
-            save_col, reset_col, apply_col = st.columns(3)
-
-            if save_col.button("Save defaults", key="save_direct_wage_defaults"):
-                records = _dataframe_to_template(direct_editor, direct_columns)
-                _set_template("direct_wage_items", records)
-                st.success("Direct wage defaults updated.")
-
-            if reset_col.button("Restore baseline", key="reset_direct_wage_defaults"):
-                _set_template("direct_wage_items", _template_copy(DEFAULT_DIRECT_WAGE_ITEMS))
-                st.success("Direct wage defaults restored.")
-
-            if apply_col.button("Apply to schedule", key="apply_direct_wage_defaults"):
-                new_table = _default_direct_wage_table(core_df)
-                if "detail_schedules" in st.session_state:
-                    st.session_state.detail_schedules[
-                        "Direct Wages Schedule"
-                    ] = new_table
-                st.success("Direct wages schedule regenerated from defaults.")
-
-        # Admin wages defaults
-        with tabs[2]:
-            admin_columns = ["Function", "Share %"]
-            admin_defaults = _template_to_dataframe(
-                _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS),
-                admin_columns,
-            )
-            admin_editor = st.data_editor(
-                admin_defaults,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="default_admin_wage_editor",
-                column_config={
-                    "Share %": st.column_config.NumberColumn(
-                        "Share (%)", format="%.2f", step=0.1
-                    )
-                },
-            )
-
-            save_col, reset_col, apply_col = st.columns(3)
-
-            if save_col.button("Save defaults", key="save_admin_wage_defaults"):
-                records = _dataframe_to_template(admin_editor, admin_columns)
-                _set_template("admin_wage_items", records)
-                st.success("Admin wage defaults updated.")
-
-            if reset_col.button("Restore baseline", key="reset_admin_wage_defaults"):
-                _set_template("admin_wage_items", _template_copy(DEFAULT_ADMIN_WAGE_ITEMS))
-                st.success("Admin wage defaults restored.")
-
-            if apply_col.button("Apply to schedule", key="apply_admin_wage_defaults"):
-                new_table = _default_admin_wage_table(core_df)
-                if "detail_schedules" in st.session_state:
-                    st.session_state.detail_schedules[
-                        "Admin Wages Schedule"
-                    ] = new_table
-                st.success("Admin wages schedule regenerated from defaults.")
-
-        # Pricing defaults
-        with tabs[3]:
-            pricing_columns = [
-                "Year",
-                "Product",
-                "Unit",
-                "Base Price",
-                "Price Growth %",
-            ]
-            pricing_defaults = _template_to_dataframe(
-                _get_template("pricing_rows", DEFAULT_PRICING_ROWS),
-                pricing_columns,
-            )
-            pricing_editor = st.data_editor(
-                pricing_defaults,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="default_pricing_editor",
-                column_config={
-                    "Year": st.column_config.NumberColumn("Year", step=1),
-                    "Base Price": st.column_config.NumberColumn(
-                        "Base Price", format="%.2f"
-                    ),
-                    "Price Growth %": st.column_config.NumberColumn(
-                        "Price Growth (%)", format="%.2f"
-                    ),
-                },
-            )
-
-            save_col, reset_col, apply_col = st.columns(3)
-
-            if save_col.button("Save defaults", key="save_pricing_defaults"):
-                records = _dataframe_to_template(pricing_editor, pricing_columns)
-                _set_template("pricing_rows", records)
-                st.success("Pricing defaults updated.")
-
-            if reset_col.button("Restore baseline", key="reset_pricing_defaults"):
-                _set_template("pricing_rows", _template_copy(DEFAULT_PRICING_ROWS))
-                st.success("Pricing defaults restored.")
-
-            if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
-                new_table = _default_pricing_table()
-                if "assumptions" in st.session_state:
-                    st.session_state.assumptions["Pricing"] = new_table
-                st.success("Pricing assumptions refreshed from defaults.")
-
-        # Operating cost defaults
-        with tabs[4]:
-            operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
-            operating_defaults = _template_to_dataframe(
-                _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
-                operating_columns,
-            )
-            operating_editor = st.data_editor(
-                operating_defaults,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="default_operating_editor",
-                column_config={
-                    "Year": st.column_config.NumberColumn("Year", step=1),
-                    "Monthly Cost": st.column_config.NumberColumn(
-                        "Monthly Cost", format="%.2f"
-                    ),
-                    "Inflation %": st.column_config.NumberColumn(
-                        "Inflation (%)", format="%.2f"
-                    ),
-                },
-            )
-
-            save_col, reset_col, apply_col = st.columns(3)
-
-            if save_col.button("Save defaults", key="save_operating_defaults"):
-                records = _dataframe_to_template(operating_editor, operating_columns)
-                _set_template("operating_rows", records)
-                st.success("Operating cost defaults updated.")
-
-            if reset_col.button("Restore baseline", key="reset_operating_defaults"):
-                _set_template("operating_rows", _template_copy(DEFAULT_OPERATING_COST_ROWS))
-                st.success("Operating cost defaults restored.")
-
-            if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
-                new_table = _default_operating_cost_table()
-                if "assumptions" in st.session_state:
-                    st.session_state.assumptions["Operating Costs"] = new_table
-                st.success("Operating cost assumptions refreshed from defaults.")
-
 
 def main() -> None:
     st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
@@ -3318,6 +3100,69 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = variable_table
 
+                    with st.expander(
+                        "Edit default variable expense template", expanded=False
+                    ):
+                        variable_columns = ["Item", "Share %"]
+                        template_df = _template_to_dataframe(
+                            _get_template("variable_items", DEFAULT_VARIABLE_ITEMS),
+                            variable_columns,
+                        )
+                        template_editor = st.data_editor(
+                            template_df,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            key="default_variable_items_editor",
+                            column_config={
+                                "Share %": st.column_config.NumberColumn(
+                                    "Share (%)", format="%.2f", step=0.1
+                                )
+                            },
+                        )
+
+                        save_col, restore_col, apply_col = st.columns(3)
+
+                        if save_col.button(
+                            "Save defaults", key="save_variable_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, variable_columns
+                            )
+                            _set_template("variable_items", records)
+                            st.success("Variable expense defaults updated.")
+
+                        if restore_col.button(
+                            "Restore baseline", key="reset_variable_defaults"
+                        ):
+                            baseline_template = _template_copy(DEFAULT_VARIABLE_ITEMS)
+                            _set_template("variable_items", baseline_template)
+                            variable_table = _default_variable_expense_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = variable_table
+                            st.session_state["default_variable_items_editor"] = _template_to_dataframe(
+                                baseline_template, variable_columns
+                            )
+                            st.success(
+                                "Variable expense defaults restored and schedule refreshed."
+                            )
+
+                        if apply_col.button(
+                            "Apply to schedule", key="apply_variable_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, variable_columns
+                            )
+                            _set_template("variable_items", records)
+                            variable_table = _default_variable_expense_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = variable_table
+                            st.session_state["default_variable_items_editor"] = template_editor
+                            st.success(
+                                "Variable expenses schedule regenerated from defaults."
+                            )
+
                     aggregated_variable = _aggregate_variable_expenses(
                         variable_table, st.session_state.core_schedule
                     )
@@ -3416,6 +3261,69 @@ def main() -> None:
                         editor, st.session_state.core_schedule
                     )
                     st.session_state.detail_schedules[name] = direct_table
+
+                    with st.expander(
+                        "Edit default direct wage template", expanded=False
+                    ):
+                        direct_columns = ["Role", "Share %"]
+                        template_df = _template_to_dataframe(
+                            _get_template("direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS),
+                            direct_columns,
+                        )
+                        template_editor = st.data_editor(
+                            template_df,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            key="default_direct_wage_editor",
+                            column_config={
+                                "Share %": st.column_config.NumberColumn(
+                                    "Share (%)", format="%.2f", step=0.1
+                                )
+                            },
+                        )
+
+                        save_col, restore_col, apply_col = st.columns(3)
+
+                        if save_col.button(
+                            "Save defaults", key="save_direct_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, direct_columns
+                            )
+                            _set_template("direct_wage_items", records)
+                            st.success("Direct wage defaults updated.")
+
+                        if restore_col.button(
+                            "Restore baseline", key="reset_direct_wage_defaults"
+                        ):
+                            baseline_template = _template_copy(DEFAULT_DIRECT_WAGE_ITEMS)
+                            _set_template("direct_wage_items", baseline_template)
+                            direct_table = _default_direct_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = direct_table
+                            st.session_state["default_direct_wage_editor"] = _template_to_dataframe(
+                                baseline_template, direct_columns
+                            )
+                            st.success(
+                                "Direct wage defaults restored and schedule refreshed."
+                            )
+
+                        if apply_col.button(
+                            "Apply to schedule", key="apply_direct_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, direct_columns
+                            )
+                            _set_template("direct_wage_items", records)
+                            direct_table = _default_direct_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = direct_table
+                            st.session_state["default_direct_wage_editor"] = template_editor
+                            st.success(
+                                "Direct wages schedule regenerated from defaults."
+                            )
 
                     aggregated_direct = _aggregate_direct_wages(
                         direct_table, st.session_state.core_schedule
@@ -3516,6 +3424,69 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = admin_table
 
+                    with st.expander(
+                        "Edit default admin wage template", expanded=False
+                    ):
+                        admin_columns = ["Function", "Share %"]
+                        template_df = _template_to_dataframe(
+                            _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS),
+                            admin_columns,
+                        )
+                        template_editor = st.data_editor(
+                            template_df,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            key="default_admin_wage_editor",
+                            column_config={
+                                "Share %": st.column_config.NumberColumn(
+                                    "Share (%)", format="%.2f", step=0.1
+                                )
+                            },
+                        )
+
+                        save_col, restore_col, apply_col = st.columns(3)
+
+                        if save_col.button(
+                            "Save defaults", key="save_admin_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, admin_columns
+                            )
+                            _set_template("admin_wage_items", records)
+                            st.success("Admin wage defaults updated.")
+
+                        if restore_col.button(
+                            "Restore baseline", key="reset_admin_wage_defaults"
+                        ):
+                            baseline_template = _template_copy(DEFAULT_ADMIN_WAGE_ITEMS)
+                            _set_template("admin_wage_items", baseline_template)
+                            admin_table = _default_admin_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = admin_table
+                            st.session_state["default_admin_wage_editor"] = _template_to_dataframe(
+                                baseline_template, admin_columns
+                            )
+                            st.success(
+                                "Admin wage defaults restored and schedule refreshed."
+                            )
+
+                        if apply_col.button(
+                            "Apply to schedule", key="apply_admin_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, admin_columns
+                            )
+                            _set_template("admin_wage_items", records)
+                            admin_table = _default_admin_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = admin_table
+                            st.session_state["default_admin_wage_editor"] = template_editor
+                            st.success(
+                                "Admin wages schedule regenerated from defaults."
+                            )
+
                     aggregated_admin = _aggregate_admin_wages(
                         admin_table, st.session_state.core_schedule
                     )
@@ -3532,10 +3503,6 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = table
                     detail_tables_for_run[name] = table
-
-
-        _render_default_input_manager(st.session_state.core_schedule)
-
 
     if core_editor is None:
         core_editor = st.session_state.core_schedule
@@ -3683,6 +3650,66 @@ def main() -> None:
 
             pricing_table = _ensure_pricing_table(pricing_editor)
             st.session_state.assumptions["Pricing"] = pricing_table
+            with st.expander(
+                "Edit default pricing assumptions", expanded=False
+            ):
+                pricing_columns = [
+                    "Year",
+                    "Product",
+                    "Unit",
+                    "Base Price",
+                    "Price Growth %",
+                ]
+                template_df = _template_to_dataframe(
+                    _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
+                )
+                template_editor = st.data_editor(
+                    template_df,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="default_pricing_editor",
+                    column_config={
+                        "Year": st.column_config.NumberColumn("Year", step=1),
+                        "Base Price": st.column_config.NumberColumn(
+                            "Base Price", format="%.2f"
+                        ),
+                        "Price Growth %": st.column_config.NumberColumn(
+                            "Price Growth (%)", format="%.2f"
+                        ),
+                    },
+                )
+
+                save_col, restore_col, apply_col = st.columns(3)
+
+                if save_col.button("Save defaults", key="save_pricing_defaults"):
+                    records = _dataframe_to_template(template_editor, pricing_columns)
+                    _set_template("pricing_rows", records)
+                    st.success("Pricing defaults updated.")
+
+                if restore_col.button("Restore baseline", key="reset_pricing_defaults"):
+                    baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
+                    _set_template("pricing_rows", baseline_template)
+                    pricing_table = _default_pricing_table()
+                    st.session_state.assumptions["Pricing"] = pricing_table
+                    st.session_state["assump_pricing"] = pricing_table
+                    st.session_state["default_pricing_editor"] = _template_to_dataframe(
+                        baseline_template, pricing_columns
+                    )
+                    st.success(
+                        "Pricing defaults restored and assumptions refreshed."
+                    )
+
+                if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
+                    records = _dataframe_to_template(template_editor, pricing_columns)
+                    _set_template("pricing_rows", records)
+                    pricing_table = _default_pricing_table()
+                    st.session_state.assumptions["Pricing"] = pricing_table
+                    st.session_state["assump_pricing"] = pricing_table
+                    st.session_state["default_pricing_editor"] = template_editor
+                    st.success(
+                        "Pricing assumptions refreshed from updated defaults."
+                    )
+
             assumption_tables["Pricing"] = pricing_table
 
         with assumption_tabs[3]:
@@ -3792,6 +3819,61 @@ def main() -> None:
 
             operating_table = _ensure_operating_cost_table(operating_editor)
             st.session_state.assumptions["Operating Costs"] = operating_table
+            with st.expander(
+                "Edit default operating cost assumptions", expanded=False
+            ):
+                operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
+                template_df = _template_to_dataframe(
+                    _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
+                    operating_columns,
+                )
+                template_editor = st.data_editor(
+                    template_df,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="default_operating_editor",
+                    column_config={
+                        "Year": st.column_config.NumberColumn("Year", step=1),
+                        "Monthly Cost": st.column_config.NumberColumn(
+                            "Monthly Cost", format="%.2f"
+                        ),
+                        "Inflation %": st.column_config.NumberColumn(
+                            "Inflation (%)", format="%.2f"
+                        ),
+                    },
+                )
+
+                save_col, restore_col, apply_col = st.columns(3)
+
+                if save_col.button("Save defaults", key="save_operating_defaults"):
+                    records = _dataframe_to_template(template_editor, operating_columns)
+                    _set_template("operating_rows", records)
+                    st.success("Operating cost defaults updated.")
+
+                if restore_col.button("Restore baseline", key="reset_operating_defaults"):
+                    baseline_template = _template_copy(DEFAULT_OPERATING_COST_ROWS)
+                    _set_template("operating_rows", baseline_template)
+                    operating_table = _default_operating_cost_table()
+                    st.session_state.assumptions["Operating Costs"] = operating_table
+                    st.session_state["assump_operating"] = operating_table
+                    st.session_state["default_operating_editor"] = _template_to_dataframe(
+                        baseline_template, operating_columns
+                    )
+                    st.success(
+                        "Operating cost defaults restored and assumptions refreshed."
+                    )
+
+                if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
+                    records = _dataframe_to_template(template_editor, operating_columns)
+                    _set_template("operating_rows", records)
+                    operating_table = _default_operating_cost_table()
+                    st.session_state.assumptions["Operating Costs"] = operating_table
+                    st.session_state["assump_operating"] = operating_table
+                    st.session_state["default_operating_editor"] = template_editor
+                    st.success(
+                        "Operating cost assumptions refreshed from updated defaults."
+                    )
+
             assumption_tables["Operating Costs"] = operating_table
 
         with assumption_tabs[4]:
