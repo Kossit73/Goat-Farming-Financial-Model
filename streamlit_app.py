@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from io import BytesIO
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -179,6 +179,138 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
         _ai_settings_to_payload(settings, payload)
         st.session_state["ai_settings_saved"] = True
         st.experimental_rerun()
+
+
+def _analytics_override_store() -> Dict[str, Any]:
+    """Return (and create) the session-backed override cache."""
+
+    return st.session_state.setdefault("advanced_analytics_overrides", {})
+
+
+def _get_analytics_override(
+    scenario: str, block: str, analysis: str, table: str
+) -> Optional[pd.DataFrame]:
+    store = _analytics_override_store()
+    return (
+        store.get(scenario, {})
+        .get(block, {})
+        .get(analysis, {})
+        .get(table)
+    )
+
+
+def _set_analytics_override(
+    scenario: str, block: str, analysis: str, table: str, value: pd.DataFrame
+) -> None:
+    store = _analytics_override_store()
+    scenario_store = store.setdefault(scenario, {})
+    block_store = scenario_store.setdefault(block, {})
+    analysis_store = block_store.setdefault(analysis, {})
+    analysis_store[table] = value.copy(deep=True)
+    st.session_state["advanced_analytics_overrides"] = store
+
+
+def _clear_analytics_override(
+    scenario: str, block: str, analysis: str, table: str
+) -> None:
+    store = _analytics_override_store()
+    scenario_store = store.get(scenario)
+    if not scenario_store:
+        return
+    block_store = scenario_store.get(block)
+    if not block_store:
+        return
+    analysis_store = block_store.get(analysis)
+    if not analysis_store:
+        return
+    analysis_store.pop(table, None)
+    if not analysis_store:
+        block_store.pop(analysis, None)
+    if not block_store:
+        scenario_store.pop(block, None)
+    if not scenario_store:
+        store.pop(scenario, None)
+    st.session_state["advanced_analytics_overrides"] = store
+
+
+def _analytics_edit_flag_key(
+    scenario: str, block: str, analysis: str, table: str
+) -> str:
+    return f"analytics_edit::{scenario}::{block}::{analysis}::{table}"
+
+
+def _analytics_editor_key(
+    scenario: str, block: str, analysis: str, table: str
+) -> str:
+    return f"analytics_editor::{scenario}::{block}::{analysis}::{table}"
+
+
+def _prepare_editor_table(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Return an editable copy and metadata to restore the original index."""
+
+    working = df.copy(deep=True)
+    if isinstance(working.index, pd.MultiIndex):
+        orig_names = list(working.index.names)
+        fallback_names = [
+            name if name is not None else f"Index Level {idx + 1}"
+            for idx, name in enumerate(orig_names)
+        ]
+        working.index.set_names(fallback_names, inplace=True)
+        editor_df = working.reset_index()
+        return editor_df, {
+            "type": "multi",
+            "names": fallback_names,
+            "orig_names": orig_names,
+        }
+
+    if isinstance(working.index, pd.RangeIndex):
+        editor_df = working.reset_index(drop=True)
+        return editor_df, {
+            "type": "range",
+            "start": working.index.start,
+            "step": working.index.step,
+        }
+
+    index_name = working.index.name or "Index"
+    working.index.name = index_name
+    editor_df = working.reset_index()
+    return editor_df, {
+        "type": "single",
+        "name": index_name,
+        "orig_name": df.index.name,
+    }
+
+
+def _restore_editor_table(edited: pd.DataFrame, meta: Dict[str, Any]) -> pd.DataFrame:
+    """Rebuild a DataFrame using the stored index metadata."""
+
+    restored = edited.copy(deep=True)
+    meta_type = meta.get("type")
+
+    if meta_type == "multi":
+        names = [name for name in meta.get("names", []) if name in restored.columns]
+        if names:
+            restored = restored.set_index(names)
+            orig_names = meta.get("orig_names", names)
+            if len(orig_names) == restored.index.nlevels:
+                restored.index.names = orig_names
+        else:
+            restored.index = pd.RangeIndex(len(restored))
+        return restored
+
+    if meta_type == "single":
+        column = meta.get("name")
+        if column and column in restored.columns:
+            restored = restored.set_index(column)
+            restored.index.name = meta.get("orig_name")
+        else:
+            restored.index = pd.RangeIndex(len(restored))
+            restored.index.name = meta.get("orig_name")
+        return restored
+
+    # Default to a simple RangeIndex
+    restored.index = pd.RangeIndex(len(restored))
+    return restored
 
 DETAIL_SCHEDULE_COLUMNS = {
     "COGS Schedule": ["COGS"],
@@ -4024,7 +4156,9 @@ def main() -> None:
                 adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
                 adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
 
-                def _render_analytics(block_name: str, payload: Dict[str, object]) -> None:
+                def _render_analytics(
+                    block_name: str, payload: Dict[str, object], scenario_label: str
+                ) -> None:
                     st.markdown(f"#### {block_name} Advanced Analytics")
                     for key, item in payload.items():
                         title = item.get("title", key.replace("_", " ").title())
@@ -4036,15 +4170,106 @@ def main() -> None:
                             if isinstance(tables, dict):
                                 for table_name, table in tables.items():
                                     st.markdown(f"**{table_name}**")
-                                    if isinstance(table, pd.DataFrame) and not table.empty:
-                                        st.dataframe(table)
-                                    else:
+                                    if not isinstance(table, pd.DataFrame):
                                         st.info("No data available for this table.")
+                                        continue
+
+                                    override = _get_analytics_override(
+                                        scenario_label, block_name, key, table_name
+                                    )
+                                    display_df = override if override is not None else table
+                                    edit_flag_key = _analytics_edit_flag_key(
+                                        scenario_label, block_name, key, table_name
+                                    )
+                                    editor_key = _analytics_editor_key(
+                                        scenario_label, block_name, key, table_name
+                                    )
+
+                                    if not isinstance(display_df, pd.DataFrame):
+                                        st.info("No data available for this table.")
+                                        continue
+
+                                    editing = st.session_state.get(edit_flag_key, False)
+
+                                    if editing:
+                                        editor_df, meta = _prepare_editor_table(display_df)
+                                        st.data_editor(
+                                            editor_df,
+                                            num_rows="dynamic",
+                                            key=editor_key,
+                                        )
+                                        action_cols = st.columns(3)
+                                        if action_cols[0].button(
+                                            "Save Changes",
+                                            key=f"save_{editor_key}",
+                                        ):
+                                            edited_df = st.session_state.get(editor_key)
+                                            if isinstance(edited_df, pd.DataFrame):
+                                                restored = _restore_editor_table(
+                                                    edited_df, meta
+                                                )
+                                                _set_analytics_override(
+                                                    scenario_label,
+                                                    block_name,
+                                                    key,
+                                                    table_name,
+                                                    restored,
+                                                )
+                                            st.session_state.pop(editor_key, None)
+                                            st.session_state[edit_flag_key] = False
+                                            st.experimental_rerun()
+
+                                        if action_cols[1].button(
+                                            "Cancel",
+                                            key=f"cancel_{editor_key}",
+                                        ):
+                                            st.session_state.pop(editor_key, None)
+                                            st.session_state[edit_flag_key] = False
+                                            st.experimental_rerun()
+
+                                        if action_cols[2].button(
+                                            "Restore Original",
+                                            key=f"reset_{editor_key}",
+                                        ):
+                                            _clear_analytics_override(
+                                                scenario_label,
+                                                block_name,
+                                                key,
+                                                table_name,
+                                            )
+                                            st.session_state.pop(editor_key, None)
+                                            st.session_state[edit_flag_key] = False
+                                            st.experimental_rerun()
+                                    else:
+                                        st.dataframe(display_df)
+                                        if override is not None:
+                                            st.caption("Manual override applied.")
+                                        button_cols = st.columns(2)
+                                        if button_cols[0].button(
+                                            "Edit Table",
+                                            key=f"edit_{editor_key}",
+                                        ):
+                                            st.session_state[edit_flag_key] = True
+                                            st.experimental_rerun()
+
+                                        if button_cols[1].button(
+                                            "Clear Manual Override",
+                                            key=f"clear_{editor_key}",
+                                            disabled=override is None,
+                                        ):
+                                            _clear_analytics_override(
+                                                scenario_label,
+                                                block_name,
+                                                key,
+                                                table_name,
+                                            )
+                                            st.experimental_rerun()
                             else:
                                 st.info("No tables available for this analysis.")
 
-                _render_analytics("Monthly", adv_monthly)
-                _render_analytics("Annual", adv_annual)
+                selected_scenario_name = results.get("selected_scenario", "Scenario")
+                _render_analytics("Monthly", adv_monthly, selected_scenario_name)
+                _render_analytics("Annual", adv_annual, selected_scenario_name)
             except ValueError as exc:
                 st.info(str(exc))
 
