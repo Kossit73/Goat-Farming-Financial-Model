@@ -3100,16 +3100,37 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = variable_table
 
-                    with st.expander(
-                        "Edit default variable expense template", expanded=False
-                    ):
-                        variable_columns = ["Item", "Share %"]
-                        template_df = _template_to_dataframe(
-                            _get_template("variable_items", DEFAULT_VARIABLE_ITEMS),
-                            variable_columns,
+                    st.session_state.setdefault(
+                        "variable_defaults_edit_mode", False
+                    )
+                    toggle_label = (
+                        "Hide default variable expense template"
+                        if st.session_state.variable_defaults_edit_mode
+                        else "Edit default variable expense template"
+                    )
+                    if st.button(toggle_label, key="toggle_variable_defaults"):
+                        st.session_state.variable_defaults_edit_mode = not st.session_state[
+                            "variable_defaults_edit_mode"
+                        ]
+
+                    if st.session_state.variable_defaults_edit_mode:
+                        st.markdown("##### Default Variable Expense Template")
+                        st.caption(
+                            "Update the baseline mix of variable expenses that populates new schedules."
                         )
+
+                        variable_columns = ["Item", "Share %"]
+                        default_frame = st.session_state.get(
+                            "default_variable_items_editor"
+                        )
+                        if not isinstance(default_frame, pd.DataFrame):
+                            default_frame = _template_to_dataframe(
+                                _get_template("variable_items", DEFAULT_VARIABLE_ITEMS),
+                                variable_columns,
+                            )
+
                         template_editor = st.data_editor(
-                            template_df,
+                            default_frame,
                             num_rows="dynamic",
                             use_container_width=True,
                             key="default_variable_items_editor",
@@ -3120,7 +3141,12 @@ def main() -> None:
                             },
                         )
 
-                        save_col, restore_col, apply_col = st.columns(3)
+                        button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                        if button_col.button(
+                            "Close editor", key="close_variable_defaults"
+                        ):
+                            st.session_state.variable_defaults_edit_mode = False
 
                         if save_col.button(
                             "Save defaults", key="save_variable_defaults"
@@ -3262,16 +3288,37 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = direct_table
 
-                    with st.expander(
-                        "Edit default direct wage template", expanded=False
-                    ):
-                        direct_columns = ["Role", "Share %"]
-                        template_df = _template_to_dataframe(
-                            _get_template("direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS),
-                            direct_columns,
+                    st.session_state.setdefault("direct_defaults_edit_mode", False)
+                    toggle_label = (
+                        "Hide default direct wage template"
+                        if st.session_state.direct_defaults_edit_mode
+                        else "Edit default direct wage template"
+                    )
+                    if st.button(toggle_label, key="toggle_direct_defaults"):
+                        st.session_state.direct_defaults_edit_mode = not st.session_state[
+                            "direct_defaults_edit_mode"
+                        ]
+
+                    if st.session_state.direct_defaults_edit_mode:
+                        st.markdown("##### Default Direct Wage Template")
+                        st.caption(
+                            "Adjust the baseline allocation of direct labour that seeds future schedules."
                         )
+
+                        direct_columns = ["Role", "Share %"]
+                        default_frame = st.session_state.get(
+                            "default_direct_wage_editor"
+                        )
+                        if not isinstance(default_frame, pd.DataFrame):
+                            default_frame = _template_to_dataframe(
+                                _get_template(
+                                    "direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS
+                                ),
+                                direct_columns,
+                            )
+
                         template_editor = st.data_editor(
-                            template_df,
+                            default_frame,
                             num_rows="dynamic",
                             use_container_width=True,
                             key="default_direct_wage_editor",
@@ -3282,7 +3329,12 @@ def main() -> None:
                             },
                         )
 
-                        save_col, restore_col, apply_col = st.columns(3)
+                        button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                        if button_col.button(
+                            "Close editor", key="close_direct_defaults"
+                        ):
+                            st.session_state.direct_defaults_edit_mode = False
 
                         if save_col.button(
                             "Save defaults", key="save_direct_wage_defaults"
@@ -3424,16 +3476,33 @@ def main() -> None:
                     )
                     st.session_state.detail_schedules[name] = admin_table
 
-                    with st.expander(
-                        "Edit default admin wage template", expanded=False
-                    ):
-                        admin_columns = ["Function", "Share %"]
-                        template_df = _template_to_dataframe(
-                            _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS),
-                            admin_columns,
+                    st.session_state.setdefault("admin_defaults_edit_mode", False)
+                    toggle_label = (
+                        "Hide default admin wage template"
+                        if st.session_state.admin_defaults_edit_mode
+                        else "Edit default admin wage template"
+                    )
+                    if st.button(toggle_label, key="toggle_admin_defaults"):
+                        st.session_state.admin_defaults_edit_mode = not st.session_state[
+                            "admin_defaults_edit_mode"
+                        ]
+
+                    if st.session_state.admin_defaults_edit_mode:
+                        st.markdown("##### Default Admin Wage Template")
+                        st.caption(
+                            "Maintain the default administrative wage allocation used when rebuilding schedules."
                         )
+
+                        admin_columns = ["Function", "Share %"]
+                        default_frame = st.session_state.get("default_admin_wage_editor")
+                        if not isinstance(default_frame, pd.DataFrame):
+                            default_frame = _template_to_dataframe(
+                                _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS),
+                                admin_columns,
+                            )
+
                         template_editor = st.data_editor(
-                            template_df,
+                            default_frame,
                             num_rows="dynamic",
                             use_container_width=True,
                             key="default_admin_wage_editor",
@@ -3444,7 +3513,12 @@ def main() -> None:
                             },
                         )
 
-                        save_col, restore_col, apply_col = st.columns(3)
+                        button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                        if button_col.button(
+                            "Close editor", key="close_admin_defaults"
+                        ):
+                            st.session_state.admin_defaults_edit_mode = False
 
                         if save_col.button(
                             "Save defaults", key="save_admin_wage_defaults"
@@ -3650,9 +3724,24 @@ def main() -> None:
 
             pricing_table = _ensure_pricing_table(pricing_editor)
             st.session_state.assumptions["Pricing"] = pricing_table
-            with st.expander(
-                "Edit default pricing assumptions", expanded=False
-            ):
+
+            st.session_state.setdefault("pricing_defaults_edit_mode", False)
+            toggle_label = (
+                "Hide default pricing assumptions"
+                if st.session_state.pricing_defaults_edit_mode
+                else "Edit default pricing assumptions"
+            )
+            if st.button(toggle_label, key="toggle_pricing_defaults"):
+                st.session_state.pricing_defaults_edit_mode = not st.session_state[
+                    "pricing_defaults_edit_mode"
+                ]
+
+            if st.session_state.pricing_defaults_edit_mode:
+                st.markdown("##### Default Pricing Assumptions")
+                st.caption(
+                    "Edit the baseline pricing table applied when resetting these assumptions."
+                )
+
                 pricing_columns = [
                     "Year",
                     "Product",
@@ -3660,11 +3749,14 @@ def main() -> None:
                     "Base Price",
                     "Price Growth %",
                 ]
-                template_df = _template_to_dataframe(
-                    _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
-                )
+                default_frame = st.session_state.get("default_pricing_editor")
+                if not isinstance(default_frame, pd.DataFrame):
+                    default_frame = _template_to_dataframe(
+                        _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
+                    )
+
                 template_editor = st.data_editor(
-                    template_df,
+                    default_frame,
                     num_rows="dynamic",
                     use_container_width=True,
                     key="default_pricing_editor",
@@ -3679,7 +3771,10 @@ def main() -> None:
                     },
                 )
 
-                save_col, restore_col, apply_col = st.columns(3)
+                button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                if button_col.button("Close editor", key="close_pricing_defaults"):
+                    st.session_state.pricing_defaults_edit_mode = False
 
                 if save_col.button("Save defaults", key="save_pricing_defaults"):
                     records = _dataframe_to_template(template_editor, pricing_columns)
@@ -3819,16 +3914,34 @@ def main() -> None:
 
             operating_table = _ensure_operating_cost_table(operating_editor)
             st.session_state.assumptions["Operating Costs"] = operating_table
-            with st.expander(
-                "Edit default operating cost assumptions", expanded=False
-            ):
-                operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
-                template_df = _template_to_dataframe(
-                    _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
-                    operating_columns,
+
+            st.session_state.setdefault("operating_defaults_edit_mode", False)
+            toggle_label = (
+                "Hide default operating cost assumptions"
+                if st.session_state.operating_defaults_edit_mode
+                else "Edit default operating cost assumptions"
+            )
+            if st.button(toggle_label, key="toggle_operating_defaults"):
+                st.session_state.operating_defaults_edit_mode = not st.session_state[
+                    "operating_defaults_edit_mode"
+                ]
+
+            if st.session_state.operating_defaults_edit_mode:
+                st.markdown("##### Default Operating Cost Assumptions")
+                st.caption(
+                    "Update the baseline operating cost table used when refreshing these assumptions."
                 )
+
+                operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
+                default_frame = st.session_state.get("default_operating_editor")
+                if not isinstance(default_frame, pd.DataFrame):
+                    default_frame = _template_to_dataframe(
+                        _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
+                        operating_columns,
+                    )
+
                 template_editor = st.data_editor(
-                    template_df,
+                    default_frame,
                     num_rows="dynamic",
                     use_container_width=True,
                     key="default_operating_editor",
@@ -3843,7 +3956,10 @@ def main() -> None:
                     },
                 )
 
-                save_col, restore_col, apply_col = st.columns(3)
+                button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                if button_col.button("Close editor", key="close_operating_defaults"):
+                    st.session_state.operating_defaults_edit_mode = False
 
                 if save_col.button("Save defaults", key="save_operating_defaults"):
                     records = _dataframe_to_template(template_editor, operating_columns)
