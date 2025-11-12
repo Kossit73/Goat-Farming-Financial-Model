@@ -3485,6 +3485,20 @@ def main() -> None:
 
     with tabs[4]:
         st.subheader("Advanced Analytics")
+        st.markdown(
+            "Complement Monte Carlo simulation with the following advanced analytics to"
+            " deepen scenario insights:"
+        )
+        st.markdown(
+            "- **Sensitivity analysis** to quantify how key drivers such as milk prices,"
+            " feed costs, or herd productivity shift profitability.\n"
+            "- **Scenario stress testing** that applies severe but plausible shocks"
+            " (e.g., drought, disease outbreaks) to evaluate resilience.\n"
+            "- **Trend and seasonality decomposition** on production and revenue series"
+            " to isolate structural shifts from cyclical effects.\n"
+            "- **Customer and product segmentation analysis** to spotlight high-margin"
+            " channels and inform targeted growth initiatives."
+        )
         if results is None:
             st.info("Run the scenario to view advanced analytics.")
         else:
