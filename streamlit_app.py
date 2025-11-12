@@ -4377,7 +4377,6 @@ def main() -> None:
             scenario = results["scenario"]
             model = results["model"]
             try:
-                adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
                 adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
 
                 def _render_analytics(
@@ -4492,7 +4491,6 @@ def main() -> None:
                                 st.info("No tables available for this analysis.")
 
                 selected_scenario_name = results.get("selected_scenario", "Scenario")
-                _render_analytics("Monthly", adv_monthly, selected_scenario_name)
                 _render_analytics("Annual", adv_annual, selected_scenario_name)
             except ValueError as exc:
                 st.info(str(exc))

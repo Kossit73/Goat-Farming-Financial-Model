@@ -134,11 +134,11 @@ def test_scenario_and_statements_pipeline():
     assert "Break-even Revenue" in break_even.columns
 
 
-def test_monthly_advanced_analytics_uses_costs():
+def test_annual_advanced_analytics_uses_costs():
     model = _build_model()
     scenario = model.scenario()
 
-    analytics = model.advanced_analytics(scenario, window=3, annual=False)
+    analytics = model.advanced_analytics(scenario, window=3, annual=True)
 
     segments = analytics["segmentation"]["tables"]["Segment Contribution"]
     assert not segments.empty
