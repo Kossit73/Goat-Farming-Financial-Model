@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import warnings
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -11,11 +12,29 @@ import pandas as pd
 SeriesLabels = Sequence[str]
 
 
+class DataQualityWarning(UserWarning):
+    """Warning emitted when numeric coercion drops one or more values."""
+
+
 def _coerce_numeric_frame(df: pd.DataFrame, *, context: str) -> pd.DataFrame:
     """Convert frame to numeric, raising if columns lose all data."""
 
     raw = df.copy()
     numeric = df.apply(pd.to_numeric, errors="coerce")
+
+    coerced_mask = raw.notna() & numeric.isna()
+    if coerced_mask.any().any():
+        counts = coerced_mask.sum()
+        details = ", ".join(
+            f"{column}: {int(count)}"
+            for column, count in counts[counts > 0].items()
+        )
+        total = int(coerced_mask.to_numpy().sum())
+        warnings.warn(
+            f"{context}: coerced {total} value(s) to NaN ({details}).",
+            DataQualityWarning,
+            stacklevel=2,
+        )
 
     problematic = [
         column
@@ -341,7 +360,7 @@ class GoatModel:
             return None
         return float(value)
 
-    def ufcf(self) -> Optional[pd.Series]:
+    def ufcf(self, column: Optional[str] = None) -> Optional[pd.Series]:
         table = None
         for key in ("UFCF", "Unlevered Free Cash Flow"):
             if key in self.supplementary_tables:
@@ -351,17 +370,53 @@ class GoatModel:
             return None
 
         df = table.copy()
+        df.columns = [str(col).strip() for col in df.columns]
+        preferred = column or str(self.valuation_inputs.get("UFCF Column", "")).strip()
+        selected: Optional[str] = None
+        if preferred:
+            for candidate in df.columns:
+                if candidate.lower() == preferred.lower():
+                    selected = candidate
+                    break
+        if selected is None:
+            candidates = [
+                col
+                for col in df.columns
+                if "ufcf" in col.lower() or "free cash" in col.lower()
+            ]
+            if not candidates:
+                candidates = [df.columns[-1]]
+            elif len(candidates) > 1:
+                raise ValueError(
+                    "Multiple UFCF columns detected; specify the desired column explicitly."
+                )
+            selected = candidates[0]
+
         if "Period" in df.columns:
             idx = pd.to_datetime(df["Period"], errors="coerce")
-            values = pd.to_numeric(df.iloc[:, -1], errors="coerce")
         else:
             idx = pd.to_datetime(df.index, errors="coerce")
-            values = pd.to_numeric(df.iloc[:, -1], errors="coerce")
 
+        values = pd.to_numeric(df[selected], errors="coerce")
         mask = idx.notna() & values.notna()
         if not mask.any():
             return None
-        return pd.Series(values[mask].to_numpy(), index=pd.DatetimeIndex(idx[mask]), name="Unlevered Free Cash Flow")
+
+        ordered = (
+            pd.DataFrame({"Period": idx[mask], "Value": values[mask]})
+            .sort_values("Period")
+            .reset_index(drop=True)
+        )
+        if ordered["Period"].duplicated().any():
+            raise ValueError("UFCF schedule contains duplicate periods.")
+        if (ordered["Period"].diff().dt.total_seconds() <= 0).any():
+            raise ValueError("UFCF schedule periods must be strictly increasing.")
+
+        return pd.Series(
+            ordered["Value"].to_numpy(),
+            index=pd.DatetimeIndex(ordered["Period"].to_numpy()),
+            name="Unlevered Free Cash Flow",
+        )
 
     def discounted_cash_flow(self) -> Dict[str, object]:
         """Compute the discounted cash-flow valuation using stored assumptions."""
@@ -380,18 +435,35 @@ class GoatModel:
             raise ValueError("WACC must be positive to compute discounted cash flow.")
 
         cash_flows = cash_flows.sort_index()
-        diffs = cash_flows.index.to_series().diff().dt.days.astype(float) / 365.25
-        if len(diffs) > 1 and np.isfinite(diffs.iloc[1:]).any():
-            fallback = diffs.iloc[1:][np.isfinite(diffs.iloc[1:])].median()
-        else:
-            fallback = 1.0
-        if not np.isfinite(fallback) or fallback <= 0:
-            fallback = 1.0
-        diffs.iloc[0] = fallback
-        diffs = diffs.fillna(fallback)
-        diffs = diffs.clip(lower=1e-9)
+        if cash_flows.index.duplicated().any():
+            raise ValueError("Cash-flow timeline contains duplicate periods.")
+        if (cash_flows.index.to_series().diff().dt.total_seconds() <= 0).any():
+            raise ValueError("Cash-flow timeline must be strictly increasing.")
 
-        periods = diffs.cumsum().to_numpy()
+        diffs_days = cash_flows.index.to_series().diff().dt.days.astype(float)
+        valid_diffs = diffs_days.iloc[1:][np.isfinite(diffs_days.iloc[1:])]
+        if not valid_diffs.empty:
+            median_days = float(np.median(valid_diffs))
+        else:
+            median_days = 365.25
+        if not np.isfinite(median_days) or median_days <= 0:
+            median_days = 365.25
+
+        irregular = valid_diffs[
+            (valid_diffs - median_days).abs() > max(median_days * 0.25, 1.0)
+        ]
+        if not irregular.empty:
+            warnings.warn(
+                "Cash-flow timeline contains irregular step sizes; results may be approximate.",
+                DataQualityWarning,
+                stacklevel=2,
+            )
+
+        diffs_years = diffs_days / 365.25
+        diffs_years.iloc[0] = median_days / 365.25
+        diffs_years = diffs_years.fillna(median_days / 365.25).clip(lower=1e-9)
+
+        periods = diffs_years.cumsum().to_numpy()
         discount_factors = 1 / np.power(1 + rate, periods)
         pv_cash_flows = cash_flows.to_numpy() * discount_factors
 
@@ -407,7 +479,7 @@ class GoatModel:
         terminal_value = self.terminal_value()
         terminal_value_pv = None
         if terminal_value is not None:
-            last_step = diffs.iloc[-1]
+            last_step = diffs_years.iloc[-1]
             horizon = periods[-1] + last_step
             terminal_value_pv = float(terminal_value) / ((1 + rate) ** horizon)
 
@@ -508,20 +580,76 @@ class GoatModel:
         df["EBITDA_adj"] = df["Gross Margin_adj"] - opex_ex_da
         df["EBIT_adj"] = df["EBITDA_adj"] - df.get("Depreciation & Amortization", 0)
 
-        npbt = self.npbt()
-        npat = self.npat()
-        if npbt is not None and npat is not None and npbt.notna().any() and npat.notna().any():
-            aligned = pd.concat([npbt, npat], axis=1).dropna()
-            aligned = aligned[aligned.iloc[:, 0].abs() > 1e-9]
-            aligned = aligned[aligned.iloc[:, 0] > 0]
+        npbt_series = self.npbt()
+        tax_series = self.tax_expense()
+        npat_series = self.npat()
+        eff_tax: Optional[float] = None
+        if npbt_series is not None and tax_series is not None:
+            aligned_tax = pd.concat([npbt_series, tax_series], axis=1).dropna()
+            aligned_tax = aligned_tax[aligned_tax.iloc[:, 0] > 1e-9]
+            if not aligned_tax.empty:
+                ratios = aligned_tax.iloc[:, 1] / aligned_tax.iloc[:, 0]
+                eff_tax = float(np.clip(ratios.median(), 0.0, 0.6))
+        if eff_tax is None and npbt_series is not None and npat_series is not None:
+            aligned = pd.concat([npbt_series, npat_series], axis=1).dropna()
+            aligned = aligned[aligned.iloc[:, 0] > 1e-9]
             if not aligned.empty:
-                eff_tax = 1 - (aligned.iloc[:, 1] / aligned.iloc[:, 0]).median()
-                eff_tax = float(np.clip(eff_tax, 0.0, 0.5))
-            else:
-                eff_tax = 0.28
-        else:
+                eff_tax = float(
+                    np.clip(1 - (aligned.iloc[:, 1] / aligned.iloc[:, 0]).median(), 0.0, 0.6)
+                )
+        if eff_tax is None:
             eff_tax = 0.28
-        df["NPAT_adj"] = df["EBIT_adj"] * (1 - eff_tax)
+
+        interest = df.get("Interest Expense", 0)
+        df["NPBT_adj"] = df["EBIT_adj"] - interest
+        tax_adj = np.maximum(df["NPBT_adj"], 0.0) * eff_tax
+        df["Tax Expense_adj"] = tax_adj
+        df["NPAT_adj"] = df["NPBT_adj"] - tax_adj
+
+        notes: Dict[str, str] = {}
+        if "CFO" in df:
+            if "NPAT" in df:
+                delta_npat = df["NPAT_adj"] - df["NPAT"]
+                df["CFO_adj"] = df["CFO"] + delta_npat
+                notes["CFO_adj"] = "Adjusted using NPAT delta"
+            else:
+                df["CFO_adj"] = df["CFO"]
+                notes["CFO_adj"] = "Unchanged (missing NPAT baseline)"
+        if "CFI" in df:
+            capex = df.get("Capex")
+            if capex is not None:
+                candidate = (-capex).fillna(0.0)
+                baseline = df["CFI"].fillna(0.0)
+                if np.allclose(candidate.to_numpy(), baseline.to_numpy(), atol=1e-6):
+                    df["CFI_adj"] = candidate
+                    notes["CFI_adj"] = "Recomputed from capex"
+                else:
+                    df["CFI_adj"] = df["CFI"]
+                    notes["CFI_adj"] = "Unchanged (capex does not reconcile)"
+            else:
+                df["CFI_adj"] = df["CFI"]
+                notes["CFI_adj"] = "Unchanged (no capex data)"
+        if "CFF" in df:
+            df["CFF_adj"] = df["CFF"]
+            notes["CFF_adj"] = "Unchanged (no financing schedule adjustments)"
+
+        if {"CFO_adj", "CFI_adj", "CFF_adj"}.issubset(df.columns):
+            df["Net Cash Flow_adj"] = df["CFO_adj"] + df["CFI_adj"] + df["CFF_adj"]
+            notes["Net Cash Flow_adj"] = "Derived from adjusted cash flows"
+        elif "Net Cash Flow" in df:
+            df["Net Cash Flow_adj"] = df["Net Cash Flow"]
+            notes["Net Cash Flow_adj"] = "Unchanged (incomplete cash flow drivers)"
+
+        if "Opening Cash Balance" in df and "Net Cash Flow_adj" in df:
+            opening = df["Opening Cash Balance"].ffill()
+            df["Closing Cash Balance_adj"] = opening + df["Net Cash Flow_adj"].fillna(0.0)
+            notes["Closing Cash Balance_adj"] = "Opening balance plus adjusted net cash flow"
+
+        if notes:
+            scenario_notes = dict(df.attrs.get("scenario_notes", {}))
+            scenario_notes.update(notes)
+            df.attrs["scenario_notes"] = scenario_notes
+
         return df
 
     # ---------- KPIs ----------
