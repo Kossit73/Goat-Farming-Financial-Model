@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "goat-financial-model"
 version = "0.1.0"
 description = "Helpers for modelling goat farming finances from manual schedules"
-authors = [{name = "Goat Farmers United"}]
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -17,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 app = [
     "streamlit>=1.32",
+    "XlsxWriter>=3.1",
 ]
 
 [project.scripts]

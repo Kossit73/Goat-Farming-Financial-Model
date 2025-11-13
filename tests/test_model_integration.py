@@ -1,10 +1,21 @@
+import importlib.util
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
+import pytest
+
+_STREAMLIT_APP_PATH = Path(__file__).resolve().parents[1] / "streamlit_app.py"
+_spec = importlib.util.spec_from_file_location("streamlit_app", _STREAMLIT_APP_PATH)
+assert _spec and _spec.loader  # type: ignore[truthy-bool]
+streamlit_app = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(streamlit_app)
 
 from goat_financial_model import GoatModel, InputSchedule
 
 
 def _build_sample_schedule() -> pd.DataFrame:
-    periods = pd.date_range("2024-01-31", periods=12, freq="M")
+    periods = pd.date_range("2024-01-31", periods=12, freq="ME")
     revenue = pd.Series(100000 + (periods.month - 1) * 5000, index=periods)
     cogs = revenue * 0.45
     gross_profit = revenue - cogs
@@ -93,42 +104,141 @@ def test_scenario_and_statements_pipeline():
     assert expected_columns.issubset(scenario.columns)
 
     performance = model.statement_of_financial_performance(scenario, annual=True)
-    assert list(performance.columns) == [
-        "Revenue",
-        "COGS",
-        "Gross Profit",
-        "Gross Profit Margin",
-        "Variable Expenses",
-        "Direct Wages",
-        "EBITDA",
-        "Fixed Expenses",
-        "Admin Wages",
-        "Depreciation",
-        "EBIT",
-        "Interest",
-        "Tax",
-        "Net Profit",
-    ]
-    assert not performance.isna().all().any()
+    assert "Income – Revenue" in performance.columns
+    assert "Cost of sales – Gross profit" in performance.columns
+    assert "Operating profit – EBIT" in performance.columns
+    assert "Profit – Profit for the period" in performance.columns
+    assert not performance["Income – Revenue"].isna().all()
+    assert not performance["Profit – Profit for the period"].isna().all()
 
     cash_flow = model.statement_of_cash_flow(scenario, annual=True)
-    assert "Net cash from operating activities" in cash_flow.columns
-    assert "Closing cash and cash equivalents" in cash_flow.columns
+    assert (
+        "Operating activities – Net cash from operating activities"
+        in cash_flow.columns
+    )
+    assert (
+        "Net change – Cash and cash equivalents at end of period"
+        in cash_flow.columns
+    )
 
     position = model.statement_of_financial_position(scenario, annual=True)
-    assert "Total Assets" in position.columns
-    assert "Total Liabilities & Equity" in position.columns
+    assert "Assets – Total assets" in position.columns
+    assert (
+        "Equity and liabilities – Total equity and liabilities"
+        in position.columns
+    )
 
     analytics = model.advanced_analytics(scenario, window=3, annual=True)
-    assert {
-        "Revenue Growth %",
-        "Gross Margin %",
-        "EBITDA Margin %",
-        "Net Margin %",
-    }.issubset(analytics.columns)
+    assert {"sensitivity", "monte_carlo", "goal_seek"}.issubset(analytics.keys())
+    sensitivity = analytics["sensitivity"]["tables"]["Impact Summary"]
+    assert {"Revenue", "EBITDA", "NPAT"}.issubset(sensitivity.columns)
+    monte_carlo = analytics["monte_carlo"]["tables"]["Summary Statistics"]
+    assert "Mean" in monte_carlo.index
+    assert "NPV" in monte_carlo.columns
 
     kpis = model.kpis(scenario, annual=True)
     assert "Gross Margin %" in kpis.columns
 
     break_even = model.break_even(scenario, annual=True)
     assert "Break-even Revenue" in break_even.columns
+
+
+def test_annual_advanced_analytics_uses_costs():
+    model = _build_model()
+    scenario = model.scenario()
+
+    analytics = model.advanced_analytics(scenario, window=3, annual=True)
+
+    segments = analytics["segmentation"]["tables"]["Segment Contribution"]
+    assert not segments.empty
+    assert pytest.approx(0.55, rel=1e-6) == segments.iloc[0]["Margin %"]
+
+    allocation = analytics["portfolio"]["tables"]["Allocation"]
+    assert not allocation.empty
+    assert pytest.approx(segments.iloc[0]["Margin %"], rel=1e-6) == allocation.iloc[0][
+        "Expected Margin"
+    ]
+
+
+def test_input_schedule_rejects_non_numeric_columns():
+    periods = pd.date_range("2024-01-31", periods=2, freq="ME")
+    schedule = pd.DataFrame({"Revenue": ["one", "two"]}, index=periods)
+
+    with pytest.raises(ValueError):
+        InputSchedule(data=schedule)
+
+
+def test_ratios_mask_zero_or_negative_denominators():
+    periods = pd.date_range("2024-01-31", periods=3, freq="ME")
+    schedule = pd.DataFrame(
+        {
+            "Revenue": [1000.0, 0.0, -500.0],
+            "COGS": [400.0, 100.0, -200.0],
+            "Gross Margin": [600.0, -100.0, -300.0],
+            "EBITDA": [200.0, -50.0, -150.0],
+            "NPAT": [100.0, -80.0, -200.0],
+        },
+        index=periods,
+    )
+
+    model = InputSchedule(data=schedule).to_model()
+
+    kpis = model.kpis(annual=False)
+    assert pytest.approx(kpis.loc[periods[0], "Gross Margin %"], rel=1e-6) == 0.6
+    assert np.isnan(kpis.loc[periods[1], "Gross Margin %"])
+    assert np.isnan(kpis.loc[periods[2], "Gross Margin %"])
+
+    break_even = model.break_even(annual=False)
+    assert pytest.approx(break_even.loc[periods[0], "Break-even Revenue"], rel=1e-6) == 666.6666667
+    assert np.isnan(break_even.loc[periods[1], "Break-even Revenue"])
+    assert np.isnan(break_even.loc[periods[2], "Break-even Revenue"])
+
+
+def test_discounted_cash_flow_summary():
+    periods = pd.date_range("2024-12-31", periods=3, freq="YE")
+    schedule = pd.DataFrame({"Revenue": [1.0, 1.0, 1.0]}, index=periods)
+
+    valuation_inputs = {"WACC": 0.1, "Terminal Value": 200000.0}
+    ufcf_table = pd.DataFrame({"Period": periods, "UFCF": [10000.0, 12000.0, 15000.0]})
+
+    model = InputSchedule(
+        data=schedule,
+        valuation_inputs=valuation_inputs,
+        supplementary_tables={"UFCF": ufcf_table},
+    ).to_model()
+
+    summary = model.discounted_cash_flow()
+
+    cash_flows = summary["cash_flows"]
+    assert list(cash_flows.columns) == ["UFCF", "Discount Factor", "Present Value"]
+    assert cash_flows["Discount Factor"].iloc[0] < 1
+    assert "terminal_value_pv" in summary
+
+    expected_discount = [1 / (1.1**i) for i in range(1, 4)]
+    assert cash_flows["Discount Factor"].tolist() == pytest.approx(expected_discount, rel=1e-3)
+
+    pv_total = cash_flows["Present Value"].sum() + summary["terminal_value_pv"]
+    assert summary["enterprise_value"] == pytest.approx(pv_total, rel=1e-6)
+
+
+def test_execute_scenario_suite_runs_presets():
+    schedule = _build_sample_schedule()
+    suite = streamlit_app._build_scenario_suite()
+
+    model, base, results = streamlit_app._execute_scenario_suite(
+        schedule,
+        {},
+        {},
+        suite,
+    )
+
+    pd.testing.assert_frame_equal(base, model.to_tidy())
+    assert {
+        "Base Case Scenario",
+        "Best Case Scenario",
+        "Worst Case Scenario",
+    }.issubset(results.keys())
+
+    for payload in results.values():
+        assert "scenario" in payload
+        assert "Revenue_adj" in payload["scenario"].columns

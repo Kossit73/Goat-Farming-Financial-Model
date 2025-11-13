@@ -3,12 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 SeriesLabels = Sequence[str]
+
+
+def _coerce_numeric_frame(df: pd.DataFrame, *, context: str) -> pd.DataFrame:
+    """Convert frame to numeric, raising if columns lose all data."""
+
+    raw = df.copy()
+    numeric = df.apply(pd.to_numeric, errors="coerce")
+
+    problematic = [
+        column
+        for column in numeric.columns
+        if numeric[column].notna().sum() == 0 and raw[column].notna().sum() > 0
+    ]
+    if problematic:
+        columns = ", ".join(problematic)
+        raise ValueError(
+            f"{context} columns contain no numeric values after coercion: {columns}."
+        )
+
+    return numeric
 
 
 @dataclass
@@ -26,7 +46,7 @@ class InputSchedule:
             raise ValueError("Input schedule periods must be unique.")
         self.data = self.data.sort_index()
         self.data.index.name = "Period"
-        self.data = self.data.apply(pd.to_numeric, errors="coerce")
+        self.data = _coerce_numeric_frame(self.data, context="Input schedule")
 
         cleaned_tables: Dict[str, pd.DataFrame] = {}
         for name, table in self.supplementary_tables.items():
@@ -54,7 +74,8 @@ class InputSchedule:
         if periods.isna().any():
             raise ValueError("Unable to parse one or more period values into dates.")
 
-        values = frame.drop(columns=[period_col]).apply(pd.to_numeric, errors="coerce")
+        values = frame.drop(columns=[period_col])
+        values = _coerce_numeric_frame(values, context="Input schedule")
         values.index = pd.DatetimeIndex(periods)
         values.index.name = "Period"
 
@@ -89,13 +110,37 @@ class GoatModel:
             raise ValueError("Model periods must be unique.")
         self.data = self.data.sort_index()
         self.data.index.name = "Period"
-        self.data = self.data.apply(pd.to_numeric, errors="coerce")
+        self.data = _coerce_numeric_frame(self.data, context="Model data")
 
     @property
     def dates(self) -> pd.DatetimeIndex:
         return self.data.index
 
     # ---------- Internal helpers ----------
+    @staticmethod
+    def _safe_divide(
+        numerator: pd.Series,
+        denominator: pd.Series,
+        *,
+        min_abs: float = 1e-9,
+        allow_negative: bool = False,
+    ) -> pd.Series:
+        """Safely divide two aligned series, masking unstable denominators."""
+
+        num_aligned, denom_aligned = numerator.align(denominator, join="outer")
+        result = pd.Series(np.nan, index=num_aligned.index, dtype=float)
+
+        valid_mask = denom_aligned.notna() & (denom_aligned.abs() >= min_abs)
+        if not allow_negative:
+            valid_mask &= denom_aligned > 0
+
+        if valid_mask.any():
+            result.loc[valid_mask] = (
+                num_aligned.loc[valid_mask] / denom_aligned.loc[valid_mask]
+            )
+
+        return result
+
     def _get_series(self, labels: SeriesLabels) -> Optional[pd.Series]:
         for label in labels:
             if label in self.data.columns:
@@ -318,6 +363,72 @@ class GoatModel:
             return None
         return pd.Series(values[mask].to_numpy(), index=pd.DatetimeIndex(idx[mask]), name="Unlevered Free Cash Flow")
 
+    def discounted_cash_flow(self) -> Dict[str, object]:
+        """Compute the discounted cash-flow valuation using stored assumptions."""
+
+        cash_flows = self.ufcf()
+        if cash_flows is None or cash_flows.empty:
+            raise ValueError("UFCF schedule is required for discounted cash-flow analysis.")
+
+        rate = self.wacc()
+        if rate is None:
+            raise ValueError("WACC is required for discounted cash-flow analysis.")
+
+        if rate > 1:
+            rate = rate / 100.0
+        if rate <= 0:
+            raise ValueError("WACC must be positive to compute discounted cash flow.")
+
+        cash_flows = cash_flows.sort_index()
+        diffs = cash_flows.index.to_series().diff().dt.days.astype(float) / 365.25
+        if len(diffs) > 1 and np.isfinite(diffs.iloc[1:]).any():
+            fallback = diffs.iloc[1:][np.isfinite(diffs.iloc[1:])].median()
+        else:
+            fallback = 1.0
+        if not np.isfinite(fallback) or fallback <= 0:
+            fallback = 1.0
+        diffs.iloc[0] = fallback
+        diffs = diffs.fillna(fallback)
+        diffs = diffs.clip(lower=1e-9)
+
+        periods = diffs.cumsum().to_numpy()
+        discount_factors = 1 / np.power(1 + rate, periods)
+        pv_cash_flows = cash_flows.to_numpy() * discount_factors
+
+        cash_flow_df = pd.DataFrame(
+            {
+                "UFCF": cash_flows.to_numpy(),
+                "Discount Factor": discount_factors,
+                "Present Value": pv_cash_flows,
+            },
+            index=cash_flows.index,
+        )
+
+        terminal_value = self.terminal_value()
+        terminal_value_pv = None
+        if terminal_value is not None:
+            last_step = diffs.iloc[-1]
+            horizon = periods[-1] + last_step
+            terminal_value_pv = float(terminal_value) / ((1 + rate) ** horizon)
+
+        total_pv = float(np.nansum(pv_cash_flows))
+        enterprise_value = total_pv + (terminal_value_pv or 0.0)
+
+        summary: Dict[str, object] = {
+            "cash_flows": cash_flow_df,
+            "discount_rate": rate,
+            "enterprise_value": enterprise_value,
+        }
+
+        if terminal_value_pv is not None:
+            summary["terminal_value_pv"] = terminal_value_pv
+
+        npv_value = self.npv()
+        if npv_value is not None:
+            summary["npv"] = float(npv_value)
+
+        return summary
+
     # ---------- Supplementary schedules ----------
     def capitalisation_table(self) -> Optional[pd.DataFrame]:
         return self.supplementary_tables.get("Capitalisation Table")
@@ -400,9 +511,14 @@ class GoatModel:
         npbt = self.npbt()
         npat = self.npat()
         if npbt is not None and npat is not None and npbt.notna().any() and npat.notna().any():
-            idx = npbt.notna() & npat.notna()
-            eff_tax = 1 - (npat[idx] / npbt[idx]).median()
-            eff_tax = float(np.clip(eff_tax, 0.0, 0.5))
+            aligned = pd.concat([npbt, npat], axis=1).dropna()
+            aligned = aligned[aligned.iloc[:, 0].abs() > 1e-9]
+            aligned = aligned[aligned.iloc[:, 0] > 0]
+            if not aligned.empty:
+                eff_tax = 1 - (aligned.iloc[:, 1] / aligned.iloc[:, 0]).median()
+                eff_tax = float(np.clip(eff_tax, 0.0, 0.5))
+            else:
+                eff_tax = 0.28
         else:
             eff_tax = 0.28
         df["NPAT_adj"] = df["EBIT_adj"] * (1 - eff_tax)
@@ -440,10 +556,10 @@ class GoatModel:
             grp = work.copy()
 
         out = pd.DataFrame(index=grp.index)
-        out["Gross Margin %"] = grp["Gross Margin"] / grp["Revenue"]
-        out["EBITDA Margin %"] = grp["EBITDA"] / grp["Revenue"]
-        out["Net Margin %"] = grp["NPAT"] / grp["Revenue"]
-        out["COGS % of Revenue"] = grp["COGS"] / grp["Revenue"]
+        out["Gross Margin %"] = self._safe_divide(grp["Gross Margin"], grp["Revenue"])
+        out["EBITDA Margin %"] = self._safe_divide(grp["EBITDA"], grp["Revenue"])
+        out["Net Margin %"] = self._safe_divide(grp["NPAT"], grp["Revenue"])
+        out["COGS % of Revenue"] = self._safe_divide(grp["COGS"], grp["Revenue"])
         out["Revenue YoY %"] = grp["Revenue"].pct_change()
         return out
 
@@ -456,15 +572,15 @@ class GoatModel:
         gm = df["Gross Margin_adj"] if "Gross Margin_adj" in df else df["Gross Margin"]
         ebitda = df["EBITDA_adj"] if "EBITDA_adj" in df else df["EBITDA"]
 
-        cm_ratio = gm / rev
-        fixed_costs = gm - ebitda
-
         if annual:
             idx = rev.index.year
-            cm_ratio = (gm.groupby(idx).sum(min_count=1) / rev.groupby(idx).sum(min_count=1))
-            fixed_costs = fixed_costs.groupby(idx).sum(min_count=1)
+            rev = rev.groupby(idx).sum(min_count=1)
+            gm = gm.groupby(idx).sum(min_count=1)
+            ebitda = ebitda.groupby(idx).sum(min_count=1)
 
-        be_rev = fixed_costs / cm_ratio
+        cm_ratio = self._safe_divide(gm, rev)
+        fixed_costs = gm - ebitda
+        be_rev = self._safe_divide(fixed_costs, cm_ratio)
         return pd.DataFrame(
             {
                 "Contribution Margin %": cm_ratio,
@@ -486,6 +602,8 @@ class GoatModel:
         df: Optional[pd.DataFrame] = None,
         annual: bool = True,
     ) -> pd.DataFrame:
+        """Return an IFRS-style statement of profit or loss."""
+
         if df is None:
             df = self.to_tidy()
 
@@ -496,56 +614,108 @@ class GoatModel:
         ebit_col = "EBIT_adj" if "EBIT_adj" in df else "EBIT"
         npbt_col = "NPBT"
         npat_col = "NPAT_adj" if "NPAT_adj" in df else "NPAT"
+
         work = pd.DataFrame(index=df.index)
+        presence: Dict[str, bool] = {}
 
-        def _maybe_add(column: str, series: Optional[pd.Series]) -> None:
-            if series is None:
-                return
-            work[column] = pd.to_numeric(series, errors="coerce")
+        def _assign_first(target: str, *candidates: str) -> bool:
+            for name in candidates:
+                series = df.get(name)
+                if series is None:
+                    continue
+                numeric = pd.to_numeric(series, errors="coerce")
+                if target not in work:
+                    work[target] = numeric
+                    presence[target] = True
+                    return True
+            presence.setdefault(target, False)
+            return False
 
-        _maybe_add("Revenue", df.get(rev_col))
-        _maybe_add("COGS", df.get(cogs_col))
+        def _accumulate(target: str, *candidates: str) -> bool:
+            found = False
+            for name in candidates:
+                series = df.get(name)
+                if series is None:
+                    continue
+                numeric = pd.to_numeric(series, errors="coerce")
+                if target in work:
+                    work[target] = work[target].add(numeric, fill_value=0.0)
+                else:
+                    work[target] = numeric
+                found = True
+            if found:
+                presence[target] = True
+            else:
+                presence.setdefault(target, False)
+            return found
 
-        if "Revenue" in work and "COGS" in work:
-            work["Gross Profit"] = work["Revenue"] - work["COGS"]
-        else:
-            _maybe_add("Gross Profit", df.get(gm_col))
-
-        _maybe_add("Variable Expenses", df.get("Variable Expenses"))
-        _maybe_add("Direct Wages", df.get("Direct Wages"))
-        _maybe_add("EBITDA", df.get(ebitda_col))
-        _maybe_add("Fixed Expenses", df.get("Fixed Expenses"))
-        _maybe_add("Admin Wages", df.get("Admin Wages"))
-        _maybe_add("Depreciation", df.get("Depreciation & Amortization"))
-        _maybe_add("EBIT", df.get(ebit_col))
-
-        npbt_series = df.get(npbt_col)
-        npat_series = df.get(npat_col)
-        _maybe_add("Net Profit", npat_series)
-
-        interest_series = None
-        for interest_col in ("Interest Expense", "Interest", "Finance Costs"):
-            candidate = df.get(interest_col)
-            if candidate is not None:
-                interest_series = candidate
-                break
-        if interest_series is None and "EBIT" in work and npbt_series is not None:
-            interest_series = pd.to_numeric(work["EBIT"], errors="coerce") - pd.to_numeric(
-                npbt_series, errors="coerce"
-            )
-        _maybe_add("Interest", interest_series)
-
-        tax_series = None
-        for tax_col in ("Tax Expense", "Income Tax Expense", "Tax"):
-            candidate = df.get(tax_col)
-            if candidate is not None:
-                tax_series = candidate
-                break
-        if tax_series is None and npbt_series is not None and npat_series is not None:
-            tax_series = pd.to_numeric(npbt_series, errors="coerce") - pd.to_numeric(
-                npat_series, errors="coerce"
-            )
-        _maybe_add("Tax", tax_series)
+        _assign_first("Revenue", rev_col, "Revenue")
+        _assign_first("Cost of sales", cogs_col, "Cost of Sales", "COGS")
+        _assign_first("Gross profit", gm_col, "Gross Profit")
+        _accumulate(
+            "Other income",
+            "Other Income",
+            "Other Revenue",
+            "Non-operating Income",
+            "Investment Income",
+        )
+        _accumulate(
+            "Distribution costs",
+            "Variable Expenses",
+            "Distribution Costs",
+            "Selling Expenses",
+            "Sales and Marketing",
+            "Direct Wages",
+        )
+        _accumulate(
+            "Administrative expenses",
+            "Fixed Expenses",
+            "Admin Wages",
+            "Administrative Expenses",
+            "General & Administrative Expenses",
+            "Overheads",
+        )
+        _accumulate(
+            "Depreciation and amortisation",
+            "Depreciation & Amortization",
+            "Depreciation",
+            "Amortization",
+        )
+        _accumulate(
+            "Other operating expenses",
+            "Other Operating Expenses",
+            "Operating Expenses",
+            "Research and Development",
+        )
+        _assign_first("EBITDA", ebitda_col, "EBITDA")
+        _assign_first("Operating profit (EBIT)", ebit_col, "EBIT", "Operating Profit", "Operating Income")
+        _accumulate(
+            "Finance income",
+            "Finance Income",
+            "Interest Income",
+            "Investment Income",
+        )
+        _accumulate(
+            "Finance costs",
+            "Interest Expense",
+            "Finance Costs",
+            "Interest",
+        )
+        _assign_first("Profit before tax", npbt_col, "Profit Before Tax", "Earnings Before Tax")
+        _accumulate(
+            "Income tax expense",
+            "Tax Expense",
+            "Income Tax Expense",
+            "Tax",
+        )
+        _assign_first(
+            "Profit for the period",
+            npat_col,
+            "Net Profit",
+            "Profit for the Period",
+            "Profit After Tax",
+            "Net Income",
+        )
 
         if work.empty:
             raise ValueError("No income-statement data available in the schedule.")
@@ -554,41 +724,187 @@ class GoatModel:
         if agg.empty:
             raise ValueError("No income-statement data available in the schedule.")
 
-        ordered = [
-            "Revenue",
-            "COGS",
-            "Gross Profit",
-            "Gross Profit Margin",
-            "Variable Expenses",
-            "Direct Wages",
-            "EBITDA",
-            "Fixed Expenses",
-            "Admin Wages",
+        index = agg.index
+
+        def _series(name: str, *, default: float = np.nan) -> pd.Series:
+            if name in agg:
+                return pd.to_numeric(agg[name], errors="coerce")
+            if np.isnan(default):
+                return pd.Series(np.nan, index=index, dtype=float)
+            return pd.Series(default, index=index, dtype=float)
+
+        def _series_with_presence(name: str, *, default: float = np.nan) -> pd.Series:
+            series = _series(name, default=default)
+            if not presence.get(name, False):
+                return pd.Series(np.nan, index=index, dtype=float)
+            return series
+
+        revenue = _series_with_presence("Revenue")
+        cost_of_sales = _series_with_presence("Cost of sales")
+        gross_profit_reported = _series_with_presence("Gross profit")
+        other_income = _series_with_presence("Other income", default=0.0)
+        distribution_costs = _series_with_presence("Distribution costs", default=0.0)
+        administrative_expenses = _series_with_presence("Administrative expenses", default=0.0)
+        depreciation = _series_with_presence("Depreciation and amortisation", default=0.0)
+        other_operating = _series_with_presence("Other operating expenses", default=0.0)
+        finance_costs = _series_with_presence("Finance costs", default=0.0)
+        profit_before_tax = _series_with_presence("Profit before tax")
+        income_tax = _series_with_presence("Income tax expense", default=0.0)
+        profit_for_period = _series_with_presence("Profit for the period")
+        ebitda_series = _series_with_presence("EBITDA")
+        operating_profit_reported = _series_with_presence("Operating profit (EBIT)")
+
+        computed_gross = revenue.subtract(cost_of_sales, fill_value=0.0)
+        if presence.get("Revenue", False) and presence.get("Cost of sales", False):
+            gross_profit = computed_gross
+        elif gross_profit_reported.notna().any():
+            gross_profit = gross_profit_reported
+        else:
+            gross_profit = computed_gross
+
+        expenses_components = pd.concat(
+            [
+                distribution_costs,
+                administrative_expenses,
+                depreciation,
+                other_operating,
+            ],
+            axis=1,
+        )
+        expenses_components.columns = [
+            "Distribution",
+            "Administrative",
             "Depreciation",
-            "EBIT",
-            "Interest",
-            "Tax",
-            "Net Profit",
+            "Other",
         ]
 
-        out = pd.DataFrame(index=agg.index)
-        for column in ordered:
-            if column == "Gross Profit Margin":
-                continue
-            if column in agg:
-                out[column] = agg[column]
-            else:
-                out[column] = np.nan
+        operating_expenses_total = expenses_components.sum(axis=1, min_count=1)
+        operating_expenses_total = operating_expenses_total.where(
+            expenses_components.notna().any(axis=1), np.nan
+        )
 
-        if "Gross Profit" in agg and "Revenue" in agg:
-            with np.errstate(divide="ignore", invalid="ignore"):
-                margin = agg["Gross Profit"] / agg["Revenue"]
-            margin = margin.replace({np.inf: np.nan, -np.inf: np.nan})
-        else:
-            margin = pd.Series(np.nan, index=agg.index)
-        out["Gross Profit Margin"] = margin
+        computed_operating = (
+            gross_profit.fillna(0.0)
+            + other_income.fillna(0.0)
+            - operating_expenses_total.fillna(0.0)
+        )
+        has_operating_inputs = (
+            gross_profit.notna()
+            | other_income.notna()
+            | expenses_components.notna().any(axis=1)
+        )
+        operating_profit = computed_operating.mask(~has_operating_inputs, np.nan)
+        operating_profit = operating_profit.where(
+            operating_profit.notna(), operating_profit_reported
+        )
 
-        return out[ordered]
+        computed_ebitda = operating_profit.add(
+            depreciation.fillna(0.0), fill_value=0.0
+        )
+        if operating_profit.notna().any() or depreciation.notna().any():
+            ebitda_series = ebitda_series.where(ebitda_series.notna(), computed_ebitda)
+
+        computed_profit_before_tax = operating_profit.subtract(
+            finance_costs.fillna(0.0), fill_value=0.0
+        )
+        if operating_profit.notna().any() or finance_costs.notna().any():
+            profit_before_tax = profit_before_tax.where(
+                profit_before_tax.notna(), computed_profit_before_tax
+            )
+
+        computed_profit_for_period = profit_before_tax.subtract(
+            income_tax.fillna(0.0), fill_value=0.0
+        )
+        if profit_before_tax.notna().any() or income_tax.notna().any():
+            profit_for_period = profit_for_period.where(
+                profit_for_period.notna(), computed_profit_for_period
+            )
+
+        total_income = revenue.add(other_income, fill_value=0.0)
+        if not (revenue.notna() | other_income.notna()).any():
+            total_income[:] = np.nan
+
+        finance_income_series = _series_with_presence("Finance income", default=0.0)
+        finance_income_for_calc = finance_income_series.fillna(0.0)
+        net_finance_result = finance_income_for_calc.subtract(
+            finance_costs.fillna(0.0), fill_value=0.0
+        )
+        has_finance_activity = finance_income_series.notna() | finance_costs.notna()
+        net_finance_result = net_finance_result.where(has_finance_activity, np.nan)
+
+        ordered_sections = [
+            (
+                "Income",
+                [
+                    ("Revenue", revenue),
+                    ("Other income", other_income),
+                    ("Total income", total_income),
+                ],
+            ),
+            (
+                "Cost of sales",
+                [
+                    ("Cost of sales", cost_of_sales),
+                    ("Gross profit", gross_profit),
+                ],
+            ),
+            (
+                "Operating expenses",
+                [
+                    ("Distribution costs", distribution_costs),
+                    ("Administrative expenses", administrative_expenses),
+                    ("Depreciation and amortisation", depreciation),
+                    ("Other operating expenses", other_operating),
+                    ("Total operating expenses", operating_expenses_total),
+                ],
+            ),
+            (
+                "Operating profit",
+                [
+                    ("EBIT", operating_profit),
+                    ("EBITDA", ebitda_series),
+                ],
+            ),
+            (
+                "Finance",
+                [
+                    ("Finance income", finance_income_series),
+                    ("Finance costs", finance_costs),
+                    ("Net finance result", net_finance_result),
+                ],
+            ),
+            (
+                "Profit",
+                [
+                    ("Profit before tax", profit_before_tax),
+                    ("Income tax expense", income_tax),
+                    ("Profit for the period", profit_for_period),
+                ],
+            ),
+        ]
+
+        out = pd.DataFrame(index=index)
+        column_order: List[str] = []
+
+        def _add_column(section: str, label: str, series: pd.Series) -> None:
+            if series is None:
+                return
+            if not isinstance(series, pd.Series):
+                return
+            if not series.notna().any():
+                return
+            column_name = f"{section} – {label}"
+            out[column_name] = series
+            column_order.append(column_name)
+
+        for section, items in ordered_sections:
+            for label, series in items:
+                _add_column(section, label, series)
+
+        if out.empty:
+            raise ValueError("No income-statement data available in the schedule.")
+
+        return out[column_order]
 
     def statement_of_cash_flow(
         self, df: Optional[pd.DataFrame] = None, annual: bool = True
@@ -621,26 +937,24 @@ class GoatModel:
             return cleaned
 
         flows = {
-            "Net cash from operating activities": _aggregate_sum(df.get("CFO")),
-            "Net cash used in investing activities": _aggregate_sum(df.get("CFI")),
-            "Capital expenditure (included in investing activities)": _aggregate_sum(df.get("Capex")),
-            "Net cash from financing activities": _aggregate_sum(df.get("CFF")),
+            "operating": _aggregate_sum(df.get("CFO")),
+            "investing": _aggregate_sum(df.get("CFI")),
+            "capex": _aggregate_sum(df.get("Capex")),
+            "financing": _aggregate_sum(df.get("CFF")),
         }
-        flows = {name: series for name, series in flows.items() if series is not None}
-        if not flows:
+
+        if not any(series is not None for series in flows.values()):
             raise ValueError("No cash-flow data available in the schedule.")
 
-        out = pd.concat(flows, axis=1)
-
         net_cash_series = _aggregate_sum(df.get("Net Cash Flow"))
-        if net_cash_series is None and {"Net cash from operating activities", "Net cash used in investing activities", "Net cash from financing activities"}.issubset(out.columns):
-            net_cash_series = (
-                out["Net cash from operating activities"]
-                + out.get("Net cash used in investing activities", 0)
-                + out.get("Net cash from financing activities", 0)
-            )
-        if net_cash_series is not None:
-            out["Net increase/(decrease) in cash and cash equivalents"] = net_cash_series
+        if net_cash_series is None:
+            available = [
+                series
+                for key, series in flows.items()
+                if key in {"operating", "investing", "financing"} and series is not None
+            ]
+            if available:
+                net_cash_series = sum(available)
 
         opening_candidates = [
             "Opening Cash Balance",
@@ -666,42 +980,69 @@ class GoatModel:
                 closing_series = _aggregate_last(df.get(candidate))
                 break
 
-        if opening_series is not None:
-            out = out.reindex(out.index.union(opening_series.index)).sort_index()
-            out["Opening cash and cash equivalents"] = opening_series
+        if closing_series is None and opening_series is not None and net_cash_series is not None:
+            closing_series = opening_series.add(net_cash_series, fill_value=np.nan)
 
-        if closing_series is not None:
-            out = out.reindex(out.index.union(closing_series.index)).sort_index()
-            out["Closing cash and cash equivalents"] = closing_series
-        elif opening_series is not None and net_cash_series is not None:
-            out["Closing cash and cash equivalents"] = opening_series.add(
-                net_cash_series, fill_value=np.nan
-            )
+        if closing_series is None and net_cash_series is not None:
+            closing_series = net_cash_series.cumsum()
 
-        if (
-            "Closing cash and cash equivalents" not in out
-            and closing_series is None
-            and "Net increase/(decrease) in cash and cash equivalents" in out
-        ):
-            out["Closing cash and cash equivalents"] = out[
-                "Net increase/(decrease) in cash and cash equivalents"
-            ].cumsum()
+        sections: List[Tuple[str, str, Optional[pd.Series]]] = []
 
-        order = [
+        def _append(section: str, label: str, series: Optional[pd.Series]) -> None:
+            if series is None:
+                return
+            if not isinstance(series, pd.Series):
+                return
+            if not series.notna().any():
+                return
+            sections.append((section, label, series))
+
+        _append(
+            "Operating activities",
             "Net cash from operating activities",
+            flows["operating"],
+        )
+        if flows["capex"] is not None:
+            _append("Investing activities", "Capital expenditure", flows["capex"])
+        _append(
+            "Investing activities",
             "Net cash used in investing activities",
-            "Capital expenditure (included in investing activities)",
+            flows["investing"],
+        )
+        _append(
+            "Financing activities",
             "Net cash from financing activities",
+            flows["financing"],
+        )
+        _append(
+            "Net change",
             "Net increase/(decrease) in cash and cash equivalents",
-            "Opening cash and cash equivalents",
-            "Closing cash and cash equivalents",
-        ]
+            net_cash_series,
+        )
+        _append(
+            "Net change",
+            "Cash and cash equivalents at beginning of period",
+            opening_series,
+        )
+        _append(
+            "Net change",
+            "Cash and cash equivalents at end of period",
+            closing_series,
+        )
 
-        available = [col for col in order if col in out.columns]
-        if not available:
+        if not sections:
             raise ValueError("No cash-flow data available in the schedule.")
 
-        return out[available]
+        out = pd.DataFrame(index=pd.Index([], dtype=int))
+        column_order: List[str] = []
+        for section, label, series in sections:
+            if out.empty:
+                out = pd.DataFrame(index=series.index)
+            column_name = f"{section} – {label}"
+            out[column_name] = series
+            column_order.append(column_name)
+
+        return out[column_order]
 
     def statement_of_financial_position(
         self, df: Optional[pd.DataFrame] = None, annual: bool = True
@@ -740,7 +1081,9 @@ class GoatModel:
         }
 
         aggregated = {
-            name: _aggregate_balance(series) for name, series in components.items() if series is not None
+            name: _aggregate_balance(series)
+            for name, series in components.items()
+            if series is not None
         }
 
         if not aggregated:
@@ -748,52 +1091,108 @@ class GoatModel:
 
         out = pd.concat(aggregated, axis=1)
 
+        total_assets = None
         if {"Current Assets", "Non-current Assets"}.issubset(out.columns):
-            out["Total Assets"] = out["Current Assets"] + out["Non-current Assets"]
+            total_assets = out["Current Assets"].add(
+                out["Non-current Assets"], fill_value=0.0
+            )
+            has_assets = (
+                out["Current Assets"].notna() | out["Non-current Assets"].notna()
+            )
+            total_assets = total_assets.where(has_assets, np.nan)
 
+        total_liabilities = None
         if {"Current Liabilities", "Non-current Liabilities"}.issubset(out.columns):
-            out["Total Liabilities"] = (
-                out["Current Liabilities"] + out["Non-current Liabilities"]
+            total_liabilities = out["Current Liabilities"].add(
+                out["Non-current Liabilities"], fill_value=0.0
             )
+            has_liabilities = (
+                out["Current Liabilities"].notna()
+                | out["Non-current Liabilities"].notna()
+            )
+            total_liabilities = total_liabilities.where(has_liabilities, np.nan)
 
-        if "Equity" in out:
-            out["Total Equity"] = out["Equity"]
+        total_equity = out.get("Equity")
 
-        if {"Total Assets", "Total Liabilities"}.issubset(out.columns):
-            out["Net Assets"] = out["Total Assets"] - out["Total Liabilities"]
+        net_assets = None
+        if total_assets is not None and total_liabilities is not None:
+            net_assets = total_assets.subtract(total_liabilities, fill_value=0.0)
+            has_net_assets = total_assets.notna() | total_liabilities.notna()
+            net_assets = net_assets.where(has_net_assets, np.nan)
 
+        net_current_assets = None
         if {"Current Assets", "Current Liabilities"}.issubset(out.columns):
-            out["Net Current Assets"] = out["Current Assets"] - out["Current Liabilities"]
+            net_current_assets = out["Current Assets"].subtract(
+                out["Current Liabilities"], fill_value=0.0
+            )
+            has_working_capital = (
+                out["Current Assets"].notna() | out["Current Liabilities"].notna()
+            )
+            net_current_assets = net_current_assets.where(has_working_capital, np.nan)
 
-        if {"Total Liabilities", "Total Equity"}.issubset(out.columns):
-            out["Total Liabilities & Equity"] = (
-                out["Total Liabilities"] + out["Total Equity"]
+        total_liabilities_and_equity = None
+        if total_liabilities is not None and total_equity is not None:
+            total_liabilities_and_equity = total_liabilities.add(
+                total_equity, fill_value=0.0
+            )
+            has_balancing = total_liabilities.notna() | total_equity.notna()
+            total_liabilities_and_equity = total_liabilities_and_equity.where(
+                has_balancing, np.nan
             )
 
-        order = [
-            "Cash and Cash Equivalents",
-            "Current Assets",
-            "Non-current Assets",
-            "Total Assets",
-            "Current Liabilities",
-            "Non-current Liabilities",
-            "Total Liabilities",
-            "Equity",
-            "Total Equity",
-            "Net Assets",
-            "Net Current Assets",
-            "Total Liabilities & Equity",
-        ]
+        sections: List[Tuple[str, str, Optional[pd.Series]]] = []
 
-        available = [col for col in order if col in out.columns]
-        return out[available]
+        def _append(section: str, label: str, series: Optional[pd.Series]) -> None:
+            if series is None:
+                return
+            if not isinstance(series, pd.Series):
+                return
+            if not series.notna().any():
+                return
+            sections.append((section, label, series))
+
+        _append("Assets", "Cash and cash equivalents", out.get("Cash and Cash Equivalents"))
+        _append("Assets", "Current assets", out.get("Current Assets"))
+        _append("Assets", "Non-current assets", out.get("Non-current Assets"))
+        _append("Assets", "Total assets", total_assets)
+        _append("Equity and liabilities", "Equity", total_equity)
+        _append(
+            "Equity and liabilities",
+            "Non-current liabilities",
+            out.get("Non-current Liabilities"),
+        )
+        _append(
+            "Equity and liabilities",
+            "Current liabilities",
+            out.get("Current Liabilities"),
+        )
+        _append("Equity and liabilities", "Total liabilities", total_liabilities)
+        _append(
+            "Equity and liabilities",
+            "Total equity and liabilities",
+            total_liabilities_and_equity,
+        )
+        _append("Key metrics", "Net assets", net_assets)
+        _append("Key metrics", "Net current assets", net_current_assets)
+
+        if not sections:
+            raise ValueError("No balance sheet data available in the schedule.")
+
+        result = pd.DataFrame(index=out.index)
+        column_order: List[str] = []
+        for section, label, series in sections:
+            column_name = f"{section} – {label}"
+            result[column_name] = series
+            column_order.append(column_name)
+
+        return result[column_order]
 
     def advanced_analytics(
         self,
         df: Optional[pd.DataFrame] = None,
         window: int = 3,
         annual: bool = False,
-    ) -> pd.DataFrame:
+    ) -> Dict[str, object]:
         if df is None:
             df = self.to_tidy()
 
@@ -806,35 +1205,48 @@ class GoatModel:
         if not required:
             raise ValueError("Insufficient data to compute advanced analytics.")
 
-        work = df[required].rename(
-            columns={
-                rev_col: "Revenue",
-                gm_col: "Gross Margin",
-                ebitda_col: "EBITDA",
-                npat_col: "NPAT",
+        work = pd.DataFrame(
+            {
+                "Revenue": df[rev_col],
+                "Gross Margin": df[gm_col],
+                "EBITDA": df[ebitda_col],
+                "NPAT": df[npat_col],
             }
         )
 
-        if annual:
-            work = work.groupby(work.index.year).sum(min_count=1)
+        cogs_col = "COGS_adj" if "COGS_adj" in df else "COGS"
+        if cogs_col in df:
+            work["COGS"] = df[cogs_col]
+        for candidate in (
+            "Variable Expenses",
+            "Direct Wages",
+            "Fixed Expenses",
+            "Admin Wages",
+            "Depreciation & Amortization",
+            "Interest Expense",
+            "Tax Expense",
+            "Capex",
+            "Unlevered Free Cash Flow",
+        ):
+            if candidate in df:
+                work[candidate] = df[candidate]
 
-        out = pd.DataFrame(index=work.index)
-        out["Revenue Growth %"] = work["Revenue"].pct_change()
-        out["Rolling Revenue (window)"] = work["Revenue"].rolling(window, min_periods=1).mean()
-        out["Gross Margin %"] = work["Gross Margin"] / work["Revenue"]
-        out["EBITDA Margin %"] = work["EBITDA"] / work["Revenue"]
-        out["Net Margin %"] = work["NPAT"] / work["Revenue"]
-        if "Variable Expenses" in df:
-            var = df["Variable Expenses"]
-            var = var.groupby(var.index.year).sum(min_count=1) if annual else var
-            out["Variable Cost %"] = var / work["Revenue"]
-        if "Fixed Expenses" in df:
-            fixed = df["Fixed Expenses"]
-            fixed = fixed.groupby(fixed.index.year).sum(min_count=1) if annual else fixed
-            out["Fixed Cost %"] = fixed / work["Revenue"]
-        if "EBITDA" in work:
-            out["EBITDA Conversion"] = work["EBITDA"] / work["Gross Margin"]
-        return out
+        from .advanced import run_advanced_analytics
+
+        results = run_advanced_analytics(
+            work,
+            window=window,
+            annual=annual,
+            assumptions=self.valuation_inputs,
+        )
+        payload: Dict[str, object] = {}
+        for key, analysis in results.items():
+            payload[key] = {
+                "title": analysis.title,
+                "description": analysis.description,
+                "tables": analysis.tables,
+            }
+        return payload
 
     def to_tidy(self) -> pd.DataFrame:
         return self.data.copy()

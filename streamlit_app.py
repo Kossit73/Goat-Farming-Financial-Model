@@ -2,23 +2,115 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from importlib.util import find_spec
 from io import BytesIO
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from copy import deepcopy
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+from pandas.api.types import (
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_integer_dtype,
+    is_numeric_dtype,
+)
 from pandas.tseries.offsets import MonthEnd
 from streamlit.delta_generator import DeltaGenerator
 
 from goat_financial_model import GoatModel, InputSchedule
 
 
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+except Exception:  # pragma: no cover - fallback for older Streamlit builds
+    get_script_run_ctx = None
+
+try:  # pragma: no cover - import guard for Streamlit API variations
+    from streamlit.errors import StreamlitAPIException
+except Exception:  # pragma: no cover - older versions exposed the exception elsewhere
+    StreamlitAPIException = Exception
+
+
+def _can_rerun() -> bool:
+    """Return True when the app is executing within a Streamlit runtime."""
+
+    if get_script_run_ctx is None:
+        return False
+    try:
+        return get_script_run_ctx() is not None
+    except Exception:  # pragma: no cover - defensive guard for API changes
+        return False
+
+
+def _maybe_rerun() -> None:
+    """Invoke Streamlit rerun when a runtime context is active."""
+
+    rerun_fn = getattr(st, "experimental_rerun", None) or getattr(st, "rerun", None)
+    if rerun_fn is None or not _can_rerun():
+        return
+    rerun_fn()
+
+
+def _safe_session_state_get(key: str, default: Any = None) -> Any:
+    """Return a session state value without raising outside a Streamlit run."""
+
+    try:
+        return st.session_state.get(key, default)
+    except StreamlitAPIException:
+        return default
+
+
+def _safe_session_state_setdefault(key: str, value: Any) -> Any:
+    """Set a default session state value when a runtime context exists."""
+
+    try:
+        return st.session_state.setdefault(key, value)
+    except StreamlitAPIException:
+        return value
+
+
+def _safe_session_state_set(key: str, value: Any) -> None:
+    """Assign a session state value when supported by the runtime."""
+
+    try:
+        st.session_state[key] = value
+    except StreamlitAPIException:
+        pass
+
+
+def _safe_session_state_contains(key: str) -> bool:
+    """Return True when the session state currently tracks the key."""
+
+    try:
+        return key in st.session_state
+    except StreamlitAPIException:
+        return False
+
+
+def _safe_session_state_pop(key: str, default: Any = None) -> Any:
+    """Remove a session state key without raising when unavailable."""
+
+    try:
+        return st.session_state.pop(key, default)
+    except StreamlitAPIException:
+        return default
+
+
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 
 
 AI_PROVIDER_OPTIONS = ("OpenAI", "Azure OpenAI", "Anthropic")
+
+DEFAULT_VALUATION_INPUTS = {
+    "WACC": 0.12,
+    "NPV": 750000.0,
+    "Terminal Value": 1500000.0,
+}
 
 ML_METHOD_LABELS = {
     "linear_regression": "Linear Regression",
@@ -35,6 +127,318 @@ GEN_AI_FEATURE_LABELS = {
 }
 
 GEN_AI_LABEL_TO_CODE = {label: code for code, label in GEN_AI_FEATURE_LABELS.items()}
+
+
+DEFAULT_MODEL_AUTHOR = "Goat Farmers United"
+MODEL_AUTHOR_KEY = "model_author"
+MODEL_AUTHOR_WIDGET_KEY = "_model_author_widget"
+MODEL_AUTHOR_CACHE_KEY = "_model_author_cached"
+
+
+def _sanitize_model_author_value(value: Any) -> str:
+    """Return a cleaned author string using the default when empty."""
+
+    if not isinstance(value, str):
+        value = str(value)
+    return value.strip() or DEFAULT_MODEL_AUTHOR
+
+
+def _handle_model_author_change() -> None:
+    """Persist author edits and clear cached exports when updated."""
+
+    if MODEL_AUTHOR_WIDGET_KEY not in st.session_state:
+        return
+
+    raw_value = st.session_state.get(MODEL_AUTHOR_WIDGET_KEY, "")
+    sanitized = _sanitize_model_author_value(raw_value)
+    previous = st.session_state.get(MODEL_AUTHOR_CACHE_KEY)
+
+    # Streamlit raises when callbacks mutate keys that have not been declared yet
+    # in bare execution. Ensure the storage key exists before assignment.
+    if MODEL_AUTHOR_KEY not in st.session_state:
+        st.session_state.setdefault(MODEL_AUTHOR_KEY, sanitized)
+    else:
+        st.session_state[MODEL_AUTHOR_KEY] = sanitized
+
+    st.session_state[MODEL_AUTHOR_CACHE_KEY] = sanitized
+
+    if sanitized != raw_value:
+        st.session_state[MODEL_AUTHOR_WIDGET_KEY] = sanitized
+
+    if previous is not None and sanitized != previous:
+        st.session_state.pop("excel_bytes_map", None)
+
+
+def _current_model_author() -> str:
+    """Return the active model author, applying defaults when necessary."""
+
+    current = st.session_state.get(MODEL_AUTHOR_KEY, DEFAULT_MODEL_AUTHOR)
+    sanitized = _sanitize_model_author_value(current)
+    if sanitized != current:
+        st.session_state[MODEL_AUTHOR_KEY] = sanitized
+    st.session_state.setdefault(MODEL_AUTHOR_CACHE_KEY, sanitized)
+    st.session_state.setdefault(MODEL_AUTHOR_WIDGET_KEY, sanitized)
+    widget_value = st.session_state.get(MODEL_AUTHOR_WIDGET_KEY)
+    if widget_value != sanitized:
+        st.session_state[MODEL_AUTHOR_WIDGET_KEY] = sanitized
+    return sanitized
+
+
+def _render_model_author_editor() -> None:
+    """Display an inline editor for the model author name."""
+
+    author_value = _current_model_author()
+    st.session_state.setdefault(MODEL_AUTHOR_WIDGET_KEY, author_value)
+    st.text_input(
+        "Model author",
+        value=st.session_state.get(MODEL_AUTHOR_WIDGET_KEY, author_value),
+        key=MODEL_AUTHOR_WIDGET_KEY,
+        help=(
+            "Name recorded in scenario outputs and Excel downloads. "
+            "Leave blank to reset to the default."
+        ),
+    )
+    _handle_model_author_change()
+
+
+def _statement_series_by_suffix(
+    df: Optional[pd.DataFrame], suffixes: Sequence[str]
+) -> Optional[pd.Series]:
+    """Return the first numeric series whose column label ends with any suffix."""
+
+    if df is None or df.empty:
+        return None
+
+    for suffix in suffixes:
+        for column in df.columns:
+            if not isinstance(column, str):
+                continue
+            if column.endswith(suffix):
+                series = pd.to_numeric(df[column], errors="coerce")
+                if series.notna().any():
+                    return series
+    return None
+
+
+def _statement_scenario_frames(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> Dict[str, pd.DataFrame]:
+    """Assemble labelled dataframes for the base case and selected scenario."""
+
+    frames: Dict[str, pd.DataFrame] = {}
+
+    if base_df is not None and not base_df.empty:
+        frames["Base Case"] = base_df
+
+    if scenario_df is not None and not scenario_df.empty:
+        label = (scenario_label or "Selected Scenario").strip()
+        if label.lower() in {"base", "base case", "base case scenario"}:
+            label = "Selected Scenario"
+        if label in frames:
+            label = f"{label} (Selected)"
+        frames[label] = scenario_df
+
+    return frames
+
+
+def _build_statement_chart_frame(
+    frames: Dict[str, pd.DataFrame],
+    metrics: Sequence[Tuple[str, Sequence[str]]],
+) -> Optional[pd.DataFrame]:
+    """Construct a combined dataframe for charting the requested metrics."""
+
+    chart_frames: list[pd.DataFrame] = []
+
+    for scenario_label, df in frames.items():
+        if df is None or df.empty:
+            continue
+
+        scenario_columns: Dict[str, pd.Series] = {}
+        for display_name, suffixes in metrics:
+            series = _statement_series_by_suffix(df, suffixes)
+            if series is None:
+                continue
+            scenario_columns[f"{scenario_label} – {display_name}"] = series
+
+        if scenario_columns:
+            chart_frames.append(pd.DataFrame(scenario_columns))
+
+    if not chart_frames:
+        return None
+
+    combined = pd.concat(chart_frames, axis=1)
+    combined = combined.loc[:, ~combined.columns.duplicated()]
+    return combined.sort_index()
+
+
+def _build_margin_chart_frame(
+    frames: Dict[str, pd.DataFrame]
+) -> Optional[pd.DataFrame]:
+    """Compute gross and profit margin percentages for available scenarios."""
+
+    margin_frames: list[pd.DataFrame] = []
+
+    for scenario_label, df in frames.items():
+        revenue = _statement_series_by_suffix(df, ("Income – Revenue",))
+        if revenue is None:
+            continue
+        revenue = revenue.replace({0.0: np.nan})
+
+        gross_profit = _statement_series_by_suffix(
+            df, ("Cost of sales – Gross profit",)
+        )
+        profit_for_period = _statement_series_by_suffix(
+            df, ("Profit – Profit for the period",)
+        )
+
+        margin_columns: Dict[str, pd.Series] = {}
+
+        if gross_profit is not None:
+            gross_margin = gross_profit.divide(revenue) * 100.0
+            margin_columns[f"{scenario_label} – Gross margin (%)"] = gross_margin
+
+        if profit_for_period is not None:
+            profit_margin = profit_for_period.divide(revenue) * 100.0
+            margin_columns[f"{scenario_label} – Profit margin (%)"] = profit_margin
+
+        if margin_columns:
+            margin_frames.append(pd.DataFrame(margin_columns))
+
+    if not margin_frames:
+        return None
+
+    combined = pd.concat(margin_frames, axis=1)
+    combined = combined.loc[:, ~combined.columns.duplicated()]
+    return combined.sort_index()
+
+
+def _render_financial_performance_charts(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> None:
+    frames = _statement_scenario_frames(base_df, scenario_df, scenario_label)
+    if not frames:
+        return
+
+    trend_metrics = [
+        ("Revenue", ("Income – Revenue",)),
+        ("Gross profit", ("Cost of sales – Gross profit",)),
+        ("Profit for the period", ("Profit – Profit for the period",)),
+    ]
+
+    expense_metrics = [
+        ("Distribution costs", ("Operating expenses – Distribution costs",)),
+        ("Administrative expenses", ("Operating expenses – Administrative expenses",)),
+        (
+            "Depreciation and amortisation",
+            ("Operating expenses – Depreciation and amortisation",),
+        ),
+        ("Other operating expenses", ("Operating expenses – Other operating expenses",)),
+    ]
+
+    trend_data = _build_statement_chart_frame(frames, trend_metrics)
+    expense_data = _build_statement_chart_frame(frames, expense_metrics)
+    margin_data = _build_margin_chart_frame(frames)
+
+    if trend_data is not None:
+        st.markdown("###### Income and profit trends")
+        st.line_chart(trend_data)
+
+    if expense_data is not None:
+        st.markdown("###### Operating expense mix")
+        st.bar_chart(expense_data)
+
+    if margin_data is not None:
+        st.markdown("###### Margin analysis")
+        st.line_chart(margin_data)
+
+
+def _render_financial_position_charts(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> None:
+    frames = _statement_scenario_frames(base_df, scenario_df, scenario_label)
+    if not frames:
+        return
+
+    balance_metrics = [
+        ("Total assets", ("Assets – Total assets",)),
+        ("Total liabilities", ("Equity and liabilities – Total liabilities",)),
+        ("Equity", ("Equity and liabilities – Equity",)),
+    ]
+
+    net_metrics = [
+        ("Net assets", ("Key metrics – Net assets",)),
+        ("Net current assets", ("Key metrics – Net current assets",)),
+    ]
+
+    balance_data = _build_statement_chart_frame(frames, balance_metrics)
+    net_data = _build_statement_chart_frame(frames, net_metrics)
+
+    if balance_data is not None:
+        st.markdown("###### Balance sheet totals")
+        st.line_chart(balance_data)
+
+    if net_data is not None:
+        st.markdown("###### Net asset metrics")
+        st.bar_chart(net_data)
+
+
+def _render_cash_flow_charts(
+    base_df: Optional[pd.DataFrame],
+    scenario_df: Optional[pd.DataFrame],
+    scenario_label: str,
+) -> None:
+    frames = _statement_scenario_frames(base_df, scenario_df, scenario_label)
+    if not frames:
+        return
+
+    activity_metrics = [
+        (
+            "Operating activities",
+            ("Operating activities – Net cash from operating activities",),
+        ),
+        (
+            "Investing activities",
+            ("Investing activities – Net cash used in investing activities",),
+        ),
+        (
+            "Financing activities",
+            ("Financing activities – Net cash from financing activities",),
+        ),
+    ]
+
+    cash_balance_metrics = [
+        (
+            "Opening cash",
+            ("Net change – Cash and cash equivalents at beginning of period",),
+        ),
+        (
+            "Closing cash",
+            ("Net change – Cash and cash equivalents at end of period",),
+        ),
+        (
+            "Net change",
+            (
+                "Net change – Net increase/(decrease) in cash and cash equivalents",
+            ),
+        ),
+    ]
+
+    activity_data = _build_statement_chart_frame(frames, activity_metrics)
+    cash_balance_data = _build_statement_chart_frame(frames, cash_balance_metrics)
+
+    if activity_data is not None:
+        st.markdown("###### Cash flow by activity")
+        st.bar_chart(activity_data)
+
+    if cash_balance_data is not None:
+        st.markdown("###### Cash balance reconciliation")
+        st.line_chart(cash_balance_data)
 
 
 def _payload_to_ai_settings(payload: dict) -> Dict[str, Any]:
@@ -171,7 +575,380 @@ def _render_ai_settings(payload: dict, container: Optional[DeltaGenerator] = Non
         st.session_state["ai_api_key"] = settings.get("api_key", "")
         _ai_settings_to_payload(settings, payload)
         st.session_state["ai_settings_saved"] = True
-        st.experimental_rerun()
+        _maybe_rerun()
+
+
+def _analytics_override_store() -> Dict[str, Any]:
+    """Return (and create) the session-backed override cache."""
+
+    return st.session_state.setdefault("advanced_analytics_overrides", {})
+
+
+def _get_analytics_override(
+    scenario: str, block: str, analysis: str, table: str
+) -> Optional[pd.DataFrame]:
+    store = _analytics_override_store()
+    return (
+        store.get(scenario, {})
+        .get(block, {})
+        .get(analysis, {})
+        .get(table)
+    )
+
+
+def _set_analytics_override(
+    scenario: str, block: str, analysis: str, table: str, value: pd.DataFrame
+) -> None:
+    store = _analytics_override_store()
+    scenario_store = store.setdefault(scenario, {})
+    block_store = scenario_store.setdefault(block, {})
+    analysis_store = block_store.setdefault(analysis, {})
+    analysis_store[table] = value.copy(deep=True)
+    st.session_state["advanced_analytics_overrides"] = store
+
+
+def _clear_analytics_override(
+    scenario: str, block: str, analysis: str, table: str
+) -> None:
+    store = _analytics_override_store()
+    scenario_store = store.get(scenario)
+    if not scenario_store:
+        return
+    block_store = scenario_store.get(block)
+    if not block_store:
+        return
+    analysis_store = block_store.get(analysis)
+    if not analysis_store:
+        return
+    analysis_store.pop(table, None)
+    if not analysis_store:
+        block_store.pop(analysis, None)
+    if not block_store:
+        scenario_store.pop(block, None)
+    if not scenario_store:
+        store.pop(scenario, None)
+    st.session_state["advanced_analytics_overrides"] = store
+
+
+def _analytics_edit_flag_key(
+    scenario: str, block: str, analysis: str, table: str
+) -> str:
+    return f"analytics_edit::{scenario}::{block}::{analysis}::{table}"
+
+
+def _analytics_editor_key(
+    scenario: str, block: str, analysis: str, table: str
+) -> str:
+    return f"analytics_editor::{scenario}::{block}::{analysis}::{table}"
+
+
+def _prepare_editor_table(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Return an editable copy and metadata to restore the original index."""
+
+    working = df.copy(deep=True)
+    if isinstance(working.index, pd.MultiIndex):
+        orig_names = list(working.index.names)
+        fallback_names = [
+            name if name is not None else f"Index Level {idx + 1}"
+            for idx, name in enumerate(orig_names)
+        ]
+        working.index.set_names(fallback_names, inplace=True)
+        editor_df = working.reset_index()
+        return editor_df, {
+            "type": "multi",
+            "names": fallback_names,
+            "orig_names": orig_names,
+        }
+
+    if isinstance(working.index, pd.RangeIndex):
+        editor_df = working.reset_index(drop=True)
+        return editor_df, {
+            "type": "range",
+            "start": working.index.start,
+            "step": working.index.step,
+        }
+
+    index_name = working.index.name or "Index"
+    working.index.name = index_name
+    editor_df = working.reset_index()
+    return editor_df, {
+        "type": "single",
+        "name": index_name,
+        "orig_name": df.index.name,
+    }
+
+
+def _restore_editor_table(edited: pd.DataFrame, meta: Dict[str, Any]) -> pd.DataFrame:
+    """Rebuild a DataFrame using the stored index metadata."""
+
+    restored = edited.copy(deep=True)
+    meta_type = meta.get("type")
+
+    if meta_type == "multi":
+        names = [name for name in meta.get("names", []) if name in restored.columns]
+        if names:
+            restored = restored.set_index(names)
+            orig_names = meta.get("orig_names", names)
+            if len(orig_names) == restored.index.nlevels:
+                restored.index.names = orig_names
+        else:
+            restored.index = pd.RangeIndex(len(restored))
+        return restored
+
+    if meta_type == "single":
+        column = meta.get("name")
+        if column and column in restored.columns:
+            restored = restored.set_index(column)
+            restored.index.name = meta.get("orig_name")
+        else:
+            restored.index = pd.RangeIndex(len(restored))
+            restored.index.name = meta.get("orig_name")
+        return restored
+
+    # Default to a simple RangeIndex
+    restored.index = pd.RangeIndex(len(restored))
+    return restored
+
+
+def _format_row_label(df: pd.DataFrame, idx: int) -> str:
+    """Return a compact label describing a row for the row selector."""
+
+    if df.empty:
+        return "Row"
+
+    row = df.iloc[idx]
+    parts: list[str] = []
+    for column in df.columns[:3]:
+        value = row[column]
+        if pd.isna(value):
+            continue
+        text = str(value)
+        if text.strip() == "":
+            continue
+        parts.append(f"{column}: {text}")
+        if len(parts) == 2:
+            break
+
+    if not parts:
+        return f"Row {idx + 1}"
+    return " | ".join(parts)
+
+
+def _coerce_row_value(raw: Any, dtype: pd.Series.dtype) -> Any:
+    """Coerce a raw editor input back to the column's dtype."""
+
+    if is_bool_dtype(dtype):
+        return bool(raw)
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text == "":
+            if is_numeric_dtype(dtype) or is_datetime64_any_dtype(dtype):
+                return np.nan
+            return ""
+
+        if is_datetime64_any_dtype(dtype):
+            try:
+                return pd.to_datetime(text)
+            except (TypeError, ValueError):
+                return text
+
+        if is_numeric_dtype(dtype):
+            coerced = pd.to_numeric([text], errors="coerce")[0]
+            if pd.isna(coerced):
+                return np.nan
+            if is_integer_dtype(dtype):
+                return int(round(coerced))
+            return float(coerced)
+
+        return text
+
+    return raw
+
+
+def _render_row_input(
+    column: str, value: Any, dtype: pd.Series.dtype, widget_key: str
+) -> Any:
+    """Render an appropriate widget for a single row cell."""
+
+    if is_bool_dtype(dtype):
+        default = bool(value) if not pd.isna(value) else False
+        return st.checkbox(column, value=default, key=widget_key)
+
+    display_value = "" if pd.isna(value) else str(value)
+    return st.text_input(column, value=display_value, key=widget_key)
+
+
+def _schedule_edit_flag_key(identifier: str) -> str:
+    return f"schedule_edit::{identifier}"
+
+
+def _schedule_working_key(identifier: str) -> str:
+    return f"schedule_editor::{identifier}::working"
+
+
+def _schedule_meta_key(identifier: str) -> str:
+    return f"schedule_editor::{identifier}::meta"
+
+
+def _schedule_row_selector_key(identifier: str) -> str:
+    return f"schedule_editor::{identifier}::row"
+
+
+def _clear_schedule_editor_state(identifier: str) -> None:
+    """Remove any cached working copies for a schedule editor."""
+
+    st.session_state.pop(_schedule_working_key(identifier), None)
+    st.session_state.pop(_schedule_meta_key(identifier), None)
+    st.session_state.pop(_schedule_row_selector_key(identifier), None)
+
+
+def _default_value_for_dtype(dtype: pd.Series.dtype) -> Any:
+    if is_bool_dtype(dtype):
+        return False
+    if is_numeric_dtype(dtype):
+        return np.nan
+    return ""
+
+
+def _blank_row_like(df: pd.DataFrame) -> Dict[str, Any]:
+    """Return a dictionary representing a blank row for the dataframe."""
+
+    blanks: Dict[str, Any] = {}
+    for column in df.columns:
+        blanks[column] = _default_value_for_dtype(df[column].dtype)
+    return blanks
+
+
+def _render_schedule_row_editor(
+    identifier: str, table: pd.DataFrame, save_callback: Callable[[pd.DataFrame], None]
+) -> None:
+    """Render a row-focused editor for schedule dataframes."""
+
+    st.dataframe(table, use_container_width=True)
+
+    edit_flag_key = _schedule_edit_flag_key(identifier)
+    editing = st.session_state.get(edit_flag_key, False)
+    toggle_label = "Edit rows" if not editing else "Close row editor"
+    if st.button(toggle_label, key=f"{identifier}::toggle"):
+        if editing:
+            _clear_schedule_editor_state(identifier)
+        st.session_state[edit_flag_key] = not editing
+        _maybe_rerun()
+        return
+
+    editing = st.session_state.get(edit_flag_key, False)
+    if not editing:
+        return
+
+    editor_df, meta = _prepare_editor_table(table)
+    working_key = _schedule_working_key(identifier)
+    meta_key = _schedule_meta_key(identifier)
+
+    if working_key not in st.session_state:
+        st.session_state[working_key] = editor_df.copy(deep=True)
+        st.session_state[meta_key] = meta
+
+    working_df = st.session_state.get(working_key, editor_df.copy(deep=True))
+    stored_meta = st.session_state.get(meta_key, meta)
+
+    st.caption(
+        "Update one row at a time. Use the controls below to add new rows or remove the selected row."
+    )
+    st.dataframe(working_df, use_container_width=True)
+
+    template_df = working_df if not working_df.empty else editor_df
+
+    controls = st.columns(3)
+    if controls[0].button("Add row", key=f"{identifier}::add_row"):
+        blank_row = _blank_row_like(template_df)
+        new_row = pd.DataFrame([blank_row], columns=template_df.columns)
+        updated_df = pd.concat([working_df, new_row], ignore_index=True)
+        st.session_state[working_key] = updated_df
+        _maybe_rerun()
+        return
+
+    selector_key = _schedule_row_selector_key(identifier)
+    if working_df.empty:
+        selected_row = None
+        controls[1].write("No rows to delete.")
+    else:
+        selected_row = st.selectbox(
+            "Select a row to edit",
+            list(range(len(working_df))),
+            format_func=lambda idx: _format_row_label(working_df, idx),
+            key=selector_key,
+        )
+        if controls[1].button("Delete row", key=f"{identifier}::delete_row"):
+            if selected_row is not None and 0 <= selected_row < len(working_df):
+                updated_df = working_df.drop(index=selected_row).reset_index(drop=True)
+                st.session_state[working_key] = updated_df
+                _maybe_rerun()
+                return
+
+    if controls[2].button("Reset changes", key=f"{identifier}::reset"):
+        st.session_state[working_key] = editor_df.copy(deep=True)
+        st.session_state[meta_key] = meta
+        _maybe_rerun()
+        return
+
+    working_df = st.session_state.get(working_key, editor_df.copy(deep=True))
+
+    if working_df.empty:
+        st.info("There are no rows to edit. Add a new row to begin.")
+    else:
+        selected_row = st.session_state.get(selector_key, 0)
+        if selected_row >= len(working_df):
+            selected_row = 0
+            st.session_state[selector_key] = selected_row
+
+        dtype_map = working_df.dtypes.to_dict()
+        row_series = working_df.iloc[selected_row]
+
+        with st.form(f"{identifier}::row_form"):
+            updated_values: Dict[str, Any] = {}
+            for column in working_df.columns:
+                widget_key = f"{identifier}::{selected_row}::{column}"
+                updated_values[column] = _render_row_input(
+                    column, row_series[column], dtype_map[column], widget_key
+                )
+
+            submitted = st.form_submit_button("Apply row changes")
+            if submitted:
+                for column, raw_value in updated_values.items():
+                    coerced = _coerce_row_value(raw_value, dtype_map[column])
+                    working_df.iat[
+                        selected_row, working_df.columns.get_loc(column)
+                    ] = coerced
+                st.session_state[working_key] = working_df
+                _maybe_rerun()
+                return
+
+    action_cols = st.columns(3)
+    if action_cols[0].button("Save changes", key=f"{identifier}::save"):
+        try:
+            current_df = st.session_state.get(working_key, editor_df.copy(deep=True))
+            current_meta = st.session_state.get(meta_key, stored_meta)
+            restored = _restore_editor_table(current_df, current_meta)
+            save_callback(restored)
+            _clear_schedule_editor_state(identifier)
+            st.session_state[edit_flag_key] = False
+            _maybe_rerun()
+            return
+        except Exception as exc:  # pragma: no cover - user feedback path
+            action_cols[0].error(f"Unable to save changes: {exc}")
+
+    if action_cols[1].button("Discard edits", key=f"{identifier}::cancel"):
+        _clear_schedule_editor_state(identifier)
+        st.session_state[edit_flag_key] = False
+        _maybe_rerun()
+        return
+
+    if action_cols[2].button("Close editor", key=f"{identifier}::close"):
+        _clear_schedule_editor_state(identifier)
+        st.session_state[edit_flag_key] = False
+        _maybe_rerun()
+
 
 DETAIL_SCHEDULE_COLUMNS = {
     "COGS Schedule": ["COGS"],
@@ -181,6 +958,349 @@ DETAIL_SCHEDULE_COLUMNS = {
     "Capex Schedule": ["Capex"],
 }
 
+
+SCENARIO_PRESETS: Dict[str, Dict[str, Any]] = {
+    "Base Case Scenario": {
+        "adjustments": {
+            "Milk price change (%)": 0.0,
+            "Feed cost change (%)": 0.0,
+        },
+        "description": "Baseline view using the model inputs without additional shocks.",
+    },
+    "Best Case Scenario": {
+        "adjustments": {
+            "Milk price change (%)": 12.0,
+            "Feed cost change (%)": -8.0,
+        },
+        "description": "Upside case with stronger milk pricing and more efficient feed spend.",
+    },
+    "Worst Case Scenario": {
+        "adjustments": {
+            "Milk price change (%)": -12.0,
+            "Feed cost change (%)": 10.0,
+        },
+        "description": "Downside case featuring pricing pressure and higher feed costs.",
+    },
+}
+
+
+def _default_scenario_preset_table(name: str) -> pd.DataFrame:
+    preset = SCENARIO_PRESETS.get(name, {})
+    adjustments = preset.get("adjustments", {})
+    if not adjustments:
+        return pd.DataFrame(columns=["Driver", "Change %"])
+    return pd.DataFrame(
+        {
+            "Driver": list(adjustments.keys()),
+            "Change %": [float(value) for value in adjustments.values()],
+        }
+    )
+
+
+def _scenario_preset_removed_store() -> Dict[str, List[str]]:
+    store = st.session_state.setdefault("scenario_preset_removed_drivers", {})
+    normalised: Dict[str, List[str]] = {}
+    updated = False
+
+    for name in SCENARIO_PRESETS.keys():
+        entries = store.get(name, [])
+        cleaned = sorted(
+            {
+                str(entry).casefold()
+                for entry in entries
+                if str(entry).strip()
+            }
+        )
+        normalised[name] = cleaned
+        if entries != cleaned:
+            updated = True
+
+    if set(store.keys()) != set(normalised.keys()):
+        updated = True
+
+    if updated:
+        st.session_state["scenario_preset_removed_drivers"] = normalised
+        store = normalised
+    else:
+        st.session_state["scenario_preset_removed_drivers"] = store
+
+    return store
+
+
+def _unmark_removed_scenario_drivers(name: str, drivers: Iterable[str]) -> None:
+    store = _scenario_preset_removed_store()
+    current = set(store.get(name, []))
+    lower_drivers = {str(driver).casefold() for driver in drivers if str(driver).strip()}
+    new_removed = sorted(current - lower_drivers)
+    if new_removed != sorted(current):
+        store[name] = new_removed
+        st.session_state["scenario_preset_removed_drivers"] = store
+
+
+def _mark_removed_scenario_driver(name: str, driver: str) -> None:
+    store = _scenario_preset_removed_store()
+    cleaned = str(driver).strip()
+    if not cleaned:
+        return
+    lowered = cleaned.casefold()
+    current = set(store.get(name, []))
+    if lowered not in current:
+        current.add(lowered)
+        store[name] = sorted(current)
+        st.session_state["scenario_preset_removed_drivers"] = store
+
+
+def _scenario_preset_tables_store() -> Dict[str, pd.DataFrame]:
+    return st.session_state.setdefault("scenario_preset_tables", {})
+
+
+def _ensure_scenario_preset_table(
+    name: str, table: Optional[pd.DataFrame]
+) -> pd.DataFrame:
+    default_table = _default_scenario_preset_table(name)
+    if table is None or table.empty:
+        work = default_table.copy()
+    else:
+        work = table.copy()
+
+    if "Driver" not in work.columns:
+        work["Driver"] = ""
+    work["Driver"] = work.get("Driver", "").astype(str).str.strip()
+    work.loc[work["Driver"] == "", "Driver"] = "Driver"
+
+    if "Change %" not in work.columns:
+        work["Change %"] = np.nan
+    work["Change %"] = pd.to_numeric(work.get("Change %"), errors="coerce")
+
+    removed_store = _scenario_preset_removed_store()
+    removed = set(removed_store.get(name, []))
+
+    required_rows = []
+    for _, row in default_table.iterrows():
+        driver = str(row.get("Driver", "")).strip()
+        if not driver:
+            continue
+        if driver.casefold() in removed:
+            continue
+        mask = work["Driver"].str.casefold() == driver.casefold()
+        if not mask.any():
+            required_rows.append({
+                "Driver": driver,
+                "Change %": float(row.get("Change %", 0.0)),
+            })
+        else:
+            existing_index = work.index[mask][0]
+            if pd.isna(work.at[existing_index, "Change %"]):
+                work.at[existing_index, "Change %"] = float(row.get("Change %", 0.0))
+
+    if required_rows:
+        work = pd.concat([work, pd.DataFrame(required_rows)], ignore_index=True)
+
+    driver_order = [
+        str(val).casefold()
+        for val in default_table.get("Driver", pd.Series(dtype=str)).tolist()
+        if str(val).strip() and str(val).casefold() not in removed
+    ]
+    order_map = {driver: idx for idx, driver in enumerate(driver_order)}
+    work["__order__"] = work["Driver"].str.casefold().map(order_map)
+    work = work.sort_values(["__order__", "Driver"], na_position="last").drop(
+        columns=["__order__"], errors="ignore"
+    )
+
+    ordered_cols = ["Driver", "Change %"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _set_scenario_preset_table(name: str, table: pd.DataFrame) -> None:
+    store = _scenario_preset_tables_store()
+    store[name] = table.copy(deep=True).reset_index(drop=True)
+    drivers = store[name].get("Driver", pd.Series(dtype=str)).tolist()
+    _unmark_removed_scenario_drivers(name, drivers)
+    st.session_state["scenario_preset_tables"] = store
+
+
+def _get_scenario_preset_table(name: str) -> pd.DataFrame:
+    store = _scenario_preset_tables_store()
+    ensured = _ensure_scenario_preset_table(name, store.get(name))
+    store[name] = ensured
+    st.session_state["scenario_preset_tables"] = store
+    return ensured
+
+
+def _scenario_preset_descriptions_store() -> Dict[str, str]:
+    store = st.session_state.setdefault("scenario_preset_descriptions", {})
+    for name, preset in SCENARIO_PRESETS.items():
+        store.setdefault(name, preset.get("description", ""))
+    st.session_state["scenario_preset_descriptions"] = store
+    return store
+
+
+def _set_scenario_preset_description(name: str, description: str) -> Optional[str]:
+    store = _scenario_preset_descriptions_store()
+    normalized = str(description or "").strip()
+    previous = store.get(name, "")
+    if normalized == previous:
+        return None
+    store[name] = normalized
+    st.session_state["scenario_preset_descriptions"] = store
+    _reset_cached_results()
+    return normalized
+
+
+def _scenario_preset_table_to_adjustments(
+    name: str, table: pd.DataFrame
+) -> Dict[str, float]:
+    ensured = _ensure_scenario_preset_table(name, table)
+    adjustments: Dict[str, float] = {}
+    for _, row in ensured.iterrows():
+        driver = str(row.get("Driver", "")).strip()
+        if not driver:
+            continue
+        value = pd.to_numeric(pd.Series([row.get("Change %")]), errors="coerce").iloc[0]
+        if pd.isna(value):
+            continue
+        adjustments[driver] = float(value)
+
+    removed_store = _scenario_preset_removed_store()
+    removed = set(removed_store.get(name, []))
+    for driver in list(adjustments.keys()):
+        if driver.casefold() in removed:
+            adjustments.pop(driver, None)
+
+    return adjustments
+
+
+def _add_scenario_preset_driver(name: str, driver: str, change: float) -> None:
+    cleaned = str(driver).strip()
+    if not cleaned:
+        return
+
+    table = _get_scenario_preset_table(name)
+    mask = table["Driver"].str.casefold() == cleaned.casefold()
+    if mask.any():
+        table.loc[mask, "Change %"] = float(change)
+    else:
+        new_row = pd.DataFrame(
+            [{"Driver": cleaned, "Change %": float(change)}],
+            columns=table.columns,
+        )
+        table = pd.concat([table, new_row], ignore_index=True)
+
+    _set_scenario_preset_table(name, table)
+    _unmark_removed_scenario_drivers(name, [cleaned])
+    _reset_cached_results()
+
+
+def _remove_scenario_preset_driver(name: str, driver: str) -> None:
+    cleaned = str(driver).strip()
+    if not cleaned:
+        return
+
+    table = _get_scenario_preset_table(name)
+    mask = table["Driver"].str.casefold() == cleaned.casefold()
+    if not mask.any():
+        return
+
+    updated = table.loc[~mask].reset_index(drop=True)
+    _set_scenario_preset_table(name, updated)
+    _mark_removed_scenario_driver(name, cleaned)
+    _reset_cached_results()
+
+
+def _current_scenario_presets() -> Dict[str, Dict[str, Any]]:
+    tables = _scenario_preset_tables_store()
+    descriptions = _scenario_preset_descriptions_store()
+    presets: Dict[str, Dict[str, Any]] = {}
+
+    for name in SCENARIO_PRESETS.keys():
+        table = _ensure_scenario_preset_table(name, tables.get(name))
+        tables[name] = table
+        adjustments = _scenario_preset_table_to_adjustments(name, table)
+        description = descriptions.get(name, SCENARIO_PRESETS[name].get("description", ""))
+        presets[name] = {
+            "adjustments": adjustments,
+            "description": description,
+        }
+
+    st.session_state["scenario_preset_tables"] = tables
+    st.session_state["scenario_preset_descriptions"] = descriptions
+    return presets
+
+
+def _render_scenario_preset_editors() -> None:
+    st.markdown("#### Scenario Presets")
+    preset_names = list(SCENARIO_PRESETS.keys())
+    tabs = st.tabs(preset_names)
+
+    for tab, name in zip(tabs, preset_names):
+        with tab:
+            table = _get_scenario_preset_table(name)
+
+            add_cols = st.columns([2, 1, 1])
+            driver_key = f"scenario_preset::{_scenario_key_suffix(name)}::new_driver"
+            change_key = f"scenario_preset::{_scenario_key_suffix(name)}::new_change"
+            if not _safe_session_state_contains(driver_key):
+                _safe_session_state_setdefault(driver_key, "")
+            if not _safe_session_state_contains(change_key):
+                _safe_session_state_setdefault(change_key, 0.0)
+
+            new_driver = add_cols[0].text_input(
+                "Driver name",
+                key=driver_key,
+            )
+            new_change = add_cols[1].number_input(
+                "Change (%)",
+                key=change_key,
+                step=0.25,
+                format="%.2f",
+            )
+            if add_cols[2].button("Add variable", key=f"{driver_key}::add"):
+                _add_scenario_preset_driver(name, new_driver, float(new_change))
+                _safe_session_state_set(driver_key, "")
+                _safe_session_state_set(change_key, 0.0)
+                _maybe_rerun()
+                return
+
+            remove_cols = st.columns([2, 1])
+            driver_options = table.get("Driver", pd.Series(dtype=str)).fillna("")
+            option_labels = [value for value in driver_options.astype(str).tolist() if value.strip()]
+            remove_key = f"scenario_preset::{_scenario_key_suffix(name)}::remove_choice"
+            remove_selection = remove_cols[0].selectbox(
+                "Select variable to remove",
+                options=["-- Select --"] + option_labels,
+                key=remove_key,
+            )
+            if remove_cols[1].button("Remove variable", key=f"{remove_key}::remove"):
+                if remove_selection and remove_selection != "-- Select --":
+                    _remove_scenario_preset_driver(name, remove_selection)
+                    _safe_session_state_set(remove_key, "-- Select --")
+                    _maybe_rerun()
+                    return
+
+            def _save(updated: pd.DataFrame, preset_name: str = name) -> None:
+                ensured = _ensure_scenario_preset_table(preset_name, updated)
+                _set_scenario_preset_table(preset_name, ensured)
+                _reset_cached_results()
+
+            _render_schedule_row_editor(
+                f"scenario_preset::{_scenario_key_suffix(name)}",
+                table,
+                _save,
+            )
+
+            description_store = _scenario_preset_descriptions_store()
+            default_description = SCENARIO_PRESETS[name].get("description", "")
+            stored_value = description_store.get(name, default_description)
+            desc_key = f"scenario_desc::{_scenario_key_suffix(name)}"
+            if not _safe_session_state_contains(desc_key):
+                _safe_session_state_setdefault(desc_key, stored_value)
+
+            st.text_area("Description", key=desc_key)
+            new_value = _safe_session_state_get(desc_key, "")
+            updated = _set_scenario_preset_description(name, new_value)
+            if updated is not None:
+                _safe_session_state_set(desc_key, updated)
 
 CAP_TABLE_COLUMNS = ["Year", "Shareholder", "Ownership %", "Investment"]
 
@@ -215,6 +1335,155 @@ def _format_scenario_label(milk_pct: int, feed_pct: int) -> str:
     if milk_pct == 0 and feed_pct == 0:
         return "Base Scenario"
     return f"Milk {milk_pct:+d}%, Feed {feed_pct:+d}%"
+
+
+def _build_scenario_suite(
+    custom_label: Optional[str] = None,
+    custom_adjustments: Optional[Dict[str, float]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    suite: Dict[str, Dict[str, Any]] = {}
+    presets = _current_scenario_presets()
+    for name, preset in presets.items():
+        suite[name] = {
+            "adjustments": deepcopy(preset["adjustments"]),
+            "description": preset.get("description", ""),
+        }
+
+    if custom_label and custom_adjustments:
+        suite[custom_label] = {
+            "adjustments": {
+                key: float(value)
+                for key, value in custom_adjustments.items()
+            },
+            "description": "Custom scenario defined via scenario controls.",
+        }
+
+    return suite
+
+
+def _execute_scenario_suite(
+    schedule_df: pd.DataFrame,
+    valuation_inputs: Dict[str, float],
+    supplementary_tables: Dict[str, pd.DataFrame],
+    scenario_suite: Dict[str, Dict[str, Any]],
+) -> Tuple[GoatModel, pd.DataFrame, Dict[str, Dict[str, Any]]]:
+    schedule = InputSchedule(
+        data=schedule_df,
+        valuation_inputs=valuation_inputs,
+        supplementary_tables=supplementary_tables,
+    )
+    model = schedule.to_model()
+    base = model.to_tidy()
+
+    base_supplementary = {
+        name: table.copy()
+        for name, table in (supplementary_tables or {}).items()
+        if isinstance(table, pd.DataFrame)
+    }
+
+    results: Dict[str, Dict[str, Any]] = {}
+    author_name = _current_model_author()
+    for name, config in scenario_suite.items():
+        adjustments = config.get("adjustments", {})
+        milk_pct = float(adjustments.get("Milk price change (%)", 0.0))
+        feed_pct = float(adjustments.get("Feed cost change (%)", 0.0))
+
+        scenario_df = model.scenario(
+            milk_price_pct=milk_pct / 100.0,
+            feed_cost_pct=feed_pct / 100.0,
+        )
+
+        scenario_supplementary = {
+            key: value.copy() for key, value in base_supplementary.items()
+        }
+
+        scenario_inputs: Dict[str, Any] = {
+            "Milk price change (%)": milk_pct,
+            "Feed cost change (%)": feed_pct,
+        }
+        if author_name:
+            scenario_inputs["Model author"] = author_name
+
+        results[name] = {
+            "model": model,
+            "base": base,
+            "scenario": scenario_df,
+            "kpis": model.kpis(scenario_df, annual=True),
+            "break_even": model.break_even(scenario_df, annual=True),
+            "supplementary": scenario_supplementary,
+            "selected_scenario": name,
+            "scenario_inputs": scenario_inputs,
+            "model_author": author_name,
+            "preset_description": config.get("description", ""),
+        }
+
+    return model, base, results
+
+
+def _ensure_active_scenario_selection() -> None:
+    scenario_results = st.session_state.get("all_scenario_results") or {}
+    if not scenario_results:
+        return
+
+    selected = st.session_state.get("selected_scenario_name")
+    if selected not in scenario_results:
+        selected = next(iter(scenario_results))
+        st.session_state.selected_scenario_name = selected
+
+    current = st.session_state.get("results")
+    if not isinstance(current, dict) or current.get("selected_scenario") != selected:
+        st.session_state.results = scenario_results[selected]
+
+
+def _render_scenario_selector(prefix: str = "main") -> None:
+    scenario_results = st.session_state.get("all_scenario_results") or {}
+    if not scenario_results:
+        st.info("Run the scenario suite to enable comparisons.")
+        return
+
+    options = list(scenario_results.keys())
+    selected_name = st.session_state.get("selected_scenario_name")
+    try:
+        default_index = options.index(selected_name)
+    except ValueError:
+        default_index = 0
+        st.session_state.selected_scenario_name = options[0]
+        selected_name = options[0]
+
+    selected = st.selectbox(
+        "Select scenario",
+        options,
+        index=default_index,
+        key=f"scenario_selector::{prefix}",
+    )
+
+    if selected != selected_name:
+        st.session_state.selected_scenario_name = selected
+        st.session_state.results = scenario_results[selected]
+        selected_name = selected
+
+    description = scenario_results[selected_name].get("preset_description")
+    adjustments = scenario_results[selected_name].get("scenario_inputs", {})
+    author_name = scenario_results[selected_name].get("model_author")
+
+    details: list[str] = []
+    if description:
+        details.append(description)
+
+    if adjustments:
+        numeric_adjustments = [
+            f"{driver}: {value:+.1f}%"
+            for driver, value in adjustments.items()
+            if isinstance(value, (int, float)) and not pd.isna(value)
+        ]
+        if numeric_adjustments:
+            details.append(f"Adjustments – {', '.join(numeric_adjustments)}")
+
+    if isinstance(author_name, str) and author_name.strip():
+        details.append(f"Prepared by – {author_name.strip()}")
+
+    if details:
+        st.caption(" \n".join(details))
 
 
 def _scenario_key_suffix(label: str) -> str:
@@ -270,10 +1539,22 @@ def _prepare_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def _resolve_excel_writer_engine() -> str:
+    if find_spec("xlsxwriter") is not None:
+        return "xlsxwriter"
+    if find_spec("openpyxl") is not None:
+        return "openpyxl"
+    raise RuntimeError(
+        "Excel export requires the XlsxWriter or openpyxl package. "
+        "Install one of them to enable downloads."
+    )
+
+
 def _generate_excel_bytes(
     model: GoatModel,
     results: Dict[str, Any],
     scenario_name: str,
+    author_name: Optional[str] = None,
 ) -> bytes:
     buffer = BytesIO()
 
@@ -298,7 +1579,20 @@ def _generate_excel_bytes(
             index=False,
         )
 
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+    engine = _resolve_excel_writer_engine()
+    author = (author_name or "").strip() or DEFAULT_MODEL_AUTHOR
+
+    with pd.ExcelWriter(buffer, engine=engine) as writer:
+        workbook = getattr(writer, "book", None)
+        if workbook is not None and author:
+            if engine == "xlsxwriter" and hasattr(workbook, "set_properties"):
+                workbook.set_properties({"author": author})
+            elif engine == "openpyxl":
+                try:
+                    workbook.properties.creator = author
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
         if base_df is not None:
             write_sheet("Input Schedule", base_df)
 
@@ -362,44 +1656,177 @@ def _generate_excel_bytes(
     return buffer.getvalue()
 
 
-VARIABLE_DEFAULT_ITEMS = [
-    ("Feed & Supplements", 0.05),
-    ("Veterinary & Healthcare", 0.04),
-    ("Distribution & Logistics", 0.03),
+DEFAULT_VARIABLE_ITEMS = [
+    {"Item": "Feed & Supplements", "Share %": 5.0},
+    {"Item": "Veterinary & Healthcare", "Share %": 4.0},
+    {"Item": "Distribution & Logistics", "Share %": 3.0},
 ]
 
 
-DIRECT_WAGE_DEFAULT_ITEMS = [
-    ("Milking Crew", 0.6),
-    ("Herd Management", 0.4),
+DEFAULT_DIRECT_WAGE_ITEMS = [
+    {"Role": "Milking Crew", "Share %": 60.0},
+    {"Role": "Herd Management", "Share %": 40.0},
 ]
 
 
-ADMIN_WAGE_DEFAULT_ITEMS = [
-    ("Administration", 0.4),
-    ("Finance & Compliance", 0.35),
-    ("Sales & Support", 0.25),
+DEFAULT_ADMIN_WAGE_ITEMS = [
+    {"Function": "Administration", "Share %": 40.0},
+    {"Function": "Finance & Compliance", "Share %": 35.0},
+    {"Function": "Sales & Support", "Share %": 25.0},
 ]
 
 
-PRICING_DEFAULT_ROWS = [
-    (2024, "Milk", "Litre", 1.85, 3.0),
-    (2025, "Cheese", "Kg", 12.50, 2.5),
+DEFAULT_PRICING_ROWS = [
+    {
+        "Year": 2024,
+        "Product": "Milk",
+        "Unit": "Litre",
+        "Base Price": 1.85,
+        "Price Growth %": 3.0,
+    },
+    {
+        "Year": 2025,
+        "Product": "Cheese",
+        "Unit": "Kg",
+        "Base Price": 12.50,
+        "Price Growth %": 2.5,
+    },
+    {
+        "Year": 2024,
+        "Product": "Pelt",
+        "Unit": "Kg",
+        "Base Price": 8.00,
+        "Price Growth %": 2.0,
+    },
+    {
+        "Year": 2024,
+        "Product": "Meat",
+        "Unit": "Kg",
+        "Base Price": 10.50,
+        "Price Growth %": 2.8,
+    },
 ]
 
 
-OPERATING_COST_DEFAULT_ROWS = [
-    (2024, "Feed", 8500.0, 4.0),
-    (2025, "Feed", 8840.0, 4.0),
-    (2024, "Healthcare", 1800.0, 3.5),
-    (2025, "Healthcare", 1863.0, 3.5),
-    (2024, "Utilities", 1200.0, 2.0),
-    (2025, "Utilities", 1224.0, 2.0),
+DEFAULT_OPERATING_COST_ROWS = [
+    {"Year": 2024, "Category": "Feed", "Monthly Cost": 8500.0, "Inflation %": 4.0},
+    {"Year": 2025, "Category": "Feed", "Monthly Cost": 8840.0, "Inflation %": 4.0},
+    {
+        "Year": 2024,
+        "Category": "Healthcare",
+        "Monthly Cost": 1800.0,
+        "Inflation %": 3.5,
+    },
+    {
+        "Year": 2025,
+        "Category": "Healthcare",
+        "Monthly Cost": 1863.0,
+        "Inflation %": 3.5,
+    },
+    {
+        "Year": 2024,
+        "Category": "Utilities",
+        "Monthly Cost": 1200.0,
+        "Inflation %": 2.0,
+    },
+    {
+        "Year": 2025,
+        "Category": "Utilities",
+        "Monthly Cost": 1224.0,
+        "Inflation %": 2.0,
+    },
 ]
+
+
+DEFAULT_INPUT_CONFIG_KEY = "default_input_templates"
+
+
+def _default_input_template_config() -> Dict[str, list[dict[str, object]]]:
+    return {
+        "variable_items": deepcopy(DEFAULT_VARIABLE_ITEMS),
+        "direct_wage_items": deepcopy(DEFAULT_DIRECT_WAGE_ITEMS),
+        "admin_wage_items": deepcopy(DEFAULT_ADMIN_WAGE_ITEMS),
+        "pricing_rows": deepcopy(DEFAULT_PRICING_ROWS),
+        "operating_rows": deepcopy(DEFAULT_OPERATING_COST_ROWS),
+    }
+
+
+def _ensure_default_templates() -> Dict[str, list[dict[str, object]]]:
+    if DEFAULT_INPUT_CONFIG_KEY not in st.session_state:
+        st.session_state[DEFAULT_INPUT_CONFIG_KEY] = _default_input_template_config()
+    return st.session_state[DEFAULT_INPUT_CONFIG_KEY]
+
+
+def _template_copy(template: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [dict(row) for row in template]
+
+
+def _get_template(name: str, fallback: list[dict[str, object]]) -> list[dict[str, object]]:
+    templates = _ensure_default_templates()
+    rows = templates.get(name)
+    if rows:
+        return deepcopy(rows)
+    return deepcopy(fallback)
+
+
+def _set_template(name: str, rows: list[dict[str, object]]) -> None:
+    templates = _ensure_default_templates()
+    templates[name] = deepcopy(rows)
+    st.session_state[DEFAULT_INPUT_CONFIG_KEY] = templates
+
+
+def _template_to_dataframe(
+    rows: list[dict[str, object]], columns: list[str]
+) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(rows)
+    for column in columns:
+        if column not in df.columns:
+            df[column] = np.nan
+    return df[columns]
+
+
+def _dataframe_to_template(df: pd.DataFrame, columns: list[str]) -> list[dict[str, object]]:
+    if df is None or df.empty:
+        return []
+
+    work = df.copy()
+    for column in columns:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    records: list[dict[str, object]] = []
+    for _, row in work[columns].iterrows():
+        record: dict[str, object] = {}
+        empty = True
+        for column in columns:
+            value = row[column]
+            if isinstance(value, str):
+                cleaned = value.strip()
+                record[column] = cleaned or None
+                if cleaned:
+                    empty = False
+            else:
+                if pd.isna(value):
+                    record[column] = None
+                else:
+                    record[column] = float(value)
+                    empty = False
+        if not empty:
+            records.append(record)
+    return records
 
 
 def _default_pricing_table() -> pd.DataFrame:
-    if not PRICING_DEFAULT_ROWS:
+    rows = _get_template("pricing_rows", DEFAULT_PRICING_ROWS)
+    table = _template_to_dataframe(
+        rows,
+        ["Year", "Product", "Unit", "Base Price", "Price Growth %"],
+    )
+
+    if table.empty:
         return pd.DataFrame(
             {
                 "Year": [pd.Timestamp.today().year],
@@ -410,15 +1837,55 @@ def _default_pricing_table() -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(
-        {
-            "Year": [row[0] for row in PRICING_DEFAULT_ROWS],
-            "Product": [row[1] for row in PRICING_DEFAULT_ROWS],
-            "Unit": [row[2] for row in PRICING_DEFAULT_ROWS],
-            "Base Price": [row[3] for row in PRICING_DEFAULT_ROWS],
-            "Price Growth %": [row[4] for row in PRICING_DEFAULT_ROWS],
-        }
-    )
+    return table.reset_index(drop=True)
+
+
+def _variable_default_items() -> list[tuple[str, Optional[float]]]:
+    items: list[tuple[str, Optional[float]]] = []
+    for row in _get_template("variable_items", DEFAULT_VARIABLE_ITEMS):
+        item = str(row.get("Item", "")).strip() or "Variable Expense"
+        share_value = pd.to_numeric(
+            pd.Series([row.get("Share %")]), errors="coerce"
+        ).iloc[0]
+        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+        items.append((item, share))
+
+    if not items:
+        items.append(("Variable Expense", None))
+
+    return items
+
+
+def _direct_wage_default_items() -> list[tuple[str, Optional[float]]]:
+    roles: list[tuple[str, Optional[float]]] = []
+    for row in _get_template("direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS):
+        role = str(row.get("Role", "")).strip() or "Direct Wage"
+        share_value = pd.to_numeric(
+            pd.Series([row.get("Share %")]), errors="coerce"
+        ).iloc[0]
+        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+        roles.append((role, share))
+
+    if not roles:
+        roles.append(("Direct Wage", None))
+
+    return roles
+
+
+def _admin_wage_default_items() -> list[tuple[str, Optional[float]]]:
+    functions: list[tuple[str, Optional[float]]] = []
+    for row in _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS):
+        function = str(row.get("Function", "")).strip() or "Admin Wage"
+        share_value = pd.to_numeric(
+            pd.Series([row.get("Share %")]), errors="coerce"
+        ).iloc[0]
+        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+        functions.append((function, share))
+
+    if not functions:
+        functions.append(("Admin Wage", None))
+
+    return functions
 
 
 def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -537,7 +2004,13 @@ def _apply_pricing_yearly_increment(
 
 
 def _default_operating_cost_table() -> pd.DataFrame:
-    if not OPERATING_COST_DEFAULT_ROWS:
+    rows = _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS)
+    table = _template_to_dataframe(
+        rows,
+        ["Year", "Category", "Monthly Cost", "Inflation %"],
+    )
+
+    if table.empty:
         return pd.DataFrame(
             {
                 "Year": [pd.Timestamp.today().year],
@@ -547,14 +2020,7 @@ def _default_operating_cost_table() -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(
-        {
-            "Year": [row[0] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Category": [row[1] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Monthly Cost": [row[2] for row in OPERATING_COST_DEFAULT_ROWS],
-            "Inflation %": [row[3] for row in OPERATING_COST_DEFAULT_ROWS],
-        }
-    )
+    return table.reset_index(drop=True)
 
 
 def _ensure_operating_cost_table(
@@ -749,16 +2215,27 @@ def _ensure_cogs_schedule(
 
 def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
-    totals = pd.to_numeric(core.get("Direct Wages"), errors="coerce")
-    total_values = totals.tolist() if totals is not None else []
+    totals_raw = core.get("Direct Wages", pd.Series(dtype=float))
+    totals = pd.to_numeric(totals_raw, errors="coerce")
+
+    if isinstance(totals, pd.Series):
+        total_series = totals.reset_index(drop=True)
+    else:
+        # When a scalar or unsupported type is returned, broadcast across periods
+        total_series = pd.Series([totals])
+
+    total_series = total_series.reindex(range(len(periods)), fill_value=np.nan)
+    total_values = total_series.to_list()
 
     rows: list[dict[str, object]] = []
     if periods:
         for idx, period in enumerate(periods):
             total = total_values[idx] if idx < len(total_values) else np.nan
-            for role, share in DIRECT_WAGE_DEFAULT_ITEMS:
+            for role, share in _direct_wage_default_items():
                 amount = (
-                    total * share if total is not None and not np.isnan(total) else np.nan
+                    total * share
+                    if share is not None and total is not None and not np.isnan(total)
+                    else np.nan
                 )
                 rows.append(
                     {
@@ -910,9 +2387,11 @@ def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     if periods:
         for idx, period in enumerate(periods):
             total = total_values[idx] if idx < len(total_values) else np.nan
-            for function, share in ADMIN_WAGE_DEFAULT_ITEMS:
+            for function, share in _admin_wage_default_items():
                 amount = (
-                    total * share if total is not None and not np.isnan(total) else np.nan
+                    total * share
+                    if share is not None and total is not None and not np.isnan(total)
+                    else np.nan
                 )
                 rows.append(
                     {
@@ -942,9 +2421,11 @@ def _ensure_admin_wage_table(
         reconstructed: list[dict[str, object]] = []
         for idx, period in enumerate(periods):
             total = totals.iloc[idx] if idx < len(totals) else np.nan
-            for function, share in ADMIN_WAGE_DEFAULT_ITEMS:
+            for function, share in _admin_wage_default_items():
                 amount = (
-                    total * share if total is not None and not np.isnan(total) else np.nan
+                    total * share
+                    if share is not None and total is not None and not np.isnan(total)
+                    else np.nan
                 )
                 reconstructed.append(
                     {
@@ -1085,8 +2566,11 @@ def _default_variable_expense_table(core: pd.DataFrame) -> pd.DataFrame:
     if periods:
         for idx, period in enumerate(periods):
             rev = revenue_values[idx] if idx < len(revenue_values) else np.nan
-            for item, pct in VARIABLE_DEFAULT_ITEMS:
-                amount = rev * pct if rev is not None and not np.isnan(rev) else np.nan
+            for item, share in _variable_default_items():
+                amount = (
+                    rev * share if share is not None and rev is not None and not np.isnan(rev)
+                    else np.nan
+                )
                 rows.append({
                     "Period": period,
                     "Item": item,
@@ -1703,7 +3187,7 @@ def _remove_capex_row(table: Optional[pd.DataFrame], index: int) -> pd.DataFrame
 
 
 def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
-    dates = pd.date_range(start, periods=periods, freq="M")
+    dates = pd.date_range(start, periods=periods, freq=MonthEnd(1))
     revenue = np.linspace(45000, 70000, periods)
     cogs = revenue * 0.45
     variable = revenue * 0.12
@@ -1769,9 +3253,50 @@ def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd
     return df
 
 
+def _derive_horizon_years(
+    production_horizon: Optional[pd.DataFrame],
+) -> tuple[int, int]:
+    """Return start and end years inferred from the production horizon table."""
+
+    default_start = 2024
+    default_end = 2024
+
+    if production_horizon is None or production_horizon.empty:
+        return default_start, default_end
+
+    start_years = pd.to_numeric(
+        production_horizon.get("Start Year"), errors="coerce"
+    ).dropna()
+    end_years = pd.to_numeric(
+        production_horizon.get("End Year"), errors="coerce"
+    ).dropna()
+
+    start_year = int(start_years.iloc[0]) if not start_years.empty else default_start
+    end_year = int(end_years.iloc[0]) if not end_years.empty else default_end
+
+    if end_year < start_year:
+        end_year = start_year
+
+    return start_year, end_year
+
+
 def _default_schedule_components(
-    periods: int = 12, start: str = "2024-01-31"
+    periods: Optional[int] = None,
+    start: Optional[str] = None,
+    production_horizon: Optional[pd.DataFrame] = None,
 ) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    if production_horizon is None:
+        production_horizon = _default_production_horizon_table()
+
+    start_year, end_year = _derive_horizon_years(production_horizon)
+
+    if periods is None:
+        periods = max(1, (end_year - start_year + 1) * 12)
+
+    if start is None:
+        start_date = pd.Timestamp(start_year, 1, 1) + pd.offsets.MonthEnd(0)
+        start = start_date.strftime("%Y-%m-%d")
+
     base = _default_income_schedule(periods=periods, start=start)
 
     core_columns = [
@@ -1861,25 +3386,434 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
     }
 
 
+def _default_scenario_controls_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Driver": [
+                "Milk price change (%)",
+                "Feed cost change (%)",
+            ],
+            "Change %": [0.0, 0.0],
+        }
+    )
+
+
+def _ensure_scenario_controls_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_scenario_controls_table()
+    else:
+        work = table.copy()
+
+    if "Driver" not in work.columns:
+        work["Driver"] = ""
+    work["Driver"] = work.get("Driver", "").astype(str).str.strip()
+    work.loc[work["Driver"] == "", "Driver"] = "Driver"
+
+    if "Change %" not in work.columns:
+        work["Change %"] = np.nan
+    work["Change %"] = pd.to_numeric(work.get("Change %"), errors="coerce")
+
+    defaults = _default_scenario_controls_table()
+    for _, default_row in defaults.iterrows():
+        driver = str(default_row["Driver"])
+        if not work["Driver"].str.casefold().eq(driver.casefold()).any():
+            work = pd.concat(
+                [
+                    work,
+                    pd.DataFrame(
+                        {
+                            "Driver": [driver],
+                            "Change %": [float(default_row["Change %"])],
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+
+    ordered_cols = ["Driver", "Change %"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _scenario_controls_value_map(table: pd.DataFrame) -> Dict[str, float]:
+    work = _ensure_scenario_controls_table(table)
+    values: Dict[str, float] = {}
+    for _, row in work.iterrows():
+        driver = str(row.get("Driver", "")).strip()
+        change = pd.to_numeric(pd.Series([row.get("Change %")]), errors="coerce").iloc[0]
+        if driver:
+            values[driver] = float(change) if not pd.isna(change) else 0.0
+    return values
+
+
+def _update_scenario_control_value(
+    table: pd.DataFrame, driver: str, value: float
+) -> pd.DataFrame:
+    work = _ensure_scenario_controls_table(table)
+    driver_key = str(driver).strip()
+    if not driver_key:
+        return work
+
+    mask = work["Driver"].str.casefold() == driver_key.casefold()
+    if mask.any():
+        work.loc[mask, "Change %"] = float(value)
+    else:
+        work = pd.concat(
+            [
+                work,
+                pd.DataFrame({"Driver": [driver_key], "Change %": [float(value)]}),
+            ],
+            ignore_index=True,
+        )
+    return _ensure_scenario_controls_table(work)
+
+
+def _default_production_horizon_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Start Year": [2024],
+            "End Year": [2030],
+        }
+    )
+
+
+def _ensure_production_horizon_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_production_horizon_table()
+    else:
+        work = table.copy()
+
+    for column in ["Start Year", "End Year"]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    work = work.dropna(how="all")
+    if work.empty:
+        return _default_production_horizon_table()
+
+    defaults = _default_production_horizon_table().iloc[0]
+    work["Start Year"] = work["Start Year"].fillna(defaults["Start Year"])
+    work["End Year"] = work["End Year"].fillna(defaults["End Year"])
+
+    for column in ["Start Year", "End Year"]:
+        work[column] = work[column].round().astype("Int64")
+
+    ordered_cols = ["Start Year", "End Year"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _production_year_options(start_year: int, end_year: int) -> list[int]:
+    """Return a flexible list of year options covering the supplied range."""
+
+    current_year = pd.Timestamp.today().year
+    minimum = min(start_year, end_year, current_year - 10, 2000)
+    maximum = max(start_year, end_year, current_year + 20)
+    return list(range(minimum, maximum + 1))
+
+
+def _safe_timeline(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Convert a schedule dataframe into a timeline index, ignoring errors."""
+
+    if isinstance(table, pd.DataFrame) and not table.empty:
+        try:
+            return _prepare_timeline_table(table)
+        except ValueError:
+            return pd.DataFrame(index=pd.DatetimeIndex([], name="Period"))
+    return pd.DataFrame(index=pd.DatetimeIndex([], name="Period"))
+
+
+def _timeline_to_schedule_frame(
+    timeline: pd.DataFrame, column_order: Optional[Sequence[str]] = None
+) -> pd.DataFrame:
+    """Convert a datetime-indexed timeline back into a schedule dataframe."""
+
+    if timeline.empty:
+        base_columns: list[str] = ["Period"]
+        if column_order:
+            base_columns.extend(
+                [col for col in column_order if col not in {"Period"}]
+            )
+        return pd.DataFrame(columns=base_columns)
+
+    ordered = timeline.sort_index()
+    frame = ordered.reset_index()
+    first_column = frame.columns[0]
+    if first_column != "Period":
+        frame = frame.rename(columns={first_column: "Period"})
+
+    frame["Period"] = _normalize_period(frame.get("Period", pd.Series(dtype=str)))
+
+    if column_order:
+        normalized_order = [
+            col for col in column_order if col not in {"Period"} and col in frame.columns
+        ]
+    else:
+        normalized_order = []
+
+    remainder = [
+        col
+        for col in frame.columns
+        if col not in {"Period", *normalized_order}
+    ]
+    return frame[["Period", *normalized_order, *remainder]]
+
+
+def _merge_schedule_table(
+    existing: Optional[pd.DataFrame],
+    defaults: Optional[pd.DataFrame],
+    period_index: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Merge an existing schedule with defaults to match the target horizon."""
+
+    column_order: list[str] = []
+    if isinstance(existing, pd.DataFrame) and not existing.empty:
+        column_order = list(existing.columns)
+    elif isinstance(defaults, pd.DataFrame) and not defaults.empty:
+        column_order = list(defaults.columns)
+
+    existing_timeline = _safe_timeline(existing)
+    default_timeline = _safe_timeline(defaults)
+
+    aligned_defaults = default_timeline.reindex(period_index)
+    aligned_existing = existing_timeline.reindex(period_index)
+
+    merged = aligned_defaults.copy()
+    if not aligned_existing.empty:
+        merged = merged.combine_first(aligned_existing)
+        merged.update(aligned_existing)
+
+    merged = merged.reindex(period_index)
+    return _timeline_to_schedule_frame(merged, column_order)
+
+
+def _rebase_schedule_to_horizon(
+    core: Optional[pd.DataFrame],
+    detail_tables: Optional[Dict[str, pd.DataFrame]],
+    start_year: int,
+    end_year: int,
+) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    """Return schedule tables that span the requested production horizon."""
+
+    if start_year > end_year:
+        start_year, end_year = end_year, start_year
+
+    horizon_table = pd.DataFrame({"Start Year": [start_year], "End Year": [end_year]})
+    default_core, default_details = _default_schedule_components(
+        production_horizon=horizon_table
+    )
+
+    start_date = (pd.Timestamp(start_year, 1, 1) + MonthEnd(0))
+    end_date = (pd.Timestamp(end_year, 12, 1) + MonthEnd(0))
+    period_index = pd.date_range(start=start_date, end=end_date, freq=MonthEnd())
+
+    merged_core = _merge_schedule_table(core, default_core, period_index)
+
+    existing_details = detail_tables or {}
+    detail_names = set(default_details.keys()) | set(existing_details.keys())
+
+    merged_details: Dict[str, pd.DataFrame] = {}
+    for name in detail_names:
+        merged_details[name] = _merge_schedule_table(
+            existing_details.get(name),
+            default_details.get(name),
+            period_index,
+        )
+
+    return merged_core, merged_details
+
+
+def _reset_cached_results() -> None:
+    """Clear cached scenario results so defaults regenerate with fresh inputs."""
+
+    st.session_state.all_scenario_results = {}
+    st.session_state.results = None
+    st.session_state.selected_scenario_name = next(iter(SCENARIO_PRESETS))
+
+
+def _sync_production_horizon(start_year: int, end_year: int) -> None:
+    """Ensure schedules and cached results reflect the selected horizon."""
+
+    core_table = st.session_state.get("core_schedule")
+    detail_tables = st.session_state.get("detail_schedules")
+
+    merged_core, merged_details = _rebase_schedule_to_horizon(
+        core_table, detail_tables, start_year, end_year
+    )
+
+    st.session_state.core_schedule = merged_core
+    st.session_state.detail_schedules = merged_details
+
+    _clear_schedule_editor_state("core_schedule")
+    for name in merged_details:
+        identifier = f"detail::{_scenario_key_suffix(name)}"
+        _clear_schedule_editor_state(identifier)
+
+    _reset_cached_results()
+
+def _default_capital_financing_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Source": ["Bank Loan", "Equity"],
+            "Amount": [250000.0, 150000.0],
+            "Interest/Return %": [6.5, 0.0],
+            "Term (years)": [7, None],
+        }
+    )
+
+
+def _ensure_capital_financing_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_capital_financing_table()
+    else:
+        work = table.copy()
+
+    if "Source" not in work.columns:
+        work["Source"] = ""
+    work["Source"] = work.get("Source", "").astype(str).str.strip()
+    work.loc[work["Source"] == "", "Source"] = "Source"
+
+    for column in ["Amount", "Interest/Return %", "Term (years)"]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    ordered_cols = ["Source", "Amount", "Interest/Return %", "Term (years)"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _default_valuation_inputs_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Metric": list(DEFAULT_VALUATION_INPUTS.keys()),
+            "Value": list(DEFAULT_VALUATION_INPUTS.values()),
+        }
+    )
+
+
+def _ensure_valuation_inputs_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_valuation_inputs_table()
+    else:
+        work = table.copy()
+
+    if "Metric" not in work.columns:
+        work["Metric"] = ""
+    work["Metric"] = work.get("Metric", "").astype(str).str.strip()
+    work.loc[work["Metric"] == "", "Metric"] = "Metric"
+
+    if "Value" not in work.columns:
+        work["Value"] = np.nan
+    work["Value"] = pd.to_numeric(work.get("Value"), errors="coerce")
+
+    ordered_cols = ["Metric", "Value"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _valuation_table_to_inputs(table: pd.DataFrame) -> Dict[str, float]:
+    work = _ensure_valuation_inputs_table(table)
+    inputs: Dict[str, float] = {}
+    for _, row in work.iterrows():
+        metric = str(row.get("Metric", "")).strip()
+        value = pd.to_numeric(pd.Series([row.get("Value")]), errors="coerce").iloc[0]
+        if metric and not pd.isna(value):
+            inputs[metric] = float(value)
+    return inputs
+
+
 def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
     return {
-        "Production Horizon": pd.DataFrame(
-            {
-                "Start Year": [2024],
-                "End Year": [2030],
-            }
-        ),
+        "Scenario Controls": _default_scenario_controls_table(),
+        "Production Horizon": _default_production_horizon_table(),
         "Pricing": _default_pricing_table(),
         "Operating Costs": _default_operating_cost_table(),
-        "Capital & Financing": pd.DataFrame(
-            {
-                "Source": ["Bank Loan", "Equity"],
-                "Amount": [250000.0, 150000.0],
-                "Interest/Return %": [6.5, 0.0],
-                "Term (years)": [7, None],
-            }
-        ),
+        "Capital & Financing": _default_capital_financing_table(),
+        "Valuation Inputs": _default_valuation_inputs_table(),
     }
+
+
+def _ensure_default_results_loaded() -> None:
+    """Populate the dashboard with default results for the initial view."""
+
+    if st.session_state.get("all_scenario_results"):
+        return
+
+    core_table = st.session_state.get("core_schedule")
+    detail_tables = st.session_state.get("detail_schedules")
+    supplementary_tables = st.session_state.get("supplementary")
+
+    if core_table is None or detail_tables is None:
+        return
+
+    try:
+        core_clean = _clean_editor_table(core_table)
+        if core_clean is None:
+            return
+        core_prepared = _prepare_timeline_table(core_clean)
+    except ValueError:
+        return
+
+    prepared_details: Dict[str, pd.DataFrame] = {}
+    for name, table in detail_tables.items():
+        cleaned = _clean_editor_table(table)
+        if cleaned is None:
+            continue
+        try:
+            prepared = _prepare_timeline_table(cleaned)
+        except ValueError:
+            continue
+
+        expected_cols = DETAIL_SCHEDULE_COLUMNS.get(name)
+        if expected_cols:
+            missing = [col for col in expected_cols if col not in prepared.columns]
+            if missing:
+                continue
+            prepared = prepared[expected_cols]
+
+        prepared_details[name] = prepared
+
+    try:
+        schedule_df = _assemble_schedule(core_prepared, prepared_details)
+    except ValueError:
+        return
+
+    valuation_inputs = dict(DEFAULT_VALUATION_INPUTS)
+    supplementary_copy = {
+        name: table.copy()
+        for name, table in (supplementary_tables or {}).items()
+        if isinstance(table, pd.DataFrame)
+    }
+
+    try:
+        scenario_suite = _build_scenario_suite()
+        model, _, scenario_results = _execute_scenario_suite(
+            schedule_df,
+            valuation_inputs,
+            supplementary_copy,
+            scenario_suite,
+        )
+    except ValueError:
+        return
+
+    st.session_state.all_scenario_results = scenario_results
+
+    preferred = st.session_state.get("selected_scenario_name")
+    if preferred not in scenario_results:
+        preferred = next(iter(scenario_results))
+
+    st.session_state.selected_scenario_name = preferred
+    st.session_state.results = scenario_results[preferred]
 
 
 def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -2028,34 +3962,6 @@ def _clean_editor_table(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     return work.reset_index(drop=True)
 
 
-def _run_model(
-    schedule_df: pd.DataFrame,
-    valuation_inputs: Dict[str, float],
-    supplementary_tables: Dict[str, pd.DataFrame],
-    milk_pct: float,
-    feed_pct: float,
-):
-    schedule = InputSchedule(
-        data=schedule_df,
-        valuation_inputs=valuation_inputs,
-        supplementary_tables=supplementary_tables,
-    )
-    model = schedule.to_model()
-    base = model.to_tidy()
-    scenario = model.scenario(milk_price_pct=milk_pct, feed_cost_pct=feed_pct)
-
-    kpis = model.kpis(scenario, annual=True)
-    break_even = model.break_even(scenario, annual=True)
-
-    return (
-        model,
-        base,
-        scenario,
-        kpis,
-        break_even,
-    )
-
-
 def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
     if table is None:
         st.info(f"No **{title}** data was provided.")
@@ -2064,29 +3970,56 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
     st.dataframe(table)
 
 
+
 def main() -> None:
     st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
 
     if "schedule" in st.session_state:
         st.session_state.pop("schedule")
 
+    if DEFAULT_INPUT_CONFIG_KEY not in st.session_state:
+        st.session_state[DEFAULT_INPUT_CONFIG_KEY] = _default_input_template_config()
+
+    if "assumptions" not in st.session_state:
+        st.session_state.assumptions = _default_assumption_tables()
+    else:
+        defaults = _default_assumption_tables()
+        for name, table in defaults.items():
+            st.session_state.assumptions.setdefault(name, table.copy())
+
+    production_horizon_defaults = st.session_state.assumptions.get("Production Horizon")
+
     if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
-        core_default, detail_defaults = _default_schedule_components()
+        core_default, detail_defaults = _default_schedule_components(
+            production_horizon=production_horizon_defaults
+        )
         if "core_schedule" not in st.session_state:
             st.session_state.core_schedule = core_default
         if "detail_schedules" not in st.session_state:
             st.session_state.detail_schedules = detail_defaults
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
-    if "assumptions" not in st.session_state:
-        st.session_state.assumptions = _default_assumption_tables()
+    if "all_scenario_results" not in st.session_state:
+        st.session_state.all_scenario_results = {}
+    if "selected_scenario_name" not in st.session_state:
+        st.session_state.selected_scenario_name = next(iter(SCENARIO_PRESETS))
     if "results" not in st.session_state:
         st.session_state.results = None
 
+    _ensure_default_results_loaded()
+
+    _ensure_active_scenario_selection()
+
+    scenario_selector = st.container()
+    with scenario_selector:
+        st.markdown("### Scenario Explorer")
+        _render_model_author_editor()
+        _render_scenario_selector()
+        _render_scenario_preset_editors()
+
+    excel_download_container = st.container()
+
     ai_payload = st.session_state.setdefault("ai_payload", {})
-    with st.sidebar:
-        st.header("AI & Machine Learning")
-        _render_ai_settings(ai_payload, st.sidebar)
 
     milk_price = 0
     feed_cost = 0
@@ -2111,6 +4044,9 @@ def main() -> None:
 
     with tabs[0]:
         st.subheader("Input Schedule")
+        st.markdown("### AI & Machine Learning")
+        _render_ai_settings(ai_payload)
+
         schedule_tab_names = [
             "Core Schedule",
             "COGS Schedule",
@@ -2122,13 +4058,402 @@ def main() -> None:
         schedule_tabs = st.tabs(schedule_tab_names)
 
         with schedule_tabs[0]:
-            core_editor = st.data_editor(
+            core_table = st.session_state.get("core_schedule")
+            if not isinstance(core_table, pd.DataFrame):
+                core_table = pd.DataFrame()
+                st.session_state.core_schedule = core_table
+
+            _render_schedule_row_editor(
+                "core_schedule",
                 st.session_state.core_schedule,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="schedule_core",
+                lambda updated: st.session_state.__setitem__(
+                    "core_schedule", updated
+                ),
             )
-            st.session_state.core_schedule = core_editor
+            core_editor = st.session_state.core_schedule
+            st.markdown("### Supplementary Tables")
+            for name in list(st.session_state.supplementary.keys()):
+                if name == "Capitalisation Table":
+                    st.markdown("#### Capitalisation Table Schedule")
+                    cap_table = _ensure_capitalisation_table(
+                        st.session_state.supplementary.get(name)
+                    )
+                    st.session_state.supplementary[name] = cap_table
+
+                    add_col, remove_select_col, remove_btn_col, inc_col_col, inc_pct_col = st.columns(
+                        [1, 2, 1, 2, 2]
+                    )
+
+                    with add_col:
+                        if st.button("Add Row", key="cap_table_add_row"):
+                            cap_table = _add_capitalisation_row(cap_table)
+                            st.session_state.supplementary[name] = cap_table
+                            _clear_schedule_editor_state("supp::capitalisation_table")
+
+                    option_labels = []
+                    option_map: Dict[str, int] = {}
+                    for idx, row in cap_table.iterrows():
+                        year = row.get("Year")
+                        shareholder = row.get("Shareholder") or "Unnamed"
+                        if pd.isna(year):
+                            label = f"{shareholder}"
+                        else:
+                            label = f"{int(year)} – {shareholder}"
+                        option_labels.append(label)
+                        option_map[label] = idx
+
+                    remove_choice = None
+                    with remove_select_col:
+                        if option_labels:
+                            remove_choice = st.selectbox(
+                                "Select row",
+                                options=["-- Select Row --"] + option_labels,
+                                key="cap_table_remove_choice",
+                            )
+                        else:
+                            st.write("No rows available to remove.")
+
+                    with remove_btn_col:
+                        if (
+                            st.button("Remove Row", key="cap_table_remove_button")
+                            and remove_choice
+                            and remove_choice in option_map
+                        ):
+                            cap_table = _remove_capitalisation_row(
+                                cap_table, option_map[remove_choice]
+                            )
+                            st.session_state.supplementary[name] = cap_table
+                            _clear_schedule_editor_state("supp::capitalisation_table")
+
+                    with inc_col_col:
+                        increment_column = st.selectbox(
+                            "Increment column",
+                            options=["Ownership %", "Investment"],
+                            key="cap_table_increment_column",
+                        )
+
+                    with inc_pct_col:
+                        increment_pct = st.number_input(
+                            "Yearly increment (%)",
+                            value=0.0,
+                            step=0.5,
+                            key="cap_table_increment_pct",
+                        )
+                        if st.button("Apply", key="cap_table_increment_button"):
+                            cap_table = _apply_capitalisation_increment(
+                                cap_table, increment_column, increment_pct
+                            )
+
+                            st.session_state.supplementary[name] = cap_table
+                            _clear_schedule_editor_state("supp::capitalisation_table")
+
+                    cap_table = st.session_state.supplementary[name]
+
+                    def _save_capitalisation(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_capitalisation_table(updated)
+                        st.session_state.supplementary[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "supp::capitalisation_table", cap_table, _save_capitalisation
+                    )
+
+                    cleaned_cap = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
+                    if cleaned_cap is not None:
+                        supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
+                    continue
+                if name == "Capex Schedule":
+                    st.markdown("#### Capex Schedule")
+                    capex_table = _ensure_capex_schedule(
+                        st.session_state.supplementary.get(name)
+                    )
+                    st.session_state.supplementary[name] = capex_table
+
+                    rate_series = pd.to_numeric(
+                        capex_table.get("Depreciation Rate %"), errors="coerce"
+                    ).dropna()
+                    spend_series = pd.to_numeric(
+                        capex_table.get("Spend"), errors="coerce"
+                    ).dropna()
+
+                    default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 10.0
+                    default_spend = float(spend_series.iloc[0]) if not spend_series.empty else 0.0
+
+                    st.session_state.setdefault("capex_rate_default", round(default_rate, 2))
+                    st.session_state.setdefault("capex_default_spend", default_spend)
+                    st.session_state.setdefault("capex_remove_choice", "-- Select Row --")
+                    st.session_state.setdefault("capex_increment_column", "Spend")
+                    st.session_state.setdefault("capex_increment_pct", 0.0)
+
+                    rate_col, rate_btn_col, spend_col = st.columns([1, 1, 1])
+
+                    rate_value = rate_col.number_input(
+                        "Default depreciation rate (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="capex_rate_default",
+                    )
+                    if rate_btn_col.button("Apply rate to all", key="capex_apply_rate"):
+                        capex_table = _apply_capex_rate(capex_table, rate_value)
+                        st.session_state.supplementary[name] = capex_table
+                        _clear_schedule_editor_state("supp::capex_schedule")
+
+                    spend_default = spend_col.number_input(
+                        "Default spend for new row",
+                        min_value=0.0,
+                        step=100.0,
+                        key="capex_default_spend",
+                    )
+
+                    add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+                    if add_col.button("Add Row", key="capex_add_row"):
+                        capex_table = _add_capex_row(
+                            capex_table,
+                            default_rate=rate_value,
+                            default_spend=spend_default,
+                        )
+                        st.session_state.supplementary[name] = capex_table
+                        _clear_schedule_editor_state("supp::capex_schedule")
+
+                    option_labels: list[str] = []
+                    option_map: Dict[str, int] = {}
+                    for idx, row in capex_table.iterrows():
+                        label_year = row.get("Year")
+                        label_category = row.get("Category") or "Unnamed"
+                        if pd.notna(label_year):
+                            label = f"{int(label_year)} – {label_category}"
+                        else:
+                            label = str(label_category)
+                        option_labels.append(label)
+                        option_map[label] = idx
+
+                    remove_choice = remove_select_col.selectbox(
+                        "Select row",
+                        options=["-- Select Row --"] + option_labels,
+                        key="capex_remove_choice",
+                    )
+                    if remove_btn_col.button("Remove Row", key="capex_remove_row"):
+                        if remove_choice in option_map:
+                            capex_table = _remove_capex_row(
+                                capex_table, option_map[remove_choice]
+                            )
+                            st.session_state.capex_remove_choice = "-- Select Row --"
+                            st.session_state.supplementary[name] = capex_table
+                            _clear_schedule_editor_state("supp::capex_schedule")
+
+                    inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
+
+                    increment_column = inc_col.selectbox(
+                        "Increment column",
+                        options=["Spend", "Depreciation Rate %"],
+                        key="capex_increment_column",
+                    )
+                    increment_pct = inc_pct_col.number_input(
+                        "Yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="capex_increment_pct",
+                    )
+                    if inc_btn_col.button("Apply increment", key="capex_apply_increment"):
+                        capex_table = _apply_capex_yearly_increment(
+                            capex_table, increment_column, increment_pct
+                        )
+                        st.session_state.supplementary[name] = capex_table
+                        _clear_schedule_editor_state("supp::capex_schedule")
+
+                    capex_table = st.session_state.supplementary[name]
+
+                    def _save_capex(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_capex_schedule(updated)
+                        st.session_state.supplementary[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "supp::capex_schedule", capex_table, _save_capex
+                    )
+
+                    cleaned_capex = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
+                    if cleaned_capex is not None:
+                        supplementary_tables[name] = _ensure_capex_schedule(cleaned_capex)
+                    continue
+                if name == "Asset Schedules":
+                    st.markdown("#### Asset Schedule")
+                    asset_table = _ensure_asset_schedule(
+                        st.session_state.supplementary.get(name)
+                    )
+                    st.session_state.supplementary[name] = asset_table
+
+                    rate_series = pd.to_numeric(
+                        asset_table.get("Depreciation Rate %"), errors="coerce"
+                    ).dropna()
+                    addition_series = pd.to_numeric(
+                        asset_table.get("Additions"), errors="coerce"
+                    ).dropna()
+
+                    default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 5.0
+                    default_addition = (
+                        float(addition_series.iloc[0]) if not addition_series.empty else 0.0
+                    )
+
+                    st.session_state.setdefault("asset_rate_default", round(default_rate, 2))
+                    st.session_state.setdefault("asset_add_base", default_addition)
+                    st.session_state.setdefault("asset_add_increment", 0.0)
+                    st.session_state.setdefault("asset_increment_column", "Depreciation Rate %")
+                    st.session_state.setdefault("asset_increment_pct", 0.0)
+                    st.session_state.setdefault("asset_remove_choice", "-- Select Row --")
+
+                    rate_col, rate_btn_col, add_base_col, add_inc_col, add_btn_col = st.columns(
+                        [1, 1, 1, 1, 1]
+                    )
+
+                    rate_value = rate_col.number_input(
+                        "Default depreciation rate (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="asset_rate_default",
+                    )
+                    if rate_btn_col.button("Apply rate to all", key="asset_apply_rate"):
+                        asset_table = _apply_asset_rate(asset_table, rate_value)
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
+
+                    base_add_value = add_base_col.number_input(
+                        "Base additions",
+                        min_value=0.0,
+                        step=100.0,
+                        key="asset_add_base",
+                    )
+                    add_increment = add_inc_col.number_input(
+                        "Additions yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="asset_add_increment",
+                    )
+                    if add_btn_col.button(
+                        "Apply additions pattern", key="asset_apply_additions"
+                    ):
+                        asset_table = _apply_asset_additions_pattern(
+                            asset_table, base_add_value, add_increment
+                        )
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
+
+                    (
+                        add_row_col,
+                        remove_select_col,
+                        remove_btn_col,
+                        inc_column_col,
+                        inc_pct_col,
+                        inc_btn_col,
+                    ) = st.columns([1, 2, 1, 1.5, 1, 1])
+
+                    if add_row_col.button("Add Asset", key="asset_add_row"):
+                        asset_table = _add_asset_row(
+                            asset_table,
+                            default_rate=rate_value,
+                            default_additions=base_add_value,
+                        )
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
+
+                    option_labels: list[str] = []
+                    option_map: Dict[str, int] = {}
+                    for idx, row in asset_table.iterrows():
+                        label_year = row.get("Year")
+                        label_asset = row.get("Asset") or "Unnamed"
+                        if pd.notna(label_year):
+                            label = f"{int(label_year)} – {label_asset}"
+                        else:
+                            label = str(label_asset)
+                        option_labels.append(label)
+                        option_map[label] = idx
+
+                    remove_choice = remove_select_col.selectbox(
+                        "Select asset",
+                        options=["-- Select Row --"] + option_labels,
+                        key="asset_remove_choice",
+                    )
+                    if remove_btn_col.button("Remove Asset", key="asset_remove_row"):
+                        if remove_choice in option_map:
+                            asset_table = _remove_asset_row(
+                                asset_table, option_map[remove_choice]
+                            )
+                            st.session_state.asset_remove_choice = "-- Select Row --"
+                            st.session_state.supplementary[name] = asset_table
+                            _clear_schedule_editor_state("supp::asset_schedule")
+
+                    increment_column = inc_column_col.selectbox(
+                        "Increment column",
+                        options=[
+                            "Depreciation Rate %",
+                            "Additions",
+                            "Opening NBV",
+                            "Depreciation",
+                        ],
+                        key="asset_increment_column",
+                    )
+                    increment_pct = inc_pct_col.number_input(
+                        "Yearly increment (%)",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        step=0.1,
+                        key="asset_increment_pct",
+                    )
+                    if inc_btn_col.button("Apply increment", key="asset_apply_increment"):
+                        asset_table = _apply_asset_yearly_increment(
+                            asset_table, increment_column, increment_pct
+                        )
+                        st.session_state.supplementary[name] = asset_table
+                        _clear_schedule_editor_state("supp::asset_schedule")
+
+                    asset_table = st.session_state.supplementary[name]
+
+                    def _save_asset(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_asset_schedule(updated)
+                        st.session_state.supplementary[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "supp::asset_schedule", asset_table, _save_asset
+                    )
+
+                    cleaned_asset = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
+                    if cleaned_asset is not None:
+                        supplementary_tables[name] = _ensure_asset_schedule(cleaned_asset)
+                    continue
+
+                with st.expander(name, expanded=False):
+                    table = st.session_state.supplementary.get(name, pd.DataFrame())
+                    if not isinstance(table, pd.DataFrame):
+                        table = pd.DataFrame()
+                        st.session_state.supplementary[name] = table
+
+                    def _save_generic(updated: pd.DataFrame, table_name: str = name) -> None:
+                        st.session_state.supplementary[table_name] = updated
+
+                    _render_schedule_row_editor(
+                        f"supp::{_scenario_key_suffix(name)}",
+                        table,
+                        _save_generic,
+                    )
+
+                cleaned = _clean_editor_table(
+                    st.session_state.supplementary.get(name, pd.DataFrame())
+                )
+                if cleaned is not None:
+                    supplementary_tables[name] = cleaned
+                else:
+                    st.session_state.supplementary[name] = (
+                        st.session_state.supplementary.get(name, pd.DataFrame())
+                    )
 
         for idx, name in enumerate(schedule_tab_names[1:], start=1):
             with schedule_tabs[idx]:
@@ -2143,6 +4468,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = cogs_table
 
                     inferred_pct = pd.to_numeric(
                         cogs_table.get("COGS %"), errors="coerce"
@@ -2171,6 +4497,7 @@ def main() -> None:
                             cogs_table, st.session_state.core_schedule, pct_input
                         )
                         st.session_state.detail_schedules[name] = cogs_table
+                        _clear_schedule_editor_state("detail::cogs_schedule")
 
                     increment_input = controls[1].number_input(
                         "Yearly increment %",
@@ -2189,6 +4516,7 @@ def main() -> None:
                             default_pct=pct_input,
                         )
                         st.session_state.detail_schedules[name] = cogs_table
+                        _clear_schedule_editor_state("detail::cogs_schedule")
 
                     if controls[2].button("Add Row", key="cogs_add_row"):
                         cogs_table = _add_cogs_row(
@@ -2197,6 +4525,7 @@ def main() -> None:
                             default_pct=pct_input,
                         )
                         st.session_state.detail_schedules[name] = cogs_table
+                        _clear_schedule_editor_state("detail::cogs_schedule")
 
                     remove_options = ["Select a period"] + cogs_table["Period"].astype(str).tolist()
                     controls[3].selectbox(
@@ -2213,30 +4542,27 @@ def main() -> None:
                             cogs_table = _remove_cogs_row(cogs_table, remove_choice)
                             st.session_state.detail_schedules[name] = cogs_table
                             st.session_state.cogs_remove_choice = "Select a period"
+                            _clear_schedule_editor_state("detail::cogs_schedule")
 
                     cogs_table = _sync_cogs_table(
                         cogs_table, st.session_state.core_schedule, default_pct=pct_input
                     )
+                    st.session_state.detail_schedules[name] = cogs_table
+                    def _save_cogs(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_cogs_schedule(
+                            updated,
+                            st.session_state.core_schedule,
+                            default_pct=pct_input,
+                        )
+                        st.session_state.detail_schedules[name] = ensured
 
-                    editor = st.data_editor(
-                        cogs_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        column_config={
-                            "COGS %": st.column_config.NumberColumn(
-                                "COGS % of Revenue", format="%.2f %%", step=0.1
-                            ),
-                            "COGS": st.column_config.NumberColumn(
-                                "COGS Amount", format="%.2f"
-                            ),
-                        },
-                        key="schedule_cogs_schedule",
+                    _render_schedule_row_editor(
+                        "detail::cogs_schedule",
+                        st.session_state.detail_schedules[name],
+                        _save_cogs,
                     )
-                    synced_editor = _sync_cogs_table(
-                        editor, st.session_state.core_schedule, default_pct=pct_input
-                    )
-                    st.session_state.detail_schedules[name] = synced_editor
-                    detail_tables_for_run[name] = synced_editor
+
+                    detail_tables_for_run[name] = st.session_state.detail_schedules[name]
                 elif name == "Variable Expenses Schedule":
                     st.markdown("#### Variable Expenses Schedule")
                     st.caption(
@@ -2248,6 +4574,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = variable_table
 
                     st.session_state.setdefault("var_exp_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("var_exp_increment_target", "All items")
@@ -2260,6 +4587,7 @@ def main() -> None:
                             variable_table, st.session_state.core_schedule
                         )
                         st.session_state.detail_schedules[name] = variable_table
+                        _clear_schedule_editor_state("detail::variable_expenses")
 
                     option_labels: list[str] = []
                     option_index: Dict[str, int] = {}
@@ -2281,6 +4609,7 @@ def main() -> None:
                             )
                             st.session_state.detail_schedules[name] = variable_table
                             st.session_state.var_exp_remove_choice = "-- Select Row --"
+                            _clear_schedule_editor_state("detail::variable_expenses")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
                     target_options = ["All items"] + sorted(
@@ -2307,20 +4636,112 @@ def main() -> None:
                             st.session_state.get("var_exp_increment_target"),
                         )
                         st.session_state.detail_schedules[name] = variable_table
+                        _clear_schedule_editor_state("detail::variable_expenses")
 
-                    editor = st.data_editor(
-                        variable_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="schedule_variable_expenses_schedule",
-                        column_config={
-                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
-                        },
+                    def _save_variable(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_variable_expense_table(
+                            updated, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "detail::variable_expenses",
+                        st.session_state.detail_schedules[name],
+                        _save_variable,
                     )
-                    variable_table = _ensure_variable_expense_table(
-                        editor, st.session_state.core_schedule
+
+                    variable_table = st.session_state.detail_schedules[name]
+
+                    st.session_state.setdefault(
+                        "variable_defaults_edit_mode", False
                     )
-                    st.session_state.detail_schedules[name] = variable_table
+                    toggle_label = (
+                        "Hide default variable expense template"
+                        if st.session_state.variable_defaults_edit_mode
+                        else "Edit default variable expense template"
+                    )
+                    if st.button(toggle_label, key="toggle_variable_defaults"):
+                        st.session_state.variable_defaults_edit_mode = not st.session_state[
+                            "variable_defaults_edit_mode"
+                        ]
+
+                    if st.session_state.variable_defaults_edit_mode:
+                        st.markdown("##### Default Variable Expense Template")
+                        st.caption(
+                            "Update the baseline mix of variable expenses that populates new schedules."
+                        )
+
+                        variable_columns = ["Item", "Share %"]
+                        default_frame = st.session_state.get(
+                            "default_variable_items_editor"
+                        )
+                        if not isinstance(default_frame, pd.DataFrame):
+                            default_frame = _template_to_dataframe(
+                                _get_template("variable_items", DEFAULT_VARIABLE_ITEMS),
+                                variable_columns,
+                            )
+
+                        template_editor = st.data_editor(
+                            default_frame,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            key="default_variable_items_editor",
+                            column_config={
+                                "Share %": st.column_config.NumberColumn(
+                                    "Share (%)", format="%.2f", step=0.1
+                                )
+                            },
+                        )
+
+                        button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                        if button_col.button(
+                            "Close editor", key="close_variable_defaults"
+                        ):
+                            st.session_state.variable_defaults_edit_mode = False
+
+                        if save_col.button(
+                            "Save defaults", key="save_variable_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, variable_columns
+                            )
+                            _set_template("variable_items", records)
+                            st.success("Variable expense defaults updated.")
+
+                        if restore_col.button(
+                            "Restore baseline", key="reset_variable_defaults"
+                        ):
+                            baseline_template = _template_copy(DEFAULT_VARIABLE_ITEMS)
+                            _set_template("variable_items", baseline_template)
+                            variable_table = _default_variable_expense_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = variable_table
+                            st.session_state["default_variable_items_editor"] = _template_to_dataframe(
+                                baseline_template, variable_columns
+                            )
+                            st.success(
+                                "Variable expense defaults restored and schedule refreshed."
+                            )
+                            _clear_schedule_editor_state("detail::variable_expenses")
+
+                        if apply_col.button(
+                            "Apply to schedule", key="apply_variable_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, variable_columns
+                            )
+                            _set_template("variable_items", records)
+                            variable_table = _default_variable_expense_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = variable_table
+                            st.session_state["default_variable_items_editor"] = template_editor
+                            st.success(
+                                "Variable expenses schedule regenerated from defaults."
+                            )
+                            _clear_schedule_editor_state("detail::variable_expenses")
 
                     aggregated_variable = _aggregate_variable_expenses(
                         variable_table, st.session_state.core_schedule
@@ -2340,6 +4761,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = direct_table
 
                     st.session_state.setdefault("direct_wage_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("direct_wage_increment_target", "All roles")
@@ -2352,6 +4774,7 @@ def main() -> None:
                             direct_table, st.session_state.core_schedule
                         )
                         st.session_state.detail_schedules[name] = direct_table
+                        _clear_schedule_editor_state("detail::direct_wages")
 
                     option_labels: list[str] = []
                     option_index: Dict[str, int] = {}
@@ -2375,6 +4798,7 @@ def main() -> None:
                             )
                             st.session_state.detail_schedules[name] = direct_table
                             st.session_state.direct_wage_remove_choice = "-- Select Row --"
+                            _clear_schedule_editor_state("detail::direct_wages")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
                     target_options = ["All roles"] + sorted(
@@ -2406,20 +4830,112 @@ def main() -> None:
                             st.session_state.get("direct_wage_increment_target"),
                         )
                         st.session_state.detail_schedules[name] = direct_table
+                        _clear_schedule_editor_state("detail::direct_wages")
 
-                    editor = st.data_editor(
-                        direct_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="schedule_direct_wages_schedule",
-                        column_config={
-                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
-                        },
+                    def _save_direct(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_direct_wage_table(
+                            updated, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "detail::direct_wages",
+                        st.session_state.detail_schedules[name],
+                        _save_direct,
                     )
-                    direct_table = _ensure_direct_wage_table(
-                        editor, st.session_state.core_schedule
+
+                    direct_table = st.session_state.detail_schedules[name]
+
+                    st.session_state.setdefault("direct_defaults_edit_mode", False)
+                    toggle_label = (
+                        "Hide default direct wage template"
+                        if st.session_state.direct_defaults_edit_mode
+                        else "Edit default direct wage template"
                     )
-                    st.session_state.detail_schedules[name] = direct_table
+                    if st.button(toggle_label, key="toggle_direct_defaults"):
+                        st.session_state.direct_defaults_edit_mode = not st.session_state[
+                            "direct_defaults_edit_mode"
+                        ]
+
+                    if st.session_state.direct_defaults_edit_mode:
+                        st.markdown("##### Default Direct Wage Template")
+                        st.caption(
+                            "Adjust the baseline allocation of direct labour that seeds future schedules."
+                        )
+
+                        direct_columns = ["Role", "Share %"]
+                        default_frame = st.session_state.get(
+                            "default_direct_wage_editor"
+                        )
+                        if not isinstance(default_frame, pd.DataFrame):
+                            default_frame = _template_to_dataframe(
+                                _get_template(
+                                    "direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS
+                                ),
+                                direct_columns,
+                            )
+
+                        template_editor = st.data_editor(
+                            default_frame,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            key="default_direct_wage_editor",
+                            column_config={
+                                "Share %": st.column_config.NumberColumn(
+                                    "Share (%)", format="%.2f", step=0.1
+                                )
+                            },
+                        )
+
+                        button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                        if button_col.button(
+                            "Close editor", key="close_direct_defaults"
+                        ):
+                            st.session_state.direct_defaults_edit_mode = False
+
+                        if save_col.button(
+                            "Save defaults", key="save_direct_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, direct_columns
+                            )
+                            _set_template("direct_wage_items", records)
+                            st.success("Direct wage defaults updated.")
+
+                        if restore_col.button(
+                            "Restore baseline", key="reset_direct_wage_defaults"
+                        ):
+                            baseline_template = _template_copy(DEFAULT_DIRECT_WAGE_ITEMS)
+                            _set_template("direct_wage_items", baseline_template)
+                            direct_table = _default_direct_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = direct_table
+                            st.session_state["default_direct_wage_editor"] = _template_to_dataframe(
+                                baseline_template, direct_columns
+                            )
+                            st.success(
+                                "Direct wage defaults restored and schedule refreshed."
+                            )
+                            _clear_schedule_editor_state("detail::direct_wages")
+
+                        if apply_col.button(
+                            "Apply to schedule", key="apply_direct_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, direct_columns
+                            )
+                            _set_template("direct_wage_items", records)
+                            direct_table = _default_direct_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = direct_table
+                            st.session_state["default_direct_wage_editor"] = template_editor
+                            st.success(
+                                "Direct wages schedule regenerated from defaults."
+                            )
+                            _clear_schedule_editor_state("detail::direct_wages")
 
                     aggregated_direct = _aggregate_direct_wages(
                         direct_table, st.session_state.core_schedule
@@ -2439,6 +4955,7 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
                     )
+                    st.session_state.detail_schedules[name] = admin_table
 
                     st.session_state.setdefault("admin_wage_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("admin_wage_increment_target", "All functions")
@@ -2451,6 +4968,7 @@ def main() -> None:
                             admin_table, st.session_state.core_schedule
                         )
                         st.session_state.detail_schedules[name] = admin_table
+                        _clear_schedule_editor_state("detail::admin_wages")
 
                     option_labels: list[str] = []
                     option_index: Dict[str, int] = {}
@@ -2474,6 +4992,7 @@ def main() -> None:
                             )
                             st.session_state.detail_schedules[name] = admin_table
                             st.session_state.admin_wage_remove_choice = "-- Select Row --"
+                            _clear_schedule_editor_state("detail::admin_wages")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
                     target_options = ["All functions"] + sorted(
@@ -2505,20 +5024,108 @@ def main() -> None:
                             st.session_state.get("admin_wage_increment_target"),
                         )
                         st.session_state.detail_schedules[name] = admin_table
+                        _clear_schedule_editor_state("detail::admin_wages")
 
-                    editor = st.data_editor(
-                        admin_table,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key="schedule_admin_wages_schedule",
-                        column_config={
-                            "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
-                        },
+                    def _save_admin(updated: pd.DataFrame) -> None:
+                        ensured = _ensure_admin_wage_table(
+                            updated, st.session_state.core_schedule
+                        )
+                        st.session_state.detail_schedules[name] = ensured
+
+                    _render_schedule_row_editor(
+                        "detail::admin_wages",
+                        st.session_state.detail_schedules[name],
+                        _save_admin,
                     )
-                    admin_table = _ensure_admin_wage_table(
-                        editor, st.session_state.core_schedule
+
+                    admin_table = st.session_state.detail_schedules[name]
+
+                    st.session_state.setdefault("admin_defaults_edit_mode", False)
+                    toggle_label = (
+                        "Hide default admin wage template"
+                        if st.session_state.admin_defaults_edit_mode
+                        else "Edit default admin wage template"
                     )
-                    st.session_state.detail_schedules[name] = admin_table
+                    if st.button(toggle_label, key="toggle_admin_defaults"):
+                        st.session_state.admin_defaults_edit_mode = not st.session_state[
+                            "admin_defaults_edit_mode"
+                        ]
+
+                    if st.session_state.admin_defaults_edit_mode:
+                        st.markdown("##### Default Admin Wage Template")
+                        st.caption(
+                            "Maintain the default administrative wage allocation used when rebuilding schedules."
+                        )
+
+                        admin_columns = ["Function", "Share %"]
+                        default_frame = st.session_state.get("default_admin_wage_editor")
+                        if not isinstance(default_frame, pd.DataFrame):
+                            default_frame = _template_to_dataframe(
+                                _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS),
+                                admin_columns,
+                            )
+
+                        template_editor = st.data_editor(
+                            default_frame,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            key="default_admin_wage_editor",
+                            column_config={
+                                "Share %": st.column_config.NumberColumn(
+                                    "Share (%)", format="%.2f", step=0.1
+                                )
+                            },
+                        )
+
+                        button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                        if button_col.button(
+                            "Close editor", key="close_admin_defaults"
+                        ):
+                            st.session_state.admin_defaults_edit_mode = False
+
+                        if save_col.button(
+                            "Save defaults", key="save_admin_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, admin_columns
+                            )
+                            _set_template("admin_wage_items", records)
+                            st.success("Admin wage defaults updated.")
+
+                        if restore_col.button(
+                            "Restore baseline", key="reset_admin_wage_defaults"
+                        ):
+                            baseline_template = _template_copy(DEFAULT_ADMIN_WAGE_ITEMS)
+                            _set_template("admin_wage_items", baseline_template)
+                            admin_table = _default_admin_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = admin_table
+                            st.session_state["default_admin_wage_editor"] = _template_to_dataframe(
+                                baseline_template, admin_columns
+                            )
+                            st.success(
+                                "Admin wage defaults restored and schedule refreshed."
+                            )
+                            _clear_schedule_editor_state("detail::admin_wages")
+
+                        if apply_col.button(
+                            "Apply to schedule", key="apply_admin_wage_defaults"
+                        ):
+                            records = _dataframe_to_template(
+                                template_editor, admin_columns
+                            )
+                            _set_template("admin_wage_items", records)
+                            admin_table = _default_admin_wage_table(
+                                st.session_state.core_schedule
+                            )
+                            st.session_state.detail_schedules[name] = admin_table
+                            st.session_state["default_admin_wage_editor"] = template_editor
+                            st.success(
+                                "Admin wages schedule regenerated from defaults."
+                            )
+                            _clear_schedule_editor_state("detail::admin_wages")
 
                     aggregated_admin = _aggregate_admin_wages(
                         admin_table, st.session_state.core_schedule
@@ -2528,383 +5135,22 @@ def main() -> None:
                     st.markdown("##### Admin Wages Summary")
                     st.dataframe(aggregated_admin)
                 else:
-                    table = st.data_editor(
-                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key=f"schedule_{name.lower().replace(' ', '_')}",
+                    table = st.session_state.detail_schedules.get(name, pd.DataFrame())
+                    if not isinstance(table, pd.DataFrame):
+                        table = pd.DataFrame()
+                        st.session_state.detail_schedules[name] = table
+
+                    def _save_other(updated: pd.DataFrame, schedule_name: str = name) -> None:
+                        st.session_state.detail_schedules[schedule_name] = updated
+
+                    _render_schedule_row_editor(
+                        f"detail::{_scenario_key_suffix(name)}",
+                        st.session_state.detail_schedules.get(name, table),
+                        _save_other,
                     )
-                    st.session_state.detail_schedules[name] = table
-                    detail_tables_for_run[name] = table
-
-        st.markdown("### Supplementary Tables")
-        for name in list(st.session_state.supplementary.keys()):
-            if name == "Capitalisation Table":
-                st.markdown("#### Capitalisation Table Schedule")
-                cap_table = _ensure_capitalisation_table(
-                    st.session_state.supplementary.get(name)
-                )
-
-                add_col, remove_select_col, remove_btn_col, inc_col_col, inc_pct_col = st.columns(
-                    [1, 2, 1, 2, 2]
-                )
-
-                with add_col:
-                    if st.button("Add Row", key="cap_table_add_row"):
-                        cap_table = _add_capitalisation_row(cap_table)
-
-                option_labels = []
-                option_map: Dict[str, int] = {}
-                for idx, row in cap_table.iterrows():
-                    year = row.get("Year")
-                    shareholder = row.get("Shareholder") or "Unnamed"
-                    if pd.isna(year):
-                        label = f"{shareholder}"
-                    else:
-                        label = f"{int(year)} – {shareholder}"
-                    option_labels.append(label)
-                    option_map[label] = idx
-
-                remove_choice = None
-                with remove_select_col:
-                    if option_labels:
-                        remove_choice = st.selectbox(
-                            "Select row",
-                            options=["-- Select Row --"] + option_labels,
-                            key="cap_table_remove_choice",
-                        )
-                    else:
-                        st.write("No rows available to remove.")
-
-                with remove_btn_col:
-                    if (
-                        st.button("Remove Row", key="cap_table_remove_button")
-                        and remove_choice
-                        and remove_choice in option_map
-                    ):
-                        cap_table = _remove_capitalisation_row(
-                            cap_table, option_map[remove_choice]
-                        )
-
-                with inc_col_col:
-                    increment_column = st.selectbox(
-                        "Increment column",
-                        options=["Ownership %", "Investment"],
-                        key="cap_table_increment_column",
+                    detail_tables_for_run[name] = st.session_state.detail_schedules.get(
+                        name, table
                     )
-
-                with inc_pct_col:
-                    increment_pct = st.number_input(
-                        "Yearly increment (%)",
-                        value=0.0,
-                        step=0.5,
-                        key="cap_table_increment_pct",
-                    )
-                    if st.button("Apply", key="cap_table_increment_button"):
-                        cap_table = _apply_capitalisation_increment(
-                            cap_table, increment_column, increment_pct
-                        )
-
-                cap_editor = st.data_editor(
-                    cap_table,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="supp_capitalisation_table",
-                    column_config={
-                        "Ownership %": st.column_config.NumberColumn(
-                            "Ownership %", format="%.2f", step=0.1
-                        ),
-                        "Investment": st.column_config.NumberColumn(
-                            "Investment", format="%.2f"
-                        ),
-                    },
-                )
-
-                cap_table = _ensure_capitalisation_table(cap_editor)
-                st.session_state.supplementary[name] = cap_table
-
-                cleaned_cap = _clean_editor_table(cap_table)
-                if cleaned_cap is not None:
-                    supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
-                continue
-            if name == "Capex Schedule":
-                st.markdown("#### Capex Schedule")
-                capex_table = _ensure_capex_schedule(
-                    st.session_state.supplementary.get(name)
-                )
-
-                rate_series = pd.to_numeric(
-                    capex_table.get("Depreciation Rate %"), errors="coerce"
-                ).dropna()
-                spend_series = pd.to_numeric(
-                    capex_table.get("Spend"), errors="coerce"
-                ).dropna()
-
-                default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 10.0
-                default_spend = float(spend_series.iloc[0]) if not spend_series.empty else 0.0
-
-                st.session_state.setdefault("capex_rate_default", round(default_rate, 2))
-                st.session_state.setdefault("capex_default_spend", default_spend)
-                st.session_state.setdefault("capex_remove_choice", "-- Select Row --")
-                st.session_state.setdefault("capex_increment_column", "Spend")
-                st.session_state.setdefault("capex_increment_pct", 0.0)
-
-                rate_col, rate_btn_col, spend_col = st.columns([1, 1, 1])
-
-                rate_value = rate_col.number_input(
-                    "Default depreciation rate (%)",
-                    min_value=0.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="capex_rate_default",
-                )
-                if rate_btn_col.button("Apply rate to all", key="capex_apply_rate"):
-                    capex_table = _apply_capex_rate(capex_table, rate_value)
-
-                spend_default = spend_col.number_input(
-                    "Default spend for new row",
-                    min_value=0.0,
-                    step=100.0,
-                    key="capex_default_spend",
-                )
-
-                add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
-
-                if add_col.button("Add Row", key="capex_add_row"):
-                    capex_table = _add_capex_row(
-                        capex_table,
-                        default_rate=rate_value,
-                        default_spend=spend_default,
-                    )
-
-                option_labels: list[str] = []
-                option_map: Dict[str, int] = {}
-                for idx, row in capex_table.iterrows():
-                    label_year = row.get("Year")
-                    label_category = row.get("Category") or "Unnamed"
-                    if pd.notna(label_year):
-                        label = f"{int(label_year)} – {label_category}"
-                    else:
-                        label = str(label_category)
-                    option_labels.append(label)
-                    option_map[label] = idx
-
-                remove_choice = remove_select_col.selectbox(
-                    "Select row",
-                    options=["-- Select Row --"] + option_labels,
-                    key="capex_remove_choice",
-                )
-                if remove_btn_col.button("Remove Row", key="capex_remove_row"):
-                    if remove_choice in option_map:
-                        capex_table = _remove_capex_row(
-                            capex_table, option_map[remove_choice]
-                        )
-                        st.session_state.capex_remove_choice = "-- Select Row --"
-
-                inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
-
-                increment_column = inc_col.selectbox(
-                    "Increment column",
-                    options=["Spend", "Depreciation Rate %"],
-                    key="capex_increment_column",
-                )
-                increment_pct = inc_pct_col.number_input(
-                    "Yearly increment (%)",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="capex_increment_pct",
-                )
-                if inc_btn_col.button("Apply increment", key="capex_apply_increment"):
-                    capex_table = _apply_capex_yearly_increment(
-                        capex_table, increment_column, increment_pct
-                    )
-
-                capex_editor = st.data_editor(
-                    capex_table,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="supp_capex_schedule",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Depreciation Rate %": st.column_config.NumberColumn(
-                            "Depreciation Rate (%)", format="%.2f", step=0.1
-                        ),
-                        "Spend": st.column_config.NumberColumn(
-                            "Spend", format="%.2f"
-                        ),
-                        "Depreciation": st.column_config.NumberColumn(
-                            "Depreciation", format="%.2f"
-                        ),
-                    },
-                )
-
-                synced_capex = _ensure_capex_schedule(capex_editor)
-                st.session_state.supplementary[name] = synced_capex
-
-                cleaned_capex = _clean_editor_table(synced_capex)
-                if cleaned_capex is not None:
-                    supplementary_tables[name] = _ensure_capex_schedule(cleaned_capex)
-                continue
-            if name == "Asset Schedules":
-                st.markdown("#### Asset Schedule")
-                asset_table = _ensure_asset_schedule(
-                    st.session_state.supplementary.get(name)
-                )
-
-                rate_series = pd.to_numeric(
-                    asset_table.get("Depreciation Rate %"), errors="coerce"
-                ).dropna()
-                addition_series = pd.to_numeric(
-                    asset_table.get("Additions"), errors="coerce"
-                ).dropna()
-
-                default_rate = float(rate_series.iloc[0]) if not rate_series.empty else 5.0
-                default_addition = (
-                    float(addition_series.iloc[0]) if not addition_series.empty else 0.0
-                )
-
-                st.session_state.setdefault("asset_rate_default", round(default_rate, 2))
-                st.session_state.setdefault("asset_add_base", default_addition)
-                st.session_state.setdefault("asset_add_increment", 0.0)
-                st.session_state.setdefault("asset_increment_column", "Depreciation Rate %")
-                st.session_state.setdefault("asset_increment_pct", 0.0)
-                st.session_state.setdefault("asset_remove_choice", "-- Select Row --")
-
-                rate_col, rate_btn_col, add_base_col, add_inc_col, add_btn_col = st.columns(
-                    [1, 1, 1, 1, 1]
-                )
-
-                rate_value = rate_col.number_input(
-                    "Default depreciation rate (%)",
-                    min_value=0.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="asset_rate_default",
-                )
-                if rate_btn_col.button("Apply rate to all", key="asset_apply_rate"):
-                    asset_table = _apply_asset_rate(asset_table, rate_value)
-
-                base_add_value = add_base_col.number_input(
-                    "Base additions",
-                    min_value=0.0,
-                    step=100.0,
-                    key="asset_add_base",
-                )
-                add_increment = add_inc_col.number_input(
-                    "Additions yearly increment (%)",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="asset_add_increment",
-                )
-                if add_btn_col.button(
-                    "Apply additions pattern", key="asset_apply_additions"
-                ):
-                    asset_table = _apply_asset_additions_pattern(
-                        asset_table, base_add_value, add_increment
-                    )
-
-                (
-                    add_row_col,
-                    remove_select_col,
-                    remove_btn_col,
-                    inc_column_col,
-                    inc_pct_col,
-                    inc_btn_col,
-                ) = st.columns([1, 2, 1, 1.5, 1, 1])
-
-                if add_row_col.button("Add Asset", key="asset_add_row"):
-                    asset_table = _add_asset_row(
-                        asset_table,
-                        default_rate=rate_value,
-                        default_additions=base_add_value,
-                    )
-
-                option_labels: list[str] = []
-                option_map: Dict[str, int] = {}
-                for idx, row in asset_table.iterrows():
-                    label_year = row.get("Year")
-                    label_asset = row.get("Asset") or "Unnamed"
-                    if pd.notna(label_year):
-                        label = f"{int(label_year)} – {label_asset}"
-                    else:
-                        label = str(label_asset)
-                    option_labels.append(label)
-                    option_map[label] = idx
-
-                remove_choice = remove_select_col.selectbox(
-                    "Select asset",
-                    options=["-- Select Row --"] + option_labels,
-                    key="asset_remove_choice",
-                )
-                if remove_btn_col.button("Remove Asset", key="asset_remove_row"):
-                    if remove_choice in option_map:
-                        asset_table = _remove_asset_row(
-                            asset_table, option_map[remove_choice]
-                        )
-                        st.session_state.asset_remove_choice = "-- Select Row --"
-
-                increment_column = inc_column_col.selectbox(
-                    "Increment column",
-                    options=[
-                        "Depreciation Rate %",
-                        "Additions",
-                        "Opening NBV",
-                        "Depreciation",
-                    ],
-                    key="asset_increment_column",
-                )
-                increment_pct = inc_pct_col.number_input(
-                    "Yearly increment (%)",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    step=0.1,
-                    key="asset_increment_pct",
-                )
-                if inc_btn_col.button("Apply increment", key="asset_apply_increment"):
-                    asset_table = _apply_asset_yearly_increment(
-                        asset_table, increment_column, increment_pct
-                    )
-
-                asset_editor = st.data_editor(
-                    asset_table,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="supp_asset_schedule",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Depreciation Rate %": st.column_config.NumberColumn(
-                            "Depreciation Rate (%)", format="%.2f", step=0.1
-                        ),
-                        "Depreciation": st.column_config.NumberColumn(
-                            "Depreciation", format="%.2f"
-                        ),
-                        "Closing NBV": st.column_config.NumberColumn(
-                            "Closing NBV", format="%.2f"
-                        ),
-                    },
-                )
-
-                synced_asset = _ensure_asset_schedule(asset_editor)
-                st.session_state.supplementary[name] = synced_asset
-
-                cleaned_asset = _clean_editor_table(synced_asset)
-                if cleaned_asset is not None:
-                    supplementary_tables[name] = _ensure_asset_schedule(cleaned_asset)
-                continue
-
-            with st.expander(name, expanded=False):
-                table = st.data_editor(
-                    st.session_state.supplementary.get(name, pd.DataFrame()),
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key=f"supp_{name}",
-                )
-            cleaned = _clean_editor_table(table)
-            if cleaned is not None:
-                supplementary_tables[name] = cleaned
-            st.session_state.supplementary[name] = table
 
     if core_editor is None:
         core_editor = st.session_state.core_schedule
@@ -2928,24 +5174,120 @@ def main() -> None:
         )
 
         with assumption_tabs[0]:
+            st.markdown("#### Scenario Controls")
+            scenario_table = _ensure_scenario_controls_table(
+                st.session_state.assumptions.get("Scenario Controls")
+            )
+            st.session_state.assumptions["Scenario Controls"] = scenario_table
+
+            def _save_scenario_controls(updated: pd.DataFrame) -> None:
+                ensured = _ensure_scenario_controls_table(updated)
+                st.session_state.assumptions["Scenario Controls"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::scenario_controls",
+                st.session_state.assumptions["Scenario Controls"],
+                _save_scenario_controls,
+            )
+
+            control_values = _scenario_controls_value_map(
+                st.session_state.assumptions["Scenario Controls"]
+            )
+            milk_default = control_values.get("Milk price change (%)", 0.0)
+            feed_default = control_values.get("Feed cost change (%)", 0.0)
+
             milk_price = st.slider(
-                "Milk price change (%)", min_value=-50, max_value=50, value=0, step=1
+                "Milk price change (%)",
+                min_value=-50,
+                max_value=50,
+                value=int(round(milk_default)),
+                step=1,
             )
+            if float(milk_price) != float(milk_default):
+                updated_table = _update_scenario_control_value(
+                    st.session_state.assumptions["Scenario Controls"],
+                    "Milk price change (%)",
+                    float(milk_price),
+                )
+                st.session_state.assumptions["Scenario Controls"] = updated_table
+                _clear_schedule_editor_state("assump::scenario_controls")
+
             feed_cost = st.slider(
-                "Feed cost change (%)", min_value=-50, max_value=50, value=0, step=1
+                "Feed cost change (%)",
+                min_value=-50,
+                max_value=50,
+                value=int(round(feed_default)),
+                step=1,
             )
-            run_clicked = st.button("Run Scenario", type="primary")
+            if float(feed_cost) != float(feed_default):
+                updated_table = _update_scenario_control_value(
+                    st.session_state.assumptions["Scenario Controls"],
+                    "Feed cost change (%)",
+                    float(feed_cost),
+                )
+                st.session_state.assumptions["Scenario Controls"] = updated_table
+                _clear_schedule_editor_state("assump::scenario_controls")
+
+            assumption_tables["Scenario Controls"] = st.session_state.assumptions[
+                "Scenario Controls"
+            ]
+            run_clicked = st.button("Run Scenarios", type="primary")
 
         with assumption_tabs[1]:
             st.markdown("#### Production Time Horizon")
-            production_editor = st.data_editor(
-                st.session_state.assumptions["Production Horizon"],
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_production",
+            production_table = _ensure_production_horizon_table(
+                st.session_state.assumptions.get("Production Horizon")
             )
-            st.session_state.assumptions["Production Horizon"] = production_editor
-            assumption_tables["Production Horizon"] = production_editor
+            st.session_state.assumptions["Production Horizon"] = production_table
+
+            defaults = production_table.iloc[0]
+            start_default = int(defaults.get("Start Year", 2024))
+            end_default = int(defaults.get("End Year", start_default))
+
+            st.session_state.setdefault("production_start_year", start_default)
+            st.session_state.setdefault("production_end_year", end_default)
+
+            year_options = _production_year_options(start_default, end_default)
+            if st.session_state.production_start_year not in year_options:
+                st.session_state.production_start_year = start_default
+
+            start_col, end_col = st.columns(2)
+
+            start_value = start_col.selectbox(
+                "Start year",
+                options=year_options,
+                key="production_start_year",
+            )
+
+            valid_end_options = [year for year in year_options if year >= start_value]
+            if not valid_end_options:
+                valid_end_options = [start_value]
+
+            if st.session_state.production_end_year not in valid_end_options:
+                st.session_state.production_end_year = valid_end_options[0]
+
+            end_value = end_col.selectbox(
+                "End year",
+                options=valid_end_options,
+                key="production_end_year",
+            )
+
+            if end_value < start_value:
+                st.session_state.production_end_year = start_value
+                end_value = start_value
+
+            if start_value != start_default or end_value != end_default:
+                updated_table = pd.DataFrame(
+                    {"Start Year": [start_value], "End Year": [end_value]}
+                )
+                st.session_state.assumptions["Production Horizon"] = updated_table
+                assumption_tables["Production Horizon"] = updated_table
+                _sync_production_horizon(start_value, end_value)
+                _ensure_default_results_loaded()
+                _ensure_active_scenario_selection()
+                _maybe_rerun()
+            else:
+                assumption_tables["Production Horizon"] = production_table
 
         with assumption_tabs[2]:
             st.markdown("#### Pricing Assumptions")
@@ -2964,6 +5306,7 @@ def main() -> None:
             if add_col.button("Add Product", key="pricing_add_row"):
                 pricing_table = _add_pricing_row(pricing_table)
                 st.session_state.assumptions["Pricing"] = pricing_table
+                _clear_schedule_editor_state("assump::pricing")
 
             option_labels: list[str] = []
             option_index: Dict[str, int] = {}
@@ -2991,6 +5334,7 @@ def main() -> None:
                     )
                     st.session_state.assumptions["Pricing"] = pricing_table
                     st.session_state.pricing_remove_choice = "-- Select Row --"
+                    _clear_schedule_editor_state("assump::pricing")
 
             inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
                 [2, 1.5, 1, 1]
@@ -3033,26 +5377,99 @@ def main() -> None:
                     st.session_state.get("pricing_increment_target"),
                 )
                 st.session_state.assumptions["Pricing"] = pricing_table
+                _clear_schedule_editor_state("assump::pricing")
 
-            pricing_editor = st.data_editor(
-                pricing_table,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_pricing",
-                column_config={
-                    "Year": st.column_config.NumberColumn("Year", step=1),
-                    "Base Price": st.column_config.NumberColumn(
-                        "Base Price", format="%.2f"
-                    ),
-                    "Price Growth %": st.column_config.NumberColumn(
-                        "Price Growth (%)", format="%.2f"
-                    ),
-                },
+            def _save_pricing(updated: pd.DataFrame) -> None:
+                ensured = _ensure_pricing_table(updated)
+                st.session_state.assumptions["Pricing"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::pricing",
+                st.session_state.assumptions["Pricing"],
+                _save_pricing,
             )
 
-            pricing_table = _ensure_pricing_table(pricing_editor)
-            st.session_state.assumptions["Pricing"] = pricing_table
-            assumption_tables["Pricing"] = pricing_table
+            st.session_state.setdefault("pricing_defaults_edit_mode", False)
+            toggle_label = (
+                "Hide default pricing assumptions"
+                if st.session_state.pricing_defaults_edit_mode
+                else "Edit default pricing assumptions"
+            )
+            if st.button(toggle_label, key="toggle_pricing_defaults"):
+                st.session_state.pricing_defaults_edit_mode = not st.session_state[
+                    "pricing_defaults_edit_mode"
+                ]
+
+            if st.session_state.pricing_defaults_edit_mode:
+                st.markdown("##### Default Pricing Assumptions")
+                st.caption(
+                    "Edit the baseline pricing table applied when resetting these assumptions."
+                )
+
+                pricing_columns = [
+                    "Year",
+                    "Product",
+                    "Unit",
+                    "Base Price",
+                    "Price Growth %",
+                ]
+                default_frame = st.session_state.get("default_pricing_editor")
+                if not isinstance(default_frame, pd.DataFrame):
+                    default_frame = _template_to_dataframe(
+                        _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
+                    )
+
+                template_editor = st.data_editor(
+                    default_frame,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="default_pricing_editor",
+                    column_config={
+                        "Year": st.column_config.NumberColumn("Year", step=1),
+                        "Base Price": st.column_config.NumberColumn(
+                            "Base Price", format="%.2f"
+                        ),
+                        "Price Growth %": st.column_config.NumberColumn(
+                            "Price Growth (%)", format="%.2f"
+                        ),
+                    },
+                )
+
+                button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                if button_col.button("Close editor", key="close_pricing_defaults"):
+                    st.session_state.pricing_defaults_edit_mode = False
+
+                if save_col.button("Save defaults", key="save_pricing_defaults"):
+                    records = _dataframe_to_template(template_editor, pricing_columns)
+                    _set_template("pricing_rows", records)
+                    st.success("Pricing defaults updated.")
+
+                if restore_col.button("Restore baseline", key="reset_pricing_defaults"):
+                    baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
+                    _set_template("pricing_rows", baseline_template)
+                    pricing_table = _default_pricing_table()
+                    st.session_state.assumptions["Pricing"] = pricing_table
+                    st.session_state["default_pricing_editor"] = _template_to_dataframe(
+                        baseline_template, pricing_columns
+                    )
+                    st.success(
+                        "Pricing defaults restored and assumptions refreshed."
+                    )
+                    _clear_schedule_editor_state("assump::pricing")
+
+                if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
+                    records = _dataframe_to_template(template_editor, pricing_columns)
+                    _set_template("pricing_rows", records)
+                    pricing_table = _default_pricing_table()
+                    st.session_state.assumptions["Pricing"] = pricing_table
+                    st.session_state["default_pricing_editor"] = template_editor
+                    st.success(
+                        "Pricing assumptions refreshed from updated defaults."
+                    )
+                    _clear_schedule_editor_state("assump::pricing")
+
+            assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
         with assumption_tabs[3]:
             st.markdown("#### Operating Cost Assumptions")
@@ -3071,6 +5488,7 @@ def main() -> None:
             if add_col.button("Add Item", key="operating_add_row"):
                 operating_table = _add_operating_cost_row(operating_table)
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                _clear_schedule_editor_state("assump::operating_costs")
 
             option_labels: list[str] = []
             option_index: Dict[str, int] = {}
@@ -3098,6 +5516,7 @@ def main() -> None:
                     )
                     st.session_state.assumptions["Operating Costs"] = operating_table
                     st.session_state["operating_remove_choice"] = "-- Select Item --"
+                    _clear_schedule_editor_state("assump::operating_costs")
 
             inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
                 [2, 1.5, 1, 1]
@@ -3140,58 +5559,149 @@ def main() -> None:
                     st.session_state.get("operating_increment_column", "Monthly Cost"),
                 )
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                _clear_schedule_editor_state("assump::operating_costs")
 
-            operating_editor = st.data_editor(
-                operating_table,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_operating",
-                column_config={
-                    "Year": st.column_config.NumberColumn(
-                        "Year", format="%d", step=1, min_value=1900
-                    ),
-                    "Monthly Cost": st.column_config.NumberColumn(
-                        "Monthly Cost", format="%.2f"
-                    ),
-                    "Inflation %": st.column_config.NumberColumn(
-                        "Inflation (%)", format="%.2f"
-                    ),
-                },
+            def _save_operating(updated: pd.DataFrame) -> None:
+                ensured = _ensure_operating_cost_table(updated)
+                st.session_state.assumptions["Operating Costs"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::operating_costs",
+                st.session_state.assumptions["Operating Costs"],
+                _save_operating,
             )
 
-            operating_table = _ensure_operating_cost_table(operating_editor)
-            st.session_state.assumptions["Operating Costs"] = operating_table
-            assumption_tables["Operating Costs"] = operating_table
+            st.session_state.setdefault("operating_defaults_edit_mode", False)
+            toggle_label = (
+                "Hide default operating cost assumptions"
+                if st.session_state.operating_defaults_edit_mode
+                else "Edit default operating cost assumptions"
+            )
+            if st.button(toggle_label, key="toggle_operating_defaults"):
+                st.session_state.operating_defaults_edit_mode = not st.session_state[
+                    "operating_defaults_edit_mode"
+                ]
+
+            if st.session_state.operating_defaults_edit_mode:
+                st.markdown("##### Default Operating Cost Assumptions")
+                st.caption(
+                    "Update the baseline operating cost table used when refreshing these assumptions."
+                )
+
+                operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
+                default_frame = st.session_state.get("default_operating_editor")
+                if not isinstance(default_frame, pd.DataFrame):
+                    default_frame = _template_to_dataframe(
+                        _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
+                        operating_columns,
+                    )
+
+                template_editor = st.data_editor(
+                    default_frame,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="default_operating_editor",
+                    column_config={
+                        "Year": st.column_config.NumberColumn("Year", step=1),
+                        "Monthly Cost": st.column_config.NumberColumn(
+                            "Monthly Cost", format="%.2f"
+                        ),
+                        "Inflation %": st.column_config.NumberColumn(
+                            "Inflation (%)", format="%.2f"
+                        ),
+                    },
+                )
+
+                button_col, save_col, restore_col, apply_col = st.columns(4)
+
+                if button_col.button("Close editor", key="close_operating_defaults"):
+                    st.session_state.operating_defaults_edit_mode = False
+
+                if save_col.button("Save defaults", key="save_operating_defaults"):
+                    records = _dataframe_to_template(template_editor, operating_columns)
+                    _set_template("operating_rows", records)
+                    st.success("Operating cost defaults updated.")
+
+                if restore_col.button("Restore baseline", key="reset_operating_defaults"):
+                    baseline_template = _template_copy(DEFAULT_OPERATING_COST_ROWS)
+                    _set_template("operating_rows", baseline_template)
+                    operating_table = _default_operating_cost_table()
+                    st.session_state.assumptions["Operating Costs"] = operating_table
+                    st.session_state["default_operating_editor"] = _template_to_dataframe(
+                        baseline_template, operating_columns
+                    )
+                    st.success(
+                        "Operating cost defaults restored and assumptions refreshed."
+                    )
+                    _clear_schedule_editor_state("assump::operating_costs")
+
+                if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
+                    records = _dataframe_to_template(template_editor, operating_columns)
+                    _set_template("operating_rows", records)
+                    operating_table = _default_operating_cost_table()
+                    st.session_state.assumptions["Operating Costs"] = operating_table
+                    st.session_state["default_operating_editor"] = template_editor
+                    st.success(
+                        "Operating cost assumptions refreshed from updated defaults."
+                    )
+                    _clear_schedule_editor_state("assump::operating_costs")
+
+            assumption_tables["Operating Costs"] = st.session_state.assumptions[
+                "Operating Costs"
+            ]
 
         with assumption_tabs[4]:
             st.markdown("#### Capital & Financing Assumptions")
-            capital_editor = st.data_editor(
-                st.session_state.assumptions["Capital & Financing"],
-                num_rows="dynamic",
-                use_container_width=True,
-                key="assump_capital",
+            capital_table = _ensure_capital_financing_table(
+                st.session_state.assumptions.get("Capital & Financing")
             )
-            st.session_state.assumptions["Capital & Financing"] = capital_editor
-            assumption_tables["Capital & Financing"] = capital_editor
+            st.session_state.assumptions["Capital & Financing"] = capital_table
+
+            def _save_capital(updated: pd.DataFrame) -> None:
+                ensured = _ensure_capital_financing_table(updated)
+                st.session_state.assumptions["Capital & Financing"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::capital_financing",
+                st.session_state.assumptions["Capital & Financing"],
+                _save_capital,
+            )
+            assumption_tables["Capital & Financing"] = st.session_state.assumptions[
+                "Capital & Financing"
+            ]
 
         with assumption_tabs[5]:
             include_valuation = st.checkbox("Include valuation inputs", value=True)
+            valuation_table = _ensure_valuation_inputs_table(
+                st.session_state.assumptions.get("Valuation Inputs")
+            )
+            st.session_state.assumptions["Valuation Inputs"] = valuation_table
+
+            def _save_valuation(updated: pd.DataFrame) -> None:
+                ensured = _ensure_valuation_inputs_table(updated)
+                st.session_state.assumptions["Valuation Inputs"] = ensured
+
+            _render_schedule_row_editor(
+                "assump::valuation_inputs",
+                st.session_state.assumptions["Valuation Inputs"],
+                _save_valuation,
+            )
+
             if include_valuation:
-                wacc_pct = st.number_input("WACC (%)", value=12.0, step=0.1)
-                npv_value = st.number_input("NPV", value=750000.0, step=10000.0)
-                terminal_value = st.number_input(
-                    "Terminal Value", value=1500000.0, step=10000.0
+                valuation_inputs = _valuation_table_to_inputs(
+                    st.session_state.assumptions["Valuation Inputs"]
                 )
-                valuation_inputs = {
-                    "WACC": wacc_pct / 100.0,
-                    "NPV": npv_value,
-                    "Terminal Value": terminal_value,
-                }
+            else:
+                valuation_inputs = {}
+
+            assumption_tables["Valuation Inputs"] = st.session_state.assumptions[
+                "Valuation Inputs"
+            ]
 
     with tabs[2]:
         st.subheader("Financial Statements")
         if st.session_state.results is None:
-            st.info("Run the scenario to generate the financial statements.")
+            st.info("Run the scenarios to generate the financial statements.")
         else:
             results = st.session_state.results
             financial_tabs = st.tabs(
@@ -3202,6 +5712,8 @@ def main() -> None:
                 ]
             )
 
+            scenario_label = results.get("selected_scenario", "Scenario")
+
             with financial_tabs[0]:
                 try:
                     sop_base = results["model"].statement_of_financial_performance(
@@ -3211,28 +5723,57 @@ def main() -> None:
                         results["scenario"], annual=True
                     )
                     st.dataframe(
-                        pd.concat({"Base": sop_base, "Scenario": sop_scenario}, axis=1)
+                        pd.concat(
+                            {"Base": sop_base, scenario_label: sop_scenario}, axis=1
+                        )
                         .swaplevel(axis=1)
                         .sort_index(axis=1, level=0)
+                    )
+                    _render_financial_performance_charts(
+                        sop_base, sop_scenario, scenario_label
                     )
                 except ValueError as exc:
                     st.info(str(exc))
 
             with financial_tabs[1]:
                 try:
-                    sofp = results["model"].statement_of_financial_position(
+                    sofp_base = results["model"].statement_of_financial_position(
                         results["base"], annual=True
                     )
-                    st.dataframe(sofp)
+                    sofp_scenario = results["model"].statement_of_financial_position(
+                        results["scenario"], annual=True
+                    )
+                    st.dataframe(
+                        pd.concat(
+                            {"Base": sofp_base, scenario_label: sofp_scenario}, axis=1
+                        )
+                        .swaplevel(axis=1)
+                        .sort_index(axis=1, level=0)
+                    )
+                    _render_financial_position_charts(
+                        sofp_base, sofp_scenario, scenario_label
+                    )
                 except ValueError as exc:
                     st.info(str(exc))
 
             with financial_tabs[2]:
                 try:
-                    socf = results["model"].statement_of_cash_flow(
+                    socf_base = results["model"].statement_of_cash_flow(
                         results["base"], annual=True
                     )
-                    st.dataframe(socf)
+                    socf_scenario = results["model"].statement_of_cash_flow(
+                        results["scenario"], annual=True
+                    )
+                    st.dataframe(
+                        pd.concat(
+                            {"Base": socf_base, scenario_label: socf_scenario}, axis=1
+                        )
+                        .swaplevel(axis=1)
+                        .sort_index(axis=1, level=0)
+                    )
+                    _render_cash_flow_charts(
+                        socf_base, socf_scenario, scenario_label
+                    )
                 except ValueError as exc:
                     st.info(str(exc))
 
@@ -3311,48 +5852,71 @@ def main() -> None:
             if cleaned is not None:
                 combined_supplementary[f"Assumptions - {name}"] = cleaned
 
+        custom_adjustments = {
+            "Milk price change (%)": float(milk_price),
+            "Feed cost change (%)": float(feed_cost),
+        }
+
+        current_presets = _current_scenario_presets()
+        matches_preset = any(
+            np.isclose(
+                custom_adjustments["Milk price change (%)"],
+                preset["adjustments"].get("Milk price change (%)", 0.0),
+            )
+            and np.isclose(
+                custom_adjustments["Feed cost change (%)"],
+                preset["adjustments"].get("Feed cost change (%)", 0.0),
+            )
+            for preset in current_presets.values()
+        )
+
+        scenario_suite = _build_scenario_suite()
+
+        if not matches_preset:
+            suffix = _format_scenario_label(
+                int(round(custom_adjustments["Milk price change (%)"])),
+                int(round(custom_adjustments["Feed cost change (%)"])),
+            )
+            custom_label = (
+                "Custom Scenario"
+                if suffix == "Base Scenario"
+                else f"Custom Scenario – {suffix}"
+            )
+            scenario_suite = _build_scenario_suite(custom_label, custom_adjustments)
+
         try:
-            (
-                model,
-                base,
-                scenario,
-                kpis,
-                break_even,
-            ) = _run_model(
+            model, _, scenario_results = _execute_scenario_suite(
                 schedule_df,
                 valuation_inputs,
                 combined_supplementary,
-                milk_price / 100.0,
-                feed_cost / 100.0,
+                scenario_suite,
             )
         except ValueError as exc:
             st.error(str(exc))
             return
 
-        st.success("Scenario complete")
+        st.success("Scenario suite complete")
 
-        selected_scenario = _format_scenario_label(milk_price, feed_cost)
-        scenario_inputs = {
-            "Milk price change (%)": milk_price,
-            "Feed cost change (%)": feed_cost,
-        }
+        st.session_state.all_scenario_results = scenario_results
 
-        st.session_state.results = {
-            "model": model,
-            "base": base,
-            "scenario": scenario,
-            "kpis": kpis,
-            "break_even": break_even,
-            "supplementary": combined_supplementary,
-            "selected_scenario": selected_scenario,
-            "scenario_inputs": scenario_inputs,
-        }
+        previous_selection = st.session_state.get("selected_scenario_name")
+        if previous_selection not in scenario_results:
+            previous_selection = "Base Case Scenario"
+            if previous_selection not in scenario_results:
+                previous_selection = next(iter(scenario_results))
+
+        st.session_state.selected_scenario_name = previous_selection
+        st.session_state.results = scenario_results[previous_selection]
+        st.session_state.excel_bytes_map = {}
 
     results = st.session_state.results
 
     if results is None:
+        with excel_download_container:
+            st.info("Run a scenario to enable the Excel model download.")
+
         st.info(
-            "Update the input schedule, adjust the sliders, and press *Run Scenario* "
+            "Update the input schedule, adjust the sliders, and press *Run Scenarios* "
             "to evaluate alternative assumptions."
         )
     else:
@@ -3381,12 +5945,11 @@ def main() -> None:
                     summary_cols[idx].metric(label, f"{value:,.2f}")
                 idx += 1
 
-        download_container = st.container()
         excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
         excel_bytes = excel_map.get(selected_scenario)
         key_suffix = _scenario_key_suffix(selected_scenario)
 
-        with download_container:
+        with excel_download_container:
             st.markdown("#### Excel Model Download")
             if not excel_bytes:
                 if st.button(
@@ -3395,7 +5958,10 @@ def main() -> None:
                 ):
                     with st.spinner("Preparing Excel workbook..."):
                         excel_bytes = _generate_excel_bytes(
-                            model, results, selected_scenario
+                            model,
+                            results,
+                            selected_scenario,
+                            _current_model_author(),
                         )
                     excel_map[selected_scenario] = excel_bytes
                     st.session_state.excel_bytes_map = excel_map
@@ -3417,14 +5983,14 @@ def main() -> None:
             if not excel_bytes:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
-        st.subheader("KPIs (Annual)")
-        st.dataframe(kpis.mul(100).round(2))
-
     with tabs[3]:
         st.subheader("Dashboard")
         if results is None:
-            st.info("Run the scenario to populate the dashboard charts.")
+            st.info("Run the scenarios to populate the dashboard charts.")
         else:
+            st.subheader("KPIs (Annual)")
+            st.dataframe(kpis.mul(100).round(2))
+
             scenario = results["scenario"]
             break_even = results["break_even"]
             col1, col2 = st.columns(2)
@@ -3463,18 +6029,212 @@ def main() -> None:
 
     with tabs[4]:
         st.subheader("Advanced Analytics")
+        st.markdown(
+            "Complement Monte Carlo simulation with the following advanced analytics to"
+            " deepen scenario insights:"
+        )
+        st.markdown(
+            """
+- **Sensitivity analysis** to quantify how key drivers such as milk prices, feed costs, or herd productivity shift profitability.
+- **Scenario stress testing** that applies severe but plausible shocks (e.g., drought, disease outbreaks) to evaluate resilience.
+- **Trend and seasonality decomposition** on production and revenue series to isolate structural shifts from cyclical effects.
+- **Customer and product segmentation analysis** to spotlight high-margin channels and inform targeted growth initiatives.
+- **Monte Carlo simulation** to capture probabilistic distributions for revenues, costs, and valuation metrics.
+- **What-if analysis** to interactively adjust assumptions and observe real-time impacts on key outputs.
+- **Goal seek** routines to solve for the input levels required to hit specific profitability or liquidity targets.
+- **Tornado charts & spider diagrams** to visualise which assumptions have the greatest impact on outputs like NPV or IRR.
+- **Regression modeling** to predict revenues, costs, or asset performance based on historical data.
+- **Time series analysis (ARIMA, Prophet, LSTM)** for modelling cyclical or seasonal patterns in revenues, commodity prices, or expenses.
+- **Classification models** for credit risk, churn, or customer segmentation in finance-related business models.
+- **Linear and nonlinear optimization** to maximise profit or minimise cost given resource or capital constraints.
+- **Portfolio optimization** applying mean-variance or robust techniques to balance risk versus return across herds or product lines.
+- **Real options analysis** to incorporate managerial flexibility around deferring, expanding, or abandoning initiatives.
+- **Value at Risk (VaR) / Conditional VaR** to estimate potential losses under adverse conditions.
+- **Stress testing** that simulates extreme yet plausible shocks such as commodity price collapses or rapid interest-rate hikes.
+- **Copula models** to capture correlations between multiple risk factors (e.g., FX and interest rates).
+- **Macroeconomic linking** that integrates inflation, GDP growth, or exchange rates into financial projections.
+- **ESG & sustainability metrics** to model the financial implications of emissions, carbon pricing, or renewable adoption.
+- **Market intelligence integration** blending sentiment data or industry forecasts for dynamic demand projections.
+- **Probabilistic valuation** to generate distributions of NPVs or IRRs rather than single-point estimates.
+- **Comparative valuation with clustering** to benchmark projects or farms against statistically similar peers.
+- **Machine learning–based valuation** that trains models on historical market data to predict multiples or fair values.
+            """
+        )
         if results is None:
-            st.info("Run the scenario to view advanced analytics.")
+            st.info("Run the scenarios to view advanced analytics.")
         else:
             scenario = results["scenario"]
             model = results["model"]
             try:
-                adv_monthly = model.advanced_analytics(scenario, window=3, annual=False)
                 adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
-                st.markdown("#### Monthly Advanced Analytics")
-                st.dataframe(adv_monthly)
-                st.markdown("#### Annual Advanced Analytics")
-                st.dataframe(adv_annual)
+
+                def _render_analytics(
+                    block_name: str, payload: Dict[str, object], scenario_label: str
+                ) -> None:
+                    st.markdown(f"#### {block_name} Advanced Analytics")
+                    for key, item in payload.items():
+                        title = item.get("title", key.replace("_", " ").title())
+                        description = item.get("description", "")
+                        tables = item.get("tables", {})
+                        with st.expander(title, expanded=False):
+                            if description:
+                                st.caption(description)
+                            if isinstance(tables, dict):
+                                for table_name, table in tables.items():
+                                    st.markdown(f"**{table_name}**")
+                                    if not isinstance(table, pd.DataFrame):
+                                        st.info("No data available for this table.")
+                                        continue
+
+                                    override = _get_analytics_override(
+                                        scenario_label, block_name, key, table_name
+                                    )
+                                    display_df = override if override is not None else table
+                                    edit_flag_key = _analytics_edit_flag_key(
+                                        scenario_label, block_name, key, table_name
+                                    )
+                                    editor_key = _analytics_editor_key(
+                                        scenario_label, block_name, key, table_name
+                                    )
+
+                                    if not isinstance(display_df, pd.DataFrame):
+                                        st.info("No data available for this table.")
+                                        continue
+
+                                    editing = st.session_state.get(edit_flag_key, False)
+
+                                    if editing:
+                                        editor_df, meta = _prepare_editor_table(display_df)
+                                        working_key = f"{editor_key}::working"
+                                        working_df = st.session_state.get(working_key)
+                                        if working_df is None:
+                                            working_df = editor_df.copy(deep=True)
+                                            st.session_state[working_key] = working_df
+
+                                        st.dataframe(working_df)
+                                        if working_df.empty:
+                                            st.info(
+                                                "This table has no rows to edit. Update the model inputs to populate it."
+                                            )
+                                        else:
+                                            row_indices = list(range(len(working_df)))
+                                            selected_row = st.selectbox(
+                                                "Select a row to edit",
+                                                row_indices,
+                                                format_func=lambda idx: _format_row_label(
+                                                    working_df, idx
+                                                ),
+                                                key=f"{editor_key}_row_selector",
+                                            )
+                                            dtype_map = working_df.dtypes.to_dict()
+                                            row_series = working_df.iloc[selected_row]
+                                            with st.form(f"{editor_key}_row_form"):
+                                                updated_values: Dict[str, Any] = {}
+                                                for column in working_df.columns:
+                                                    widget_key = (
+                                                        f"{editor_key}::{selected_row}::{column}"
+                                                    )
+                                                    cell_value = row_series[column]
+                                                    updated_values[column] = _render_row_input(
+                                                        column,
+                                                        cell_value,
+                                                        dtype_map[column],
+                                                        widget_key,
+                                                    )
+
+                                                submitted = st.form_submit_button(
+                                                    "Apply Row Changes"
+                                                )
+                                                if submitted:
+                                                    for column, raw_value in (
+                                                        updated_values.items()
+                                                    ):
+                                                        coerced = _coerce_row_value(
+                                                            raw_value, dtype_map[column]
+                                                        )
+                                                        working_df.iat[
+                                                            selected_row,
+                                                            working_df.columns.get_loc(
+                                                                column
+                                                            ),
+                                                        ] = coerced
+                                                    st.session_state[working_key] = (
+                                                        working_df
+                                                    )
+                                                    _maybe_rerun()
+
+                                        action_cols = st.columns(3)
+                                        if action_cols[0].button(
+                                            "Save Changes",
+                                            key=f"save_{editor_key}",
+                                        ):
+                                            current_df = st.session_state.get(
+                                                working_key, editor_df
+                                            )
+                                            restored = _restore_editor_table(
+                                                current_df, meta
+                                            )
+                                            _set_analytics_override(
+                                                scenario_label,
+                                                block_name,
+                                                key,
+                                                table_name,
+                                                restored,
+                                            )
+                                            st.session_state.pop(working_key, None)
+                                            st.session_state[edit_flag_key] = False
+                                            _maybe_rerun()
+
+                                        if action_cols[1].button(
+                                            "Cancel",
+                                            key=f"cancel_{editor_key}",
+                                        ):
+                                            st.session_state.pop(working_key, None)
+                                            st.session_state[edit_flag_key] = False
+                                            _maybe_rerun()
+
+                                        if action_cols[2].button(
+                                            "Restore Original",
+                                            key=f"reset_{editor_key}",
+                                        ):
+                                            _clear_analytics_override(
+                                                scenario_label,
+                                                block_name,
+                                                key,
+                                                table_name,
+                                            )
+                                            st.session_state.pop(working_key, None)
+                                            st.session_state[edit_flag_key] = False
+                                            _maybe_rerun()
+                                    else:
+                                        st.dataframe(display_df)
+                                        if override is not None:
+                                            st.caption("Manual override applied.")
+                                        button_cols = st.columns(2)
+                                        if button_cols[0].button(
+                                            "Edit Table",
+                                            key=f"edit_{editor_key}",
+                                        ):
+                                            st.session_state[edit_flag_key] = True
+                                            _maybe_rerun()
+
+                                        if button_cols[1].button(
+                                            "Clear Manual Override",
+                                            key=f"clear_{editor_key}",
+                                            disabled=override is None,
+                                        ):
+                                            _clear_analytics_override(
+                                                scenario_label,
+                                                block_name,
+                                                key,
+                                                table_name,
+                                            )
+                                            _maybe_rerun()
+                            else:
+                                st.info("No tables available for this analysis.")
+
+                selected_scenario_name = results.get("selected_scenario", "Scenario")
+                _render_analytics("Annual", adv_annual, selected_scenario_name)
             except ValueError as exc:
                 st.info(str(exc))
 
