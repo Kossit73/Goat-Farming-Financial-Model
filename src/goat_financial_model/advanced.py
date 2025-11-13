@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+from .goat_model import DataQualityWarning, _coerce_numeric_frame
 
 
 def _safe_divide(numerator: np.ndarray | pd.Series, denominator: np.ndarray | pd.Series) -> np.ndarray:
@@ -56,6 +58,7 @@ class AdvancedAnalyticsSuite:
         self.terminal_value = self.assumptions.get("terminal value")
         self.terminal_growth = self.assumptions.get("terminal growth rate")
 
+        self.tax_rate_input = self._resolve_tax_rate_override()
         self.data = self._prepare_data()
         self.index = self.data.index
         self.periods_per_year = self._periods_per_year()
@@ -91,7 +94,8 @@ class AdvancedAnalyticsSuite:
         self.variable_ratio = self._ratio(self.variable_total + self.direct_total, self.revenue_total)
         self.cogs_ratio = self._ratio(self.cogs_total, self.revenue_total)
         self.fixed_admin_total = self.fixed_total + self.admin_total
-        self.tax_rate = self._derive_tax_rate()
+        self.tax_rate, self.tax_rate_source = self._derive_tax_rate()
+        self.tax_rate_note = self._format_tax_rate_note()
 
         self._cached_monte_carlo: Optional[pd.DataFrame] = None
 
@@ -111,9 +115,28 @@ class AdvancedAnalyticsSuite:
                 continue
         return normalised
 
+    def _resolve_tax_rate_override(self) -> Optional[float]:
+        for key in (
+            "tax rate",
+            "effective tax rate",
+            "tax_rate",
+            "taxrate",
+        ):
+            value = self.assumptions.get(key)
+            if value is None:
+                continue
+            try:
+                rate = float(value)
+            except (TypeError, ValueError):
+                continue
+            if rate > 1:
+                rate /= 100.0
+            return float(np.clip(rate, 0.0, 0.6))
+        return None
+
     def _prepare_data(self) -> pd.DataFrame:
         work = self.original.copy()
-        numeric = work.apply(pd.to_numeric, errors="coerce")
+        numeric = _coerce_numeric_frame(work, context="Advanced analytics input")
         if self.annual:
             index = numeric.index
             if not isinstance(index, pd.DatetimeIndex):
@@ -199,18 +222,30 @@ class AdvancedAnalyticsSuite:
             return 0.0
         return float(numerator) / float(denominator)
 
-    def _derive_tax_rate(self) -> float:
+    def _derive_tax_rate(self) -> Tuple[float, str]:
+        if self.tax_rate_input is not None:
+            return float(self.tax_rate_input), "override"
+
         npbt = self._series("NPBT")
         if npbt.empty:
             npbt_total = self.ebitda_total - self.depreciation_total - self.interest_total
         else:
             npbt_total = float(np.nansum(npbt))
         if npbt_total <= 0:
-            return 0.25
+            return 0.25, "fallback"
         candidate = self.tax_total / npbt_total if npbt_total else np.nan
         if not np.isfinite(candidate) or candidate < 0:
-            return 0.25
-        return float(np.clip(candidate, 0.0, 0.5))
+            return 0.25, "fallback"
+        return float(np.clip(candidate, 0.0, 0.5)), "historical"
+
+    def _format_tax_rate_note(self) -> str:
+        source_map = {
+            "override": "user override",
+            "historical": "derived from historical data",
+            "fallback": "default fallback",
+        }
+        label = source_map.get(self.tax_rate_source, self.tax_rate_source)
+        return f"Effective tax rate assumed: {self.tax_rate:.1%} ({label})."
 
     # ------------------------------------------------------------------
     # Core simulation helpers
@@ -265,29 +300,63 @@ class AdvancedAnalyticsSuite:
             return self._cached_monte_carlo
 
         revenue_base = self.revenue.to_numpy()
-        revenue_std = np.nanstd(revenue_base, ddof=1)
+        if periods >= 2:
+            revenue_std = np.nanstd(revenue_base, ddof=1)
+        else:
+            revenue_std = 0.0
         if not np.isfinite(revenue_std) or revenue_std < 1e-6:
             revenue_std = max(abs(np.nanmean(revenue_base)) * 0.05, 1.0)
 
         draws = 2000
         revenue_shocks = self.random.normal(0.0, revenue_std, size=(draws, periods))
-        revenue_sim = np.clip(revenue_base + revenue_shocks, 1e-6, None)
+        revenue_sim = np.clip(revenue_base + revenue_shocks, 0.0, None)
 
-        cogs_ratio = np.clip(self.cogs_ratio, 0.0, 1.0)
-        cogs_sim = revenue_sim * self.random.normal(cogs_ratio, max(cogs_ratio * 0.05, 0.01), size=(draws, periods))
-        variable_ratio = np.clip(self.variable_ratio, 0.0, 1.0)
-        variable_sim = revenue_sim * self.random.normal(variable_ratio, max(variable_ratio * 0.05, 0.01), size=(draws, periods))
-        fixed = self.fixed_admin_total / max(periods, 1)
+        cogs_ratio = np.clip(self.cogs_ratio, 0.0, 0.95)
+        cogs_sigma = max(cogs_ratio * 0.05, 0.01)
+        cogs_draws = self.random.normal(cogs_ratio, cogs_sigma, size=(draws, periods))
+        cogs_draws = np.clip(cogs_draws, 0.0, 0.98)
+        cogs_sim = revenue_sim * cogs_draws
+
+        variable_ratio = np.clip(self.variable_ratio, 0.0, 0.9)
+        variable_sigma = max(variable_ratio * 0.05, 0.01)
+        variable_draws = self.random.normal(variable_ratio, variable_sigma, size=(draws, periods))
+        variable_draws = np.clip(variable_draws, 0.0, 0.95)
+        variable_sim = revenue_sim * variable_draws
+        variable_cap = np.clip(revenue_sim - cogs_sim, 0.0, None)
+        variable_sim = np.minimum(variable_sim, variable_cap)
+
+        fixed_base = (
+            (self.fixed_expenses + self.admin_wages)
+            .reindex(self.index, fill_value=0.0)
+            .to_numpy(dtype=float)
+        )
+        fixed_sim = np.tile(fixed_base, (draws, 1))
+        fixed_noise = np.clip(self.random.normal(1.0, 0.03, size=(draws, periods)), 0.85, 1.15)
+        fixed_sim = np.clip(fixed_sim * fixed_noise, 0.0, None)
 
         gross_margin_sim = revenue_sim - cogs_sim
-        ebitda_sim = gross_margin_sim - variable_sim - fixed
-        depreciation = self.depreciation_total / max(periods, 1)
-        ebit_sim = ebitda_sim - depreciation
-        interest = self.interest_total / max(periods, 1)
-        npbt_sim = ebit_sim - interest
+        ebitda_sim = gross_margin_sim - variable_sim - fixed_sim
+
+        depreciation_base = self.depreciation.reindex(self.index, fill_value=0.0).to_numpy(dtype=float)
+        depreciation_sim = np.tile(depreciation_base, (draws, 1))
+        dep_noise = np.clip(self.random.normal(1.0, 0.05, size=(draws, periods)), 0.7, 1.3)
+        depreciation_sim = np.clip(depreciation_sim * dep_noise, 0.0, None)
+
+        ebit_sim = ebitda_sim - depreciation_sim
+
+        interest_base = self.interest.reindex(self.index, fill_value=0.0).to_numpy(dtype=float)
+        interest_sim = np.tile(interest_base, (draws, 1))
+        interest_noise = np.clip(self.random.normal(1.0, 0.08, size=(draws, periods)), 0.5, 1.5)
+        interest_sim = np.clip(interest_sim * interest_noise, 0.0, None)
+
+        npbt_sim = ebit_sim - interest_sim
         tax_sim = np.maximum(npbt_sim, 0.0) * self.tax_rate
         npat_sim = npbt_sim - tax_sim
-        cash_flow_sim = ebitda_sim - (self.capex_total / max(periods, 1))
+        capex_base = self.capex.reindex(self.index, fill_value=0.0).to_numpy(dtype=float)
+        capex_sim = np.tile(capex_base, (draws, 1))
+        capex_noise = np.clip(self.random.normal(1.0, 0.1, size=(draws, periods)), 0.5, 1.5)
+        capex_sim = capex_sim * capex_noise
+        cash_flow_sim = ebitda_sim - capex_sim
 
         discount_factors = 1 / (1 + self.period_rate) ** np.arange(1, periods + 1)
         npv = (cash_flow_sim * discount_factors).sum(axis=1)
@@ -487,7 +556,10 @@ class AdvancedAnalyticsSuite:
 
         return AnalysisResult(
             title="Monte Carlo Simulation",
-            description="Simulates profitability and valuation distributions by stochastically varying revenue and cost drivers.",
+            description=(
+                "Simulates profitability and valuation distributions by stochastically varying revenue and cost drivers. "
+                + self.tax_rate_note
+            ),
             tables={"Summary Statistics": summary},
         )
 
@@ -849,7 +921,10 @@ class AdvancedAnalyticsSuite:
 
         return AnalysisResult(
             title="Value at Risk",
-            description="Estimates VaR and CVaR for NPAT and simulated valuation outcomes using Monte Carlo distributions.",
+            description=(
+                "Estimates VaR and CVaR for NPAT and simulated valuation outcomes using Monte Carlo distributions. "
+                + self.tax_rate_note
+            ),
             tables={"Risk Metrics": table},
         )
 
@@ -982,7 +1057,10 @@ class AdvancedAnalyticsSuite:
             table = stats.to_frame(name="NPV Distribution")
         return AnalysisResult(
             title="Probabilistic Valuation",
-            description="Converts simulated cash flows into an NPV distribution using the supplied discount assumptions to quantify valuation uncertainty.",
+            description=(
+                "Converts simulated cash flows into an NPV distribution using the supplied discount assumptions to quantify valuation uncertainty. "
+                + self.tax_rate_note
+            ),
             tables={"Valuation Distribution": table},
         )
 
