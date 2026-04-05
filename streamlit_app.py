@@ -4008,13 +4008,6 @@ def main() -> None:
 
     _ensure_active_scenario_selection()
 
-    scenario_selector = st.container()
-    with scenario_selector:
-        st.markdown("### Scenario Explorer")
-        _render_model_author_editor()
-        _render_scenario_selector()
-        _render_scenario_preset_editors()
-
     excel_download_container = st.container()
 
     ai_payload = st.session_state.setdefault("ai_payload", {})
@@ -4042,6 +4035,10 @@ def main() -> None:
 
     with tabs[0]:
         st.subheader("Input Schedule")
+        st.markdown("### Scenario Explorer")
+        _render_model_author_editor()
+        _render_scenario_selector()
+        _render_scenario_preset_editors()
         st.markdown("### AI & Machine Learning")
         _render_ai_settings(ai_payload)
 
