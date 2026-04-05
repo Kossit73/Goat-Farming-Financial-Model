@@ -4359,6 +4359,7 @@ def main() -> None:
     tabs = st.tabs(
         [
             "Input Schedule",
+            "AI Decision Making",
             "Assumptions",
             "Financials",
             "Dashboard",
@@ -4372,8 +4373,6 @@ def main() -> None:
         _render_model_author_editor()
         _render_scenario_selector()
         _render_scenario_preset_editors()
-        st.markdown("### AI & Machine Learning")
-        _render_ai_settings(ai_payload)
 
         schedule_tab_names = [
             "Core Schedule",
@@ -5489,6 +5488,11 @@ def main() -> None:
     assumption_tables: Dict[str, pd.DataFrame] = {}
 
     with tabs[1]:
+        st.subheader("AI Decision Making")
+        st.markdown("Configure AI provider, model, ML methods, and narrative outputs.")
+        _render_ai_settings(ai_payload)
+
+    with tabs[2]:
         st.subheader("Assumptions")
         st.caption(
             "All core model assumption categories are consolidated below on a single page."
@@ -6017,7 +6021,7 @@ def main() -> None:
             "Valuation Inputs"
         ]
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("Financial Statements")
         if st.session_state.results is None:
             st.info("Run the scenarios to generate the financial statements.")
@@ -6302,7 +6306,7 @@ def main() -> None:
             if not excel_bytes:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Dashboard")
         if results is None:
             st.info("Run the scenarios to populate the dashboard charts.")
@@ -6361,7 +6365,7 @@ def main() -> None:
             ]:
                 _render_table(name, supplementary_render.get(name))
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Advanced Analytics")
         st.markdown(
             "Use the framework below to configure inputs, assumptions, model drivers, "
