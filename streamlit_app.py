@@ -4363,7 +4363,6 @@ def main() -> None:
             "Financials",
             "Dashboard",
             "Advanced Analytics",
-            "Supplementary Schedules",
         ]
     )
 
@@ -6307,6 +6306,9 @@ def main() -> None:
         st.subheader("Dashboard")
         if results is None:
             st.info("Run the scenarios to populate the dashboard charts.")
+            st.markdown("---")
+            st.subheader("Supplementary Schedules")
+            st.info("Supplementary schedules will appear once a scenario has been run.")
         else:
             st.subheader("KPIs (Annual)")
             st.dataframe(kpis.mul(100).round(2))
@@ -6346,6 +6348,18 @@ def main() -> None:
                 file_name="scenario_timeseries.csv",
                 mime="text/csv",
             )
+
+            st.markdown("---")
+            st.subheader("Supplementary Schedules")
+            supplementary_render = results.get("supplementary", {})
+            for name in [
+                "Capitalisation Table",
+                "Capex Schedule",
+                "Asset Schedules",
+                "Outputs",
+                "Benchmark KPIs",
+            ]:
+                _render_table(name, supplementary_render.get(name))
 
     with tabs[4]:
         st.subheader("Advanced Analytics")
@@ -6531,22 +6545,6 @@ def main() -> None:
                 _render_analytics("Annual", adv_annual, selected_scenario_name)
             except ValueError as exc:
                 st.info(str(exc))
-
-    with tabs[5]:
-        st.subheader("Supplementary Schedules")
-        if results is None:
-            st.info("Supplementary schedules will appear once a scenario has been run.")
-        else:
-            supplementary_render = results.get("supplementary", {})
-            for name in [
-                "Capitalisation Table",
-                "Capex Schedule",
-                "Asset Schedules",
-                "Outputs",
-                "Benchmark KPIs",
-            ]:
-                _render_table(name, supplementary_render.get(name))
-
 
 if __name__ == "__main__":
     main()
