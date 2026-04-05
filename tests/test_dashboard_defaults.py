@@ -166,3 +166,19 @@ def test_rebase_schedule_to_horizon_extends_periods():
     cogs_periods = pd.to_datetime(cogs_table["Period"], errors="coerce").dropna()
     assert cogs_periods.max().year == 2027
     assert not cogs_table.loc[cogs_periods.dt.year == 2027, "COGS"].isna().all()
+
+
+def test_ensure_operating_cost_table_forward_fills_years_without_fillna_method_kwarg():
+    raw = pd.DataFrame(
+        {
+            "Year": [2024, None, 2026],
+            "Category": ["Utilities", "Utilities", "Utilities"],
+            "Monthly Cost": [1000.0, 1100.0, 1200.0],
+            "Inflation %": [3.0, 3.0, 3.0],
+        }
+    )
+
+    table = streamlit_app._ensure_operating_cost_table(raw)
+
+    assert table["Year"].dtype.name == "Int64"
+    assert table["Year"].tolist() == [2024, 2024, 2026]

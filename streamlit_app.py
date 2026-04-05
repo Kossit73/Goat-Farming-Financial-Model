@@ -2049,9 +2049,7 @@ def _ensure_operating_cost_table(
     if work["Year"].isna().all():
         work["Year"] = pd.Timestamp.today().year
     else:
-        work["Year"] = work["Year"].fillna(method="ffill").fillna(
-            work["Year"].dropna().min()
-        )
+        work["Year"] = work["Year"].ffill().fillna(work["Year"].dropna().min())
         work["Year"] = work["Year"].fillna(pd.Timestamp.today().year)
     work["Year"] = work["Year"].round().astype("Int64")
 
