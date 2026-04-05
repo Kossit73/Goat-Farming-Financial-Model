@@ -4302,6 +4302,360 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
     st.session_state["analytics_framework"] = framework
 
 
+def _orchestration_default_config() -> Dict[str, Any]:
+    return {
+        "investor_profile": "Growth + resilience",
+        "planning_horizon_years": 5,
+        "target_irr": 0.18,
+        "target_ebitda_margin": 0.25,
+        "min_governance_score": 80.0,
+        "response_style": "Strategic and concise",
+        "proactive_mode": True,
+    }
+
+
+def _ai_orchestration_store() -> Dict[str, Any]:
+    config = st.session_state.setdefault(
+        "ai_orchestration_config", _orchestration_default_config()
+    )
+    st.session_state.setdefault("ai_orchestration_chat_history", [])
+    st.session_state.setdefault("ai_orchestration_last_query", "")
+    return config
+
+
+def _flatten_numeric_summary(df: Optional[pd.DataFrame], label: str) -> Dict[str, float]:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+    numeric = df.select_dtypes(include=[np.number])
+    if numeric.empty:
+        return {}
+    return {f"{label}:{col}": float(numeric[col].mean()) for col in numeric.columns}
+
+
+def _build_orchestration_snapshot(results: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    assumptions = st.session_state.get("assumptions", {})
+    supplementary = st.session_state.get("supplementary", {})
+    analytics_framework = st.session_state.get("analytics_framework", {})
+
+    assumption_summaries: Dict[str, float] = {}
+    if isinstance(assumptions, dict):
+        for name, table in assumptions.items():
+            assumption_summaries.update(_flatten_numeric_summary(table, f"assumption.{name}"))
+
+    supplementary_summaries: Dict[str, float] = {}
+    if isinstance(supplementary, dict):
+        for name, table in supplementary.items():
+            supplementary_summaries.update(_flatten_numeric_summary(table, f"supplementary.{name}"))
+
+    kpi_summary: Dict[str, float] = {}
+    if results and isinstance(results.get("kpis"), pd.DataFrame):
+        kpis = results["kpis"]
+        kpi_summary = {
+            col: float(pd.to_numeric(kpis[col], errors="coerce").iloc[0])
+            for col in kpis.columns
+            if pd.to_numeric(kpis[col], errors="coerce").notna().any()
+        }
+
+    framework_enabled = [
+        key
+        for key, value in analytics_framework.items()
+        if isinstance(value, dict) and value.get("enabled")
+    ]
+
+    return {
+        "selected_scenario": (results or {}).get("selected_scenario", "Scenario"),
+        "kpis": kpi_summary,
+        "assumptions": assumption_summaries,
+        "supplementary": supplementary_summaries,
+        "framework_enabled": framework_enabled,
+    }
+
+
+def _snapshot_index(snapshot: Dict[str, Any]) -> pd.DataFrame:
+    records: list[Dict[str, Any]] = []
+    for section in ["kpis", "assumptions", "supplementary"]:
+        values = snapshot.get(section, {})
+        if isinstance(values, dict):
+            for key, value in values.items():
+                records.append(
+                    {
+                        "Section": section,
+                        "Key": key,
+                        "Value": value,
+                        "Text": f"{section}::{key}={value}",
+                    }
+                )
+
+    enabled = snapshot.get("framework_enabled", [])
+    for item in enabled:
+        records.append(
+            {
+                "Section": "framework",
+                "Key": item,
+                "Value": 1,
+                "Text": f"framework::{item}=enabled",
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
+def _retrieve_snapshot_context(index_df: pd.DataFrame, query: str, top_n: int = 6) -> pd.DataFrame:
+    if index_df.empty:
+        return index_df
+    tokens = {token for token in re.findall(r"[a-zA-Z0-9_]+", query.lower()) if token}
+    if not tokens:
+        return index_df.head(top_n)
+
+    scored = index_df.copy()
+    scored["score"] = scored["Text"].str.lower().apply(
+        lambda text: sum(1 for token in tokens if token in text)
+    )
+    scored = scored.sort_values(["score", "Section"], ascending=[False, True])
+    filtered = scored[scored["score"] > 0]
+    if filtered.empty:
+        return scored.head(top_n)
+    return filtered.head(top_n)
+
+
+def _run_orchestration_engine(
+    query: str, config: Dict[str, Any], snapshot: Dict[str, Any], retrieved: pd.DataFrame
+) -> Dict[str, Any]:
+    kpis = snapshot.get("kpis", {})
+    irr = float(kpis.get("IRR", np.nan))
+    ebitda_margin = float(kpis.get("EBITDA Margin", np.nan))
+
+    target_irr = float(config.get("target_irr", 0.18))
+    target_ebitda = float(config.get("target_ebitda_margin", 0.25))
+
+    irr_gap = irr - target_irr if pd.notna(irr) else np.nan
+    margin_gap = ebitda_margin - target_ebitda if pd.notna(ebitda_margin) else np.nan
+
+    investor_score = 100.0
+    if pd.notna(irr_gap):
+        investor_score -= max(0.0, (target_irr - irr) * 220.0)
+    if pd.notna(margin_gap):
+        investor_score -= max(0.0, (target_ebitda - ebitda_margin) * 180.0)
+    investor_score = float(max(0.0, min(100.0, investor_score)))
+
+    governance_score = 100.0
+    if not snapshot.get("framework_enabled"):
+        governance_score -= 10.0
+    if retrieved.empty:
+        governance_score -= 15.0
+
+    benchmark_table = pd.DataFrame(
+        {
+            "Metric": ["IRR", "EBITDA Margin", "Investor Readiness", "Governance"],
+            "Actual": [irr, ebitda_margin, investor_score, governance_score],
+            "Target": [target_irr, target_ebitda, 85.0, config.get("min_governance_score", 80.0)],
+            "Gap": [
+                irr_gap if pd.notna(irr_gap) else np.nan,
+                margin_gap if pd.notna(margin_gap) else np.nan,
+                investor_score - 85.0,
+                governance_score - float(config.get("min_governance_score", 80.0)),
+            ],
+        }
+    )
+
+    recommendations: list[str] = []
+    if pd.notna(irr_gap) and irr_gap < 0:
+        recommendations.append(
+            "Improve return profile by prioritising higher-margin products and phasing capex."
+        )
+    if pd.notna(margin_gap) and margin_gap < 0:
+        recommendations.append(
+            "Tighten feed and variable-cost controls; run sensitivity scenarios on feed inflation."
+        )
+    if governance_score < float(config.get("min_governance_score", 80.0)):
+        recommendations.append(
+            "Strengthen governance with monthly KPI packs, data-quality checks, and approval workflows."
+        )
+    if not recommendations:
+        recommendations.append(
+            "Current plan is investor-ready; focus on scaling strategy and downside protection."
+        )
+
+    context_strings = retrieved.get("Text", pd.Series(dtype=str)).tolist()
+    grounded_answer = (
+        f"Query: {query or 'General strategic outlook'}. "
+        f"Using scenario '{snapshot.get('selected_scenario', 'Scenario')}', "
+        f"IRR={irr:.2%} and EBITDA margin={ebitda_margin:.2%} where available. "
+        f"Grounded context: {' | '.join(context_strings[:4]) if context_strings else 'No indexed context found.'}"
+    )
+
+    business_plan = pd.DataFrame(
+        {
+            "Workstream": ["Profitability", "Resilience", "Investor Readiness", "Execution"],
+            "Priority": ["High", "High", "Medium", "Medium"],
+            "90-Day Action": [
+                "Re-price weak-margin products and optimize feed contracts.",
+                "Run downside stress pack (drought + price collapse + rates up).",
+                "Produce benchmark scorecard and governance dashboard.",
+                "Publish quarterly milestones with owners and KPIs.",
+            ],
+        }
+    )
+
+    explainability = pd.DataFrame(
+        {
+            "Driver": ["IRR Gap", "EBITDA Margin Gap", "Governance Buffer"],
+            "Contribution": [
+                float(irr_gap) if pd.notna(irr_gap) else 0.0,
+                float(margin_gap) if pd.notna(margin_gap) else 0.0,
+                float(governance_score - config.get("min_governance_score", 80.0)),
+            ],
+            "Interpretation": [
+                "Positive means IRR is above target.",
+                "Positive means operating margin is above target.",
+                "Positive means governance controls exceed threshold.",
+            ],
+        }
+    )
+
+    return {
+        "investor_readiness_score": investor_score,
+        "governance_score": governance_score,
+        "benchmark_table": benchmark_table,
+        "recommendations": recommendations,
+        "grounded_answer": grounded_answer,
+        "business_plan": business_plan,
+        "explainability": explainability,
+        "retrieved_context": retrieved,
+    }
+
+
+def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
+    st.subheader("AI Decision Making — Unified Orchestration Layer")
+    st.caption(
+        "A single context-aware intelligence engine that unifies benchmarking, governance, "
+        "RAG-style retrieval, Q&A, scenario reasoning, and planning."
+    )
+
+    config = _ai_orchestration_store()
+    with st.expander("Unified Configuration Model", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        config["investor_profile"] = c1.text_input(
+            "Investor Profile",
+            value=str(config.get("investor_profile", "Growth + resilience")),
+        )
+        config["planning_horizon_years"] = int(
+            c1.number_input(
+                "Planning Horizon (Years)",
+                min_value=1,
+                max_value=15,
+                value=int(config.get("planning_horizon_years", 5)),
+                step=1,
+            )
+        )
+        config["target_irr"] = float(
+            c2.number_input(
+                "Target IRR",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(config.get("target_irr", 0.18)),
+                step=0.01,
+                format="%.2f",
+            )
+        )
+        config["target_ebitda_margin"] = float(
+            c2.number_input(
+                "Target EBITDA Margin",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(config.get("target_ebitda_margin", 0.25)),
+                step=0.01,
+                format="%.2f",
+            )
+        )
+        config["min_governance_score"] = float(
+            c3.number_input(
+                "Minimum Governance Score",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(config.get("min_governance_score", 80.0)),
+                step=1.0,
+            )
+        )
+        config["response_style"] = c3.selectbox(
+            "Response Style",
+            options=["Strategic and concise", "Detailed and technical", "Investor memo"],
+            index=[
+                "Strategic and concise",
+                "Detailed and technical",
+                "Investor memo",
+            ].index(config.get("response_style", "Strategic and concise")),
+        )
+        config["proactive_mode"] = st.checkbox(
+            "Proactive Recommendation Mode",
+            value=bool(config.get("proactive_mode", True)),
+        )
+        st.session_state["ai_orchestration_config"] = config
+
+    with st.expander("LLM & ML Runtime Settings", expanded=False):
+        _render_ai_settings(st.session_state.setdefault("ai_payload", {}))
+
+    query = st.text_area(
+        "Strategic Question / Decision Prompt",
+        value=st.session_state.get("ai_orchestration_last_query", ""),
+        placeholder=(
+            "Example: What actions improve investor readiness under a severe feed-cost shock?"
+        ),
+    )
+    st.session_state["ai_orchestration_last_query"] = query
+
+    snapshot = _build_orchestration_snapshot(results)
+    index_df = _snapshot_index(snapshot)
+    retrieved = _retrieve_snapshot_context(index_df, query)
+    output = _run_orchestration_engine(query, config, snapshot, retrieved)
+
+    score_cols = st.columns(3)
+    score_cols[0].metric(
+        "Investor Readiness",
+        f"{output['investor_readiness_score']:.1f}/100",
+    )
+    score_cols[1].metric("Governance", f"{output['governance_score']:.1f}/100")
+    score_cols[2].metric(
+        "Indexed Knowledge Records",
+        len(index_df),
+    )
+
+    st.markdown("### Unified Decision Support Output")
+    st.markdown("**Grounded Strategic Response**")
+    st.write(output["grounded_answer"])
+
+    st.markdown("**Investor Benchmarking & Scorecard**")
+    st.dataframe(output["benchmark_table"], use_container_width=True)
+
+    st.markdown("**Governance + Explainability**")
+    g1, g2 = st.columns(2)
+    with g1:
+        st.dataframe(output["explainability"], use_container_width=True)
+    with g2:
+        st.markdown("**Proactive Recommendations**")
+        for rec in output["recommendations"]:
+            st.write(f"- {rec}")
+
+    st.markdown("**Business Planning Actions (Scenario-Aware)**")
+    st.dataframe(output["business_plan"], use_container_width=True)
+
+    st.markdown("**RAG Retrieval Context (Indexed Knowledge)**")
+    st.dataframe(output["retrieved_context"], use_container_width=True)
+
+    history = st.session_state.setdefault("ai_orchestration_chat_history", [])
+    if query.strip():
+        history.append(
+            {
+                "Query": query.strip(),
+                "Response": output["grounded_answer"],
+                "Scenario": snapshot.get("selected_scenario", "Scenario"),
+            }
+        )
+        st.session_state["ai_orchestration_chat_history"] = history[-20:]
+    if history:
+        st.markdown("**Context Retention (Recent Q&A)**")
+        st.dataframe(pd.DataFrame(history[-10:]), use_container_width=True)
+
 
 def main() -> None:
     st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
@@ -6546,9 +6900,7 @@ def main() -> None:
                 st.info(str(exc))
 
     with tabs[5]:
-        st.subheader("AI Decision Making")
-        st.markdown("Configure AI provider, model, ML methods, and narrative outputs.")
-        _render_ai_settings(ai_payload)
+        _render_ai_orchestration_layer(results)
 
 if __name__ == "__main__":
     main()
