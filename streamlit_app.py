@@ -4326,10 +4326,20 @@ def _ai_orchestration_store() -> Dict[str, Any]:
 def _flatten_numeric_summary(df: Optional[pd.DataFrame], label: str) -> Dict[str, float]:
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return {}
-    numeric = df.select_dtypes(include=[np.number])
-    if numeric.empty:
-        return {}
-    return {f"{label}:{col}": float(numeric[col].mean()) for col in numeric.columns}
+    output: Dict[str, float] = {}
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors="coerce")
+        valid = series.dropna()
+        if valid.empty:
+            continue
+        mean_value = valid.mean()
+        if pd.isna(mean_value):
+            continue
+        try:
+            output[f"{label}:{col}"] = float(mean_value)
+        except (TypeError, ValueError):
+            continue
+    return output
 
 
 def _build_orchestration_snapshot(results: Optional[Dict[str, Any]]) -> Dict[str, Any]:
