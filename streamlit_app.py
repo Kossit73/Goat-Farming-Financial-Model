@@ -5160,541 +5160,532 @@ def main() -> None:
 
     with tabs[1]:
         st.subheader("Assumptions")
-        assumption_tabs = st.tabs(
-            [
-                "Scenario Controls",
-                "Production Horizon",
-                "Pricing",
-                "Operating Costs",
-                "Capital & Financing",
-                "Valuation Inputs",
-            ]
+        st.caption(
+            "All core model assumption categories are consolidated below on a single page."
         )
 
-        with assumption_tabs[0]:
-            st.markdown("#### Scenario Controls")
-            scenario_table = _ensure_scenario_controls_table(
-                st.session_state.assumptions.get("Scenario Controls")
-            )
-            st.session_state.assumptions["Scenario Controls"] = scenario_table
+        st.markdown("#### Scenario Controls")
+        scenario_table = _ensure_scenario_controls_table(
+            st.session_state.assumptions.get("Scenario Controls")
+        )
+        st.session_state.assumptions["Scenario Controls"] = scenario_table
 
-            def _save_scenario_controls(updated: pd.DataFrame) -> None:
-                ensured = _ensure_scenario_controls_table(updated)
-                st.session_state.assumptions["Scenario Controls"] = ensured
+        def _save_scenario_controls(updated: pd.DataFrame) -> None:
+            ensured = _ensure_scenario_controls_table(updated)
+            st.session_state.assumptions["Scenario Controls"] = ensured
 
-            _render_schedule_row_editor(
-                "assump::scenario_controls",
+        _render_schedule_row_editor(
+            "assump::scenario_controls",
+            st.session_state.assumptions["Scenario Controls"],
+            _save_scenario_controls,
+        )
+
+        control_values = _scenario_controls_value_map(
+            st.session_state.assumptions["Scenario Controls"]
+        )
+        milk_default = control_values.get("Milk price change (%)", 0.0)
+        feed_default = control_values.get("Feed cost change (%)", 0.0)
+
+        milk_price = st.slider(
+            "Milk price change (%)",
+            min_value=-50,
+            max_value=50,
+            value=int(round(milk_default)),
+            step=1,
+        )
+        if float(milk_price) != float(milk_default):
+            updated_table = _update_scenario_control_value(
                 st.session_state.assumptions["Scenario Controls"],
-                _save_scenario_controls,
-            )
-
-            control_values = _scenario_controls_value_map(
-                st.session_state.assumptions["Scenario Controls"]
-            )
-            milk_default = control_values.get("Milk price change (%)", 0.0)
-            feed_default = control_values.get("Feed cost change (%)", 0.0)
-
-            milk_price = st.slider(
                 "Milk price change (%)",
-                min_value=-50,
-                max_value=50,
-                value=int(round(milk_default)),
-                step=1,
+                float(milk_price),
             )
-            if float(milk_price) != float(milk_default):
-                updated_table = _update_scenario_control_value(
-                    st.session_state.assumptions["Scenario Controls"],
-                    "Milk price change (%)",
-                    float(milk_price),
-                )
-                st.session_state.assumptions["Scenario Controls"] = updated_table
-                _clear_schedule_editor_state("assump::scenario_controls")
+            st.session_state.assumptions["Scenario Controls"] = updated_table
+            _clear_schedule_editor_state("assump::scenario_controls")
 
-            feed_cost = st.slider(
+        feed_cost = st.slider(
+            "Feed cost change (%)",
+            min_value=-50,
+            max_value=50,
+            value=int(round(feed_default)),
+            step=1,
+        )
+        if float(feed_cost) != float(feed_default):
+            updated_table = _update_scenario_control_value(
+                st.session_state.assumptions["Scenario Controls"],
                 "Feed cost change (%)",
-                min_value=-50,
-                max_value=50,
-                value=int(round(feed_default)),
-                step=1,
+                float(feed_cost),
             )
-            if float(feed_cost) != float(feed_default):
-                updated_table = _update_scenario_control_value(
-                    st.session_state.assumptions["Scenario Controls"],
-                    "Feed cost change (%)",
-                    float(feed_cost),
-                )
-                st.session_state.assumptions["Scenario Controls"] = updated_table
-                _clear_schedule_editor_state("assump::scenario_controls")
+            st.session_state.assumptions["Scenario Controls"] = updated_table
+            _clear_schedule_editor_state("assump::scenario_controls")
 
-            assumption_tables["Scenario Controls"] = st.session_state.assumptions[
-                "Scenario Controls"
-            ]
-            run_clicked = st.button("Run Scenarios", type="primary")
+        assumption_tables["Scenario Controls"] = st.session_state.assumptions[
+            "Scenario Controls"
+        ]
+        run_clicked = st.button("Run Scenarios", type="primary")
 
-        with assumption_tabs[1]:
-            st.markdown("#### Production Time Horizon")
-            production_table = _ensure_production_horizon_table(
-                st.session_state.assumptions.get("Production Horizon")
-            )
-            st.session_state.assumptions["Production Horizon"] = production_table
+        st.markdown("---")
+        st.markdown("#### Production Time Horizon")
+        production_table = _ensure_production_horizon_table(
+            st.session_state.assumptions.get("Production Horizon")
+        )
+        st.session_state.assumptions["Production Horizon"] = production_table
 
-            defaults = production_table.iloc[0]
-            start_default = int(defaults.get("Start Year", 2024))
-            end_default = int(defaults.get("End Year", start_default))
+        defaults = production_table.iloc[0]
+        start_default = int(defaults.get("Start Year", 2024))
+        end_default = int(defaults.get("End Year", start_default))
 
-            st.session_state.setdefault("production_start_year", start_default)
-            st.session_state.setdefault("production_end_year", end_default)
+        st.session_state.setdefault("production_start_year", start_default)
+        st.session_state.setdefault("production_end_year", end_default)
 
-            year_options = _production_year_options(start_default, end_default)
-            if st.session_state.production_start_year not in year_options:
-                st.session_state.production_start_year = start_default
+        year_options = _production_year_options(start_default, end_default)
+        if st.session_state.production_start_year not in year_options:
+            st.session_state.production_start_year = start_default
 
-            start_col, end_col = st.columns(2)
+        start_col, end_col = st.columns(2)
 
-            start_value = start_col.selectbox(
-                "Start year",
-                options=year_options,
-                key="production_start_year",
-            )
+        start_value = start_col.selectbox(
+            "Start year",
+            options=year_options,
+            key="production_start_year",
+        )
 
-            valid_end_options = [year for year in year_options if year >= start_value]
-            if not valid_end_options:
-                valid_end_options = [start_value]
+        valid_end_options = [year for year in year_options if year >= start_value]
+        if not valid_end_options:
+            valid_end_options = [start_value]
 
-            if st.session_state.production_end_year not in valid_end_options:
-                st.session_state.production_end_year = valid_end_options[0]
+        if st.session_state.production_end_year not in valid_end_options:
+            st.session_state.production_end_year = valid_end_options[0]
 
-            end_value = end_col.selectbox(
-                "End year",
-                options=valid_end_options,
-                key="production_end_year",
-            )
+        end_value = end_col.selectbox(
+            "End year",
+            options=valid_end_options,
+            key="production_end_year",
+        )
 
-            if end_value < start_value:
-                st.session_state.production_end_year = start_value
-                end_value = start_value
+        if end_value < start_value:
+            st.session_state.production_end_year = start_value
+            end_value = start_value
 
-            if start_value != start_default or end_value != end_default:
-                updated_table = pd.DataFrame(
-                    {"Start Year": [start_value], "End Year": [end_value]}
-                )
-                st.session_state.assumptions["Production Horizon"] = updated_table
-                assumption_tables["Production Horizon"] = updated_table
-                _sync_production_horizon(start_value, end_value)
-                _ensure_default_results_loaded()
-                _ensure_active_scenario_selection()
-                _maybe_rerun()
+        if start_value != start_default or end_value != end_default:
+            updated_table = pd.DataFrame({"Start Year": [start_value], "End Year": [end_value]})
+            st.session_state.assumptions["Production Horizon"] = updated_table
+            assumption_tables["Production Horizon"] = updated_table
+            _sync_production_horizon(start_value, end_value)
+            _ensure_default_results_loaded()
+            _ensure_active_scenario_selection()
+            _maybe_rerun()
+        else:
+            assumption_tables["Production Horizon"] = production_table
+
+        st.markdown("---")
+        st.markdown("#### Pricing Assumptions")
+        pricing_table = _ensure_pricing_table(
+            st.session_state.assumptions.get("Pricing", pd.DataFrame())
+        )
+        st.session_state.assumptions["Pricing"] = pricing_table
+
+        st.session_state.setdefault("pricing_remove_choice", "-- Select Row --")
+        st.session_state.setdefault("pricing_increment_target", "All products")
+        st.session_state.setdefault("pricing_increment_column", "Base Price")
+        st.session_state.setdefault("pricing_increment_pct", 0.0)
+
+        add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+        if add_col.button("Add Product", key="pricing_add_row"):
+            pricing_table = _add_pricing_row(pricing_table)
+            st.session_state.assumptions["Pricing"] = pricing_table
+            _clear_schedule_editor_state("assump::pricing")
+
+        option_labels: list[str] = []
+        option_index: Dict[str, int] = {}
+        for idx_row, row in pricing_table.iterrows():
+            label_year = row.get("Year")
+            label_product = row.get("Product") or "Product"
+            if pd.notna(label_year):
+                label = f"{int(label_year)} – {label_product}"
             else:
-                assumption_tables["Production Horizon"] = production_table
+                label = str(label_product)
+            option_labels.append(label)
+            option_index[label] = idx_row
 
-        with assumption_tabs[2]:
-            st.markdown("#### Pricing Assumptions")
-            pricing_table = _ensure_pricing_table(
-                st.session_state.assumptions.get("Pricing", pd.DataFrame())
+        remove_select_col.selectbox(
+            "Select row",
+            options=["-- Select Row --"] + option_labels,
+            key="pricing_remove_choice",
+        )
+
+        if remove_btn_col.button("Remove Row", key="pricing_remove_row"):
+            choice = st.session_state.get("pricing_remove_choice")
+            if choice in option_index:
+                pricing_table = _remove_pricing_row(
+                    pricing_table, option_index[choice]
+                )
+                st.session_state.assumptions["Pricing"] = pricing_table
+                st.session_state.pricing_remove_choice = "-- Select Row --"
+                _clear_schedule_editor_state("assump::pricing")
+
+        inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
+            [2, 1.5, 1, 1]
+        )
+
+        target_options = ["All products"] + sorted(
+            {
+                str(product)
+                for product in pricing_table.get("Product", pd.Series(dtype=str))
+                .dropna()
+                .tolist()
+                if str(product).strip()
+            }
+        )
+        inc_target_col.selectbox(
+            "Apply increment to",
+            options=target_options,
+            key="pricing_increment_target",
+        )
+
+        inc_column_col.selectbox(
+            "Column",
+            options=["Base Price", "Price Growth %"],
+            key="pricing_increment_column",
+        )
+
+        inc_pct_col.number_input(
+            "Yearly increment (%)",
+            min_value=-100.0,
+            max_value=100.0,
+            step=0.1,
+            key="pricing_increment_pct",
+        )
+
+        if inc_btn_col.button("Apply increment", key="pricing_apply_increment"):
+            pricing_table = _apply_pricing_yearly_increment(
+                pricing_table,
+                st.session_state.get("pricing_increment_column", "Base Price"),
+                st.session_state.get("pricing_increment_pct", 0.0),
+                st.session_state.get("pricing_increment_target"),
             )
             st.session_state.assumptions["Pricing"] = pricing_table
+            _clear_schedule_editor_state("assump::pricing")
 
-            st.session_state.setdefault("pricing_remove_choice", "-- Select Row --")
-            st.session_state.setdefault("pricing_increment_target", "All products")
-            st.session_state.setdefault("pricing_increment_column", "Base Price")
-            st.session_state.setdefault("pricing_increment_pct", 0.0)
+        def _save_pricing(updated: pd.DataFrame) -> None:
+            ensured = _ensure_pricing_table(updated)
+            st.session_state.assumptions["Pricing"] = ensured
 
-            add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+        _render_schedule_row_editor(
+            "assump::pricing",
+            st.session_state.assumptions["Pricing"],
+            _save_pricing,
+        )
 
-            if add_col.button("Add Product", key="pricing_add_row"):
-                pricing_table = _add_pricing_row(pricing_table)
+        st.session_state.setdefault("pricing_defaults_edit_mode", False)
+        toggle_label = (
+            "Hide default pricing assumptions"
+            if st.session_state.pricing_defaults_edit_mode
+            else "Edit default pricing assumptions"
+        )
+        if st.button(toggle_label, key="toggle_pricing_defaults"):
+            st.session_state.pricing_defaults_edit_mode = not st.session_state[
+                "pricing_defaults_edit_mode"
+            ]
+
+        if st.session_state.pricing_defaults_edit_mode:
+            st.markdown("##### Default Pricing Assumptions")
+            st.caption(
+                "Edit the baseline pricing table applied when resetting these assumptions."
+            )
+
+            pricing_columns = [
+                "Year",
+                "Product",
+                "Unit",
+                "Base Price",
+                "Price Growth %",
+            ]
+            default_frame = st.session_state.get("default_pricing_editor")
+            if not isinstance(default_frame, pd.DataFrame):
+                default_frame = _template_to_dataframe(
+                    _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
+                )
+
+            template_editor = st.data_editor(
+                default_frame,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_pricing_editor",
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Base Price": st.column_config.NumberColumn(
+                        "Base Price", format="%.2f"
+                    ),
+                    "Price Growth %": st.column_config.NumberColumn(
+                        "Price Growth (%)", format="%.2f"
+                    ),
+                },
+            )
+
+            button_col, save_col, restore_col, apply_col = st.columns(4)
+
+            if button_col.button("Close editor", key="close_pricing_defaults"):
+                st.session_state.pricing_defaults_edit_mode = False
+
+            if save_col.button("Save defaults", key="save_pricing_defaults"):
+                records = _dataframe_to_template(template_editor, pricing_columns)
+                _set_template("pricing_rows", records)
+                st.success("Pricing defaults updated.")
+
+            if restore_col.button("Restore baseline", key="reset_pricing_defaults"):
+                baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
+                _set_template("pricing_rows", baseline_template)
+                pricing_table = _default_pricing_table()
                 st.session_state.assumptions["Pricing"] = pricing_table
+                st.session_state["default_pricing_editor"] = _template_to_dataframe(
+                    baseline_template, pricing_columns
+                )
+                st.success(
+                    "Pricing defaults restored and assumptions refreshed."
+                )
                 _clear_schedule_editor_state("assump::pricing")
 
-            option_labels: list[str] = []
-            option_index: Dict[str, int] = {}
-            for idx_row, row in pricing_table.iterrows():
-                label_year = row.get("Year")
-                label_product = row.get("Product") or "Product"
-                if pd.notna(label_year):
-                    label = f"{int(label_year)} – {label_product}"
-                else:
-                    label = str(label_product)
-                option_labels.append(label)
-                option_index[label] = idx_row
-
-            remove_select_col.selectbox(
-                "Select row",
-                options=["-- Select Row --"] + option_labels,
-                key="pricing_remove_choice",
-            )
-
-            if remove_btn_col.button("Remove Row", key="pricing_remove_row"):
-                choice = st.session_state.get("pricing_remove_choice")
-                if choice in option_index:
-                    pricing_table = _remove_pricing_row(
-                        pricing_table, option_index[choice]
-                    )
-                    st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state.pricing_remove_choice = "-- Select Row --"
-                    _clear_schedule_editor_state("assump::pricing")
-
-            inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
-                [2, 1.5, 1, 1]
-            )
-
-            target_options = ["All products"] + sorted(
-                {
-                    str(product)
-                    for product in pricing_table.get("Product", pd.Series(dtype=str))
-                    .dropna()
-                    .tolist()
-                    if str(product).strip()
-                }
-            )
-            inc_target_col.selectbox(
-                "Apply increment to",
-                options=target_options,
-                key="pricing_increment_target",
-            )
-
-            inc_column_col.selectbox(
-                "Column",
-                options=["Base Price", "Price Growth %"],
-                key="pricing_increment_column",
-            )
-
-            inc_pct_col.number_input(
-                "Yearly increment (%)",
-                min_value=-100.0,
-                max_value=100.0,
-                step=0.1,
-                key="pricing_increment_pct",
-            )
-
-            if inc_btn_col.button("Apply increment", key="pricing_apply_increment"):
-                pricing_table = _apply_pricing_yearly_increment(
-                    pricing_table,
-                    st.session_state.get("pricing_increment_column", "Base Price"),
-                    st.session_state.get("pricing_increment_pct", 0.0),
-                    st.session_state.get("pricing_increment_target"),
-                )
+            if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
+                records = _dataframe_to_template(template_editor, pricing_columns)
+                _set_template("pricing_rows", records)
+                pricing_table = _default_pricing_table()
                 st.session_state.assumptions["Pricing"] = pricing_table
+                st.session_state["default_pricing_editor"] = template_editor
+                st.success(
+                    "Pricing assumptions refreshed from updated defaults."
+                )
                 _clear_schedule_editor_state("assump::pricing")
 
-            def _save_pricing(updated: pd.DataFrame) -> None:
-                ensured = _ensure_pricing_table(updated)
-                st.session_state.assumptions["Pricing"] = ensured
+        assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
-            _render_schedule_row_editor(
-                "assump::pricing",
-                st.session_state.assumptions["Pricing"],
-                _save_pricing,
-            )
+        st.markdown("---")
+        st.markdown("#### Operating Cost Assumptions")
+        operating_table = _ensure_operating_cost_table(
+            st.session_state.assumptions.get("Operating Costs")
+        )
+        st.session_state.assumptions["Operating Costs"] = operating_table
 
-            st.session_state.setdefault("pricing_defaults_edit_mode", False)
-            toggle_label = (
-                "Hide default pricing assumptions"
-                if st.session_state.pricing_defaults_edit_mode
-                else "Edit default pricing assumptions"
-            )
-            if st.button(toggle_label, key="toggle_pricing_defaults"):
-                st.session_state.pricing_defaults_edit_mode = not st.session_state[
-                    "pricing_defaults_edit_mode"
-                ]
+        st.session_state.setdefault("operating_remove_choice", "-- Select Item --")
+        st.session_state.setdefault("operating_increment_target", "All categories")
+        st.session_state.setdefault("operating_increment_column", "Monthly Cost")
+        st.session_state.setdefault("operating_increment_pct", 0.0)
 
-            if st.session_state.pricing_defaults_edit_mode:
-                st.markdown("##### Default Pricing Assumptions")
-                st.caption(
-                    "Edit the baseline pricing table applied when resetting these assumptions."
+        add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+        if add_col.button("Add Item", key="operating_add_row"):
+            operating_table = _add_operating_cost_row(operating_table)
+            st.session_state.assumptions["Operating Costs"] = operating_table
+            _clear_schedule_editor_state("assump::operating_costs")
+
+        option_labels: list[str] = []
+        option_index: Dict[str, int] = {}
+        for idx_row, row in operating_table.iterrows():
+            category = str(row.get("Category", "")).strip() or f"Item {idx_row + 1}"
+            year_value = row.get("Year")
+            if pd.notna(year_value):
+                label = f"{category} ({int(year_value)})"
+            else:
+                label = category
+            option_labels.append(label)
+            option_index[label] = idx_row
+
+        remove_select_col.selectbox(
+            "Select item",
+            options=["-- Select Item --"] + option_labels,
+            key="operating_remove_choice",
+        )
+
+        if remove_btn_col.button("Remove Item", key="operating_remove_row"):
+            choice = st.session_state.get("operating_remove_choice")
+            if choice in option_index:
+                operating_table = _remove_operating_cost_row(
+                    operating_table, option_index[choice]
                 )
+                st.session_state.assumptions["Operating Costs"] = operating_table
+                st.session_state["operating_remove_choice"] = "-- Select Item --"
+                _clear_schedule_editor_state("assump::operating_costs")
 
-                pricing_columns = [
-                    "Year",
-                    "Product",
-                    "Unit",
-                    "Base Price",
-                    "Price Growth %",
-                ]
-                default_frame = st.session_state.get("default_pricing_editor")
-                if not isinstance(default_frame, pd.DataFrame):
-                    default_frame = _template_to_dataframe(
-                        _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
-                    )
+        inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
+            [2, 1.5, 1, 1]
+        )
 
-                template_editor = st.data_editor(
-                    default_frame,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="default_pricing_editor",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Base Price": st.column_config.NumberColumn(
-                            "Base Price", format="%.2f"
-                        ),
-                        "Price Growth %": st.column_config.NumberColumn(
-                            "Price Growth (%)", format="%.2f"
-                        ),
-                    },
-                )
+        target_options = ["All categories"] + sorted(
+            {
+                str(cat).strip()
+                for cat in operating_table.get("Category", pd.Series(dtype=str))
+                .dropna()
+                .tolist()
+                if str(cat).strip()
+            }
+        )
+        inc_target_col.selectbox(
+            "Apply increment to",
+            options=target_options,
+            key="operating_increment_target",
+        )
 
-                button_col, save_col, restore_col, apply_col = st.columns(4)
+        inc_column_col.selectbox(
+            "Column",
+            options=["Monthly Cost", "Inflation %"],
+            key="operating_increment_column",
+        )
 
-                if button_col.button("Close editor", key="close_pricing_defaults"):
-                    st.session_state.pricing_defaults_edit_mode = False
+        inc_pct_col.number_input(
+            "Yearly increment (%)",
+            min_value=-100.0,
+            max_value=100.0,
+            step=0.1,
+            key="operating_increment_pct",
+        )
 
-                if save_col.button("Save defaults", key="save_pricing_defaults"):
-                    records = _dataframe_to_template(template_editor, pricing_columns)
-                    _set_template("pricing_rows", records)
-                    st.success("Pricing defaults updated.")
-
-                if restore_col.button("Restore baseline", key="reset_pricing_defaults"):
-                    baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
-                    _set_template("pricing_rows", baseline_template)
-                    pricing_table = _default_pricing_table()
-                    st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state["default_pricing_editor"] = _template_to_dataframe(
-                        baseline_template, pricing_columns
-                    )
-                    st.success(
-                        "Pricing defaults restored and assumptions refreshed."
-                    )
-                    _clear_schedule_editor_state("assump::pricing")
-
-                if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
-                    records = _dataframe_to_template(template_editor, pricing_columns)
-                    _set_template("pricing_rows", records)
-                    pricing_table = _default_pricing_table()
-                    st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state["default_pricing_editor"] = template_editor
-                    st.success(
-                        "Pricing assumptions refreshed from updated defaults."
-                    )
-                    _clear_schedule_editor_state("assump::pricing")
-
-            assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
-
-        with assumption_tabs[3]:
-            st.markdown("#### Operating Cost Assumptions")
-            operating_table = _ensure_operating_cost_table(
-                st.session_state.assumptions.get("Operating Costs")
+        if inc_btn_col.button("Apply increment", key="operating_apply_increment"):
+            operating_table = _apply_operating_cost_increment(
+                operating_table,
+                st.session_state.get("operating_increment_pct", 0.0),
+                st.session_state.get("operating_increment_target"),
+                st.session_state.get("operating_increment_column", "Monthly Cost"),
             )
             st.session_state.assumptions["Operating Costs"] = operating_table
+            _clear_schedule_editor_state("assump::operating_costs")
 
-            st.session_state.setdefault("operating_remove_choice", "-- Select Item --")
-            st.session_state.setdefault("operating_increment_target", "All categories")
-            st.session_state.setdefault("operating_increment_column", "Monthly Cost")
-            st.session_state.setdefault("operating_increment_pct", 0.0)
+        def _save_operating(updated: pd.DataFrame) -> None:
+            ensured = _ensure_operating_cost_table(updated)
+            st.session_state.assumptions["Operating Costs"] = ensured
 
-            add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+        _render_schedule_row_editor(
+            "assump::operating_costs",
+            st.session_state.assumptions["Operating Costs"],
+            _save_operating,
+        )
 
-            if add_col.button("Add Item", key="operating_add_row"):
-                operating_table = _add_operating_cost_row(operating_table)
+        st.session_state.setdefault("operating_defaults_edit_mode", False)
+        toggle_label = (
+            "Hide default operating cost assumptions"
+            if st.session_state.operating_defaults_edit_mode
+            else "Edit default operating cost assumptions"
+        )
+        if st.button(toggle_label, key="toggle_operating_defaults"):
+            st.session_state.operating_defaults_edit_mode = not st.session_state[
+                "operating_defaults_edit_mode"
+            ]
+
+        if st.session_state.operating_defaults_edit_mode:
+            st.markdown("##### Default Operating Cost Assumptions")
+            st.caption(
+                "Update the baseline operating cost table used when refreshing these assumptions."
+            )
+
+            operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
+            default_frame = st.session_state.get("default_operating_editor")
+            if not isinstance(default_frame, pd.DataFrame):
+                default_frame = _template_to_dataframe(
+                    _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
+                    operating_columns,
+                )
+
+            template_editor = st.data_editor(
+                default_frame,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_operating_editor",
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Monthly Cost": st.column_config.NumberColumn(
+                        "Monthly Cost", format="%.2f"
+                    ),
+                    "Inflation %": st.column_config.NumberColumn(
+                        "Inflation (%)", format="%.2f"
+                    ),
+                },
+            )
+
+            button_col, save_col, restore_col, apply_col = st.columns(4)
+
+            if button_col.button("Close editor", key="close_operating_defaults"):
+                st.session_state.operating_defaults_edit_mode = False
+
+            if save_col.button("Save defaults", key="save_operating_defaults"):
+                records = _dataframe_to_template(template_editor, operating_columns)
+                _set_template("operating_rows", records)
+                st.success("Operating cost defaults updated.")
+
+            if restore_col.button("Restore baseline", key="reset_operating_defaults"):
+                baseline_template = _template_copy(DEFAULT_OPERATING_COST_ROWS)
+                _set_template("operating_rows", baseline_template)
+                operating_table = _default_operating_cost_table()
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                st.session_state["default_operating_editor"] = _template_to_dataframe(
+                    baseline_template, operating_columns
+                )
+                st.success(
+                    "Operating cost defaults restored and assumptions refreshed."
+                )
                 _clear_schedule_editor_state("assump::operating_costs")
 
-            option_labels: list[str] = []
-            option_index: Dict[str, int] = {}
-            for idx_row, row in operating_table.iterrows():
-                category = str(row.get("Category", "")).strip() or f"Item {idx_row + 1}"
-                year_value = row.get("Year")
-                if pd.notna(year_value):
-                    label = f"{category} ({int(year_value)})"
-                else:
-                    label = category
-                option_labels.append(label)
-                option_index[label] = idx_row
-
-            remove_select_col.selectbox(
-                "Select item",
-                options=["-- Select Item --"] + option_labels,
-                key="operating_remove_choice",
-            )
-
-            if remove_btn_col.button("Remove Item", key="operating_remove_row"):
-                choice = st.session_state.get("operating_remove_choice")
-                if choice in option_index:
-                    operating_table = _remove_operating_cost_row(
-                        operating_table, option_index[choice]
-                    )
-                    st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["operating_remove_choice"] = "-- Select Item --"
-                    _clear_schedule_editor_state("assump::operating_costs")
-
-            inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
-                [2, 1.5, 1, 1]
-            )
-
-            target_options = ["All categories"] + sorted(
-                {
-                    str(cat).strip()
-                    for cat in operating_table.get("Category", pd.Series(dtype=str))
-                    .dropna()
-                    .tolist()
-                    if str(cat).strip()
-                }
-            )
-            inc_target_col.selectbox(
-                "Apply increment to",
-                options=target_options,
-                key="operating_increment_target",
-            )
-
-            inc_column_col.selectbox(
-                "Column",
-                options=["Monthly Cost", "Inflation %"],
-                key="operating_increment_column",
-            )
-
-            inc_pct_col.number_input(
-                "Yearly increment (%)",
-                min_value=-100.0,
-                max_value=100.0,
-                step=0.1,
-                key="operating_increment_pct",
-            )
-
-            if inc_btn_col.button("Apply increment", key="operating_apply_increment"):
-                operating_table = _apply_operating_cost_increment(
-                    operating_table,
-                    st.session_state.get("operating_increment_pct", 0.0),
-                    st.session_state.get("operating_increment_target"),
-                    st.session_state.get("operating_increment_column", "Monthly Cost"),
-                )
+            if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
+                records = _dataframe_to_template(template_editor, operating_columns)
+                _set_template("operating_rows", records)
+                operating_table = _default_operating_cost_table()
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                st.session_state["default_operating_editor"] = template_editor
+                st.success(
+                    "Operating cost assumptions refreshed from updated defaults."
+                )
                 _clear_schedule_editor_state("assump::operating_costs")
 
-            def _save_operating(updated: pd.DataFrame) -> None:
-                ensured = _ensure_operating_cost_table(updated)
-                st.session_state.assumptions["Operating Costs"] = ensured
-
-            _render_schedule_row_editor(
-                "assump::operating_costs",
-                st.session_state.assumptions["Operating Costs"],
-                _save_operating,
+        assumption_tables["Operating Costs"] = st.session_state.assumptions[
+            "Operating Costs"
+        ]
+    
+        st.markdown("---")
+        st.markdown("#### Capital & Financing Assumptions")
+        capital_table = _ensure_capital_financing_table(
+            st.session_state.assumptions.get("Capital & Financing")
+        )
+        st.session_state.assumptions["Capital & Financing"] = capital_table
+    
+        def _save_capital(updated: pd.DataFrame) -> None:
+            ensured = _ensure_capital_financing_table(updated)
+            st.session_state.assumptions["Capital & Financing"] = ensured
+    
+        _render_schedule_row_editor(
+            "assump::capital_financing",
+            st.session_state.assumptions["Capital & Financing"],
+            _save_capital,
+        )
+        assumption_tables["Capital & Financing"] = st.session_state.assumptions[
+            "Capital & Financing"
+        ]
+    
+        st.markdown("---")
+        st.markdown("#### Valuation Inputs")
+        include_valuation = st.checkbox("Include valuation inputs", value=True)
+        valuation_table = _ensure_valuation_inputs_table(
+            st.session_state.assumptions.get("Valuation Inputs")
+        )
+        st.session_state.assumptions["Valuation Inputs"] = valuation_table
+    
+        def _save_valuation(updated: pd.DataFrame) -> None:
+            ensured = _ensure_valuation_inputs_table(updated)
+            st.session_state.assumptions["Valuation Inputs"] = ensured
+    
+        _render_schedule_row_editor(
+            "assump::valuation_inputs",
+            st.session_state.assumptions["Valuation Inputs"],
+            _save_valuation,
+        )
+    
+        if include_valuation:
+            valuation_inputs = _valuation_table_to_inputs(
+                st.session_state.assumptions["Valuation Inputs"]
             )
-
-            st.session_state.setdefault("operating_defaults_edit_mode", False)
-            toggle_label = (
-                "Hide default operating cost assumptions"
-                if st.session_state.operating_defaults_edit_mode
-                else "Edit default operating cost assumptions"
-            )
-            if st.button(toggle_label, key="toggle_operating_defaults"):
-                st.session_state.operating_defaults_edit_mode = not st.session_state[
-                    "operating_defaults_edit_mode"
-                ]
-
-            if st.session_state.operating_defaults_edit_mode:
-                st.markdown("##### Default Operating Cost Assumptions")
-                st.caption(
-                    "Update the baseline operating cost table used when refreshing these assumptions."
-                )
-
-                operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
-                default_frame = st.session_state.get("default_operating_editor")
-                if not isinstance(default_frame, pd.DataFrame):
-                    default_frame = _template_to_dataframe(
-                        _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
-                        operating_columns,
-                    )
-
-                template_editor = st.data_editor(
-                    default_frame,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="default_operating_editor",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Monthly Cost": st.column_config.NumberColumn(
-                            "Monthly Cost", format="%.2f"
-                        ),
-                        "Inflation %": st.column_config.NumberColumn(
-                            "Inflation (%)", format="%.2f"
-                        ),
-                    },
-                )
-
-                button_col, save_col, restore_col, apply_col = st.columns(4)
-
-                if button_col.button("Close editor", key="close_operating_defaults"):
-                    st.session_state.operating_defaults_edit_mode = False
-
-                if save_col.button("Save defaults", key="save_operating_defaults"):
-                    records = _dataframe_to_template(template_editor, operating_columns)
-                    _set_template("operating_rows", records)
-                    st.success("Operating cost defaults updated.")
-
-                if restore_col.button("Restore baseline", key="reset_operating_defaults"):
-                    baseline_template = _template_copy(DEFAULT_OPERATING_COST_ROWS)
-                    _set_template("operating_rows", baseline_template)
-                    operating_table = _default_operating_cost_table()
-                    st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["default_operating_editor"] = _template_to_dataframe(
-                        baseline_template, operating_columns
-                    )
-                    st.success(
-                        "Operating cost defaults restored and assumptions refreshed."
-                    )
-                    _clear_schedule_editor_state("assump::operating_costs")
-
-                if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
-                    records = _dataframe_to_template(template_editor, operating_columns)
-                    _set_template("operating_rows", records)
-                    operating_table = _default_operating_cost_table()
-                    st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["default_operating_editor"] = template_editor
-                    st.success(
-                        "Operating cost assumptions refreshed from updated defaults."
-                    )
-                    _clear_schedule_editor_state("assump::operating_costs")
-
-            assumption_tables["Operating Costs"] = st.session_state.assumptions[
-                "Operating Costs"
-            ]
-
-        with assumption_tabs[4]:
-            st.markdown("#### Capital & Financing Assumptions")
-            capital_table = _ensure_capital_financing_table(
-                st.session_state.assumptions.get("Capital & Financing")
-            )
-            st.session_state.assumptions["Capital & Financing"] = capital_table
-
-            def _save_capital(updated: pd.DataFrame) -> None:
-                ensured = _ensure_capital_financing_table(updated)
-                st.session_state.assumptions["Capital & Financing"] = ensured
-
-            _render_schedule_row_editor(
-                "assump::capital_financing",
-                st.session_state.assumptions["Capital & Financing"],
-                _save_capital,
-            )
-            assumption_tables["Capital & Financing"] = st.session_state.assumptions[
-                "Capital & Financing"
-            ]
-
-        with assumption_tabs[5]:
-            include_valuation = st.checkbox("Include valuation inputs", value=True)
-            valuation_table = _ensure_valuation_inputs_table(
-                st.session_state.assumptions.get("Valuation Inputs")
-            )
-            st.session_state.assumptions["Valuation Inputs"] = valuation_table
-
-            def _save_valuation(updated: pd.DataFrame) -> None:
-                ensured = _ensure_valuation_inputs_table(updated)
-                st.session_state.assumptions["Valuation Inputs"] = ensured
-
-            _render_schedule_row_editor(
-                "assump::valuation_inputs",
-                st.session_state.assumptions["Valuation Inputs"],
-                _save_valuation,
-            )
-
-            if include_valuation:
-                valuation_inputs = _valuation_table_to_inputs(
-                    st.session_state.assumptions["Valuation Inputs"]
-                )
-            else:
-                valuation_inputs = {}
-
-            assumption_tables["Valuation Inputs"] = st.session_state.assumptions[
-                "Valuation Inputs"
-            ]
+        else:
+            valuation_inputs = {}
+    
+        assumption_tables["Valuation Inputs"] = st.session_state.assumptions[
+            "Valuation Inputs"
+        ]
 
     with tabs[2]:
         st.subheader("Financial Statements")
@@ -5704,12 +5695,12 @@ def main() -> None:
             results = st.session_state.results
             financial_tabs = st.tabs(
                 [
-                    "Statement of Financial Performance",
-                    "Statement of Financial Position",
-                    "Statement of Cash Flow",
-                ]
-            )
-
+                        "Statement of Financial Performance",
+                        "Statement of Financial Position",
+                        "Statement of Cash Flow",
+                    ]
+                )
+    
             scenario_label = results.get("selected_scenario", "Scenario")
 
             with financial_tabs[0]:
