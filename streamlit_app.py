@@ -3968,6 +3968,340 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
     st.dataframe(table)
 
 
+ANALYTICS_FRAMEWORK_TOOLS: List[Dict[str, str]] = [
+    {
+        "key": "sensitivity_analysis",
+        "title": "Sensitivity Analysis",
+        "methodology": "One-at-a-time and multi-driver elasticity tests against profitability and cash flow outputs.",
+        "visualization": "Spider plot + elasticity heatmap",
+    },
+    {
+        "key": "scenario_stress_testing",
+        "title": "Scenario & Stress Testing",
+        "methodology": "Apply severe but plausible shocks and compare resilience across operating, liquidity, and valuation KPIs.",
+        "visualization": "Scenario bridge chart + downside table",
+    },
+    {
+        "key": "trend_seasonality",
+        "title": "Trend & Seasonality Decomposition",
+        "methodology": "Decompose historical production/revenue signals into trend, seasonal, and residual components.",
+        "visualization": "Trend-season-residual line charts",
+    },
+    {
+        "key": "customer_product_segmentation",
+        "title": "Customer & Product Segmentation",
+        "methodology": "Segment products/channels by margin, growth, and volatility to prioritize strategic focus areas.",
+        "visualization": "Segment matrix + contribution waterfall",
+    },
+    {
+        "key": "monte_carlo_simulation",
+        "title": "Monte Carlo Simulation",
+        "methodology": "Run probabilistic simulations for revenue, costs, NPV, and IRR based on configured distributions.",
+        "visualization": "Distribution histogram + percentile fan chart",
+    },
+    {
+        "key": "what_if_analysis",
+        "title": "What-If Analysis",
+        "methodology": "Interactive assumption perturbation with immediate recalc of key KPI outputs.",
+        "visualization": "Delta KPI cards + before/after bars",
+    },
+    {
+        "key": "goal_seek",
+        "title": "Goal Seek Routines",
+        "methodology": "Solve for required input values that satisfy target profitability, liquidity, and return constraints.",
+        "visualization": "Target vs solved-input table",
+    },
+    {
+        "key": "tornado_spider",
+        "title": "Tornado Charts & Spider Diagrams",
+        "methodology": "Rank assumptions by marginal impact on NPV/IRR and display response curves.",
+        "visualization": "Tornado bar chart + spider line chart",
+    },
+    {
+        "key": "regression_modeling",
+        "title": "Regression Modeling",
+        "methodology": "Estimate explanatory relationships between historical drivers and financial outcomes.",
+        "visualization": "Coefficient chart + fitted vs actual scatter",
+    },
+    {
+        "key": "time_series_models",
+        "title": "Time Series (ARIMA/Prophet/LSTM)",
+        "methodology": "Forecast cyclical and seasonal patterns in revenues, prices, and expenses using multiple model classes.",
+        "visualization": "Forecast bands + model comparison table",
+    },
+    {
+        "key": "classification_models",
+        "title": "Classification Models",
+        "methodology": "Classify credit risk/churn/segment outcomes from labeled features and operational indicators.",
+        "visualization": "Confusion matrix + lift chart",
+    },
+    {
+        "key": "linear_nonlinear_optimization",
+        "title": "Linear/Nonlinear Optimization",
+        "methodology": "Optimize objective functions under operational and capital constraints.",
+        "visualization": "Optimal allocation table + constraint slack chart",
+    },
+    {
+        "key": "portfolio_optimization",
+        "title": "Portfolio Optimization",
+        "methodology": "Balance risk and return across herds/product lines using mean-variance and robust alternatives.",
+        "visualization": "Efficient frontier + allocation pie",
+    },
+    {
+        "key": "real_options_analysis",
+        "title": "Real Options Analysis",
+        "methodology": "Value defer/expand/abandon flexibility embedded in strategic initiatives.",
+        "visualization": "Option decision tree + value uplift table",
+    },
+    {
+        "key": "var_cvar",
+        "title": "VaR & Conditional VaR",
+        "methodology": "Estimate downside tail risk at configurable confidence levels.",
+        "visualization": "Loss distribution + tail expectation chart",
+    },
+    {
+        "key": "copula_models",
+        "title": "Copula Models",
+        "methodology": "Model joint tail dependencies across multiple risk factors.",
+        "visualization": "Dependence heatmap + tail copula diagnostics",
+    },
+    {
+        "key": "macroeconomic_linking",
+        "title": "Macroeconomic Linking",
+        "methodology": "Link inflation/GDP/rates/FX assumptions into model drivers for macro-consistent projections.",
+        "visualization": "Macro-to-driver linkage table",
+    },
+    {
+        "key": "esg_sustainability",
+        "title": "ESG & Sustainability Metrics",
+        "methodology": "Quantify financial impact of emissions, carbon pricing, and renewable adoption pathways.",
+        "visualization": "ESG scorecard + cost-benefit trend",
+    },
+    {
+        "key": "market_intelligence",
+        "title": "Market Intelligence Integration",
+        "methodology": "Blend external sentiment and industry outlook data into dynamic demand forecasts.",
+        "visualization": "Sentiment index + demand response chart",
+    },
+    {
+        "key": "probabilistic_valuation",
+        "title": "Probabilistic Valuation",
+        "methodology": "Produce valuation ranges and confidence intervals instead of single-point estimates.",
+        "visualization": "Valuation percentile chart",
+    },
+    {
+        "key": "comparative_valuation_clustering",
+        "title": "Comparative Valuation with Clustering",
+        "methodology": "Benchmark against statistically similar peers using clustering and relative multiples.",
+        "visualization": "Peer cluster map + valuation spread",
+    },
+    {
+        "key": "ml_based_valuation",
+        "title": "Machine Learning–Based Valuation",
+        "methodology": "Predict fair value/multiples from historical market and operational feature sets.",
+        "visualization": "Feature importance + predicted range chart",
+    },
+]
+
+
+def _default_framework_table(
+    columns: Sequence[str], rows: Sequence[Sequence[Any]]
+) -> pd.DataFrame:
+    return pd.DataFrame(list(rows), columns=list(columns))
+
+
+def _analytics_framework_store() -> Dict[str, Dict[str, Any]]:
+    store = st.session_state.setdefault("analytics_framework", {})
+    for tool in ANALYTICS_FRAMEWORK_TOOLS:
+        key = tool["key"]
+        if key in store:
+            continue
+        store[key] = {
+            "enabled": False,
+            "data_sources": ["Scenario Output"],
+            "inputs": _default_framework_table(
+                ["Input", "Source", "Transform", "Active"],
+                [
+                    ("Milk Price Series", "Scenario Output", "none", True),
+                    ("Feed Cost Series", "Scenario Output", "none", True),
+                    ("Herd Productivity", "Input Schedule", "rolling_mean", True),
+                ],
+            ),
+            "assumptions": _default_framework_table(
+                ["Assumption", "Value", "Units"],
+                [("Confidence Level", 95.0, "%"), ("Lookback Window", 12.0, "months")],
+            ),
+            "drivers": _default_framework_table(
+                ["Driver", "Base", "Low", "High"],
+                [
+                    ("Milk Price", 1.0, -20.0, 20.0),
+                    ("Feed Cost", 1.0, -20.0, 20.0),
+                    ("Herd Productivity", 1.0, -15.0, 15.0),
+                ],
+            ),
+            "scenarios": _default_framework_table(
+                ["Scenario", "Shock %", "Probability %", "Active"],
+                [
+                    ("Base", 0.0, 60.0, True),
+                    ("Downside", -15.0, 25.0, True),
+                    ("Severe Stress", -35.0, 15.0, False),
+                ],
+            ),
+        }
+    st.session_state["analytics_framework"] = store
+    return store
+
+
+def _numeric_column_mean(df: pd.DataFrame, column: str) -> float:
+    if column not in df.columns:
+        return 0.0
+    numeric = pd.to_numeric(df[column], errors="coerce")
+    if numeric.dropna().empty:
+        return 0.0
+    return float(numeric.mean())
+
+
+def _analytics_framework_output(
+    tool_config: Dict[str, Any], results: Optional[Dict[str, Any]]
+) -> pd.DataFrame:
+    assumptions = tool_config.get("assumptions", pd.DataFrame())
+    drivers = tool_config.get("drivers", pd.DataFrame())
+    scenarios = tool_config.get("scenarios", pd.DataFrame())
+
+    assumption_level = _numeric_column_mean(assumptions, "Value")
+    driver_range = (
+        abs(_numeric_column_mean(drivers, "High"))
+        + abs(_numeric_column_mean(drivers, "Low"))
+    ) / 2.0
+    avg_shock = _numeric_column_mean(scenarios, "Shock %")
+    stress_probability = _numeric_column_mean(scenarios, "Probability %")
+
+    base_npv = np.nan
+    base_irr = np.nan
+    if results is not None and isinstance(results.get("kpis"), pd.DataFrame):
+        kpi_df = results["kpis"]
+        if "NPV" in kpi_df.columns:
+            base_npv = float(kpi_df["NPV"].iloc[0])
+        if "IRR" in kpi_df.columns:
+            base_irr = float(kpi_df["IRR"].iloc[0])
+
+    impact_score = (driver_range * 0.4) + (assumption_level * 0.2) + (avg_shock * -0.3)
+    resilience_score = max(0.0, 100.0 - abs(avg_shock) - (stress_probability * 0.2))
+
+    return pd.DataFrame(
+        {
+            "Metric": [
+                "Configured Data Sources",
+                "Average Assumption Level",
+                "Average Driver Stress Range",
+                "Average Scenario Shock",
+                "Resilience Score",
+                "Indicative Impact Score",
+                "Reference NPV",
+                "Reference IRR",
+            ],
+            "Value": [
+                len(tool_config.get("data_sources", [])),
+                round(assumption_level, 2),
+                round(driver_range, 2),
+                round(avg_shock, 2),
+                round(resilience_score, 2),
+                round(impact_score, 2),
+                round(base_npv, 2) if pd.notna(base_npv) else np.nan,
+                round(base_irr, 4) if pd.notna(base_irr) else np.nan,
+            ],
+        }
+    )
+
+
+def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
+    st.markdown("### Editable Analytics Schedule Framework")
+    st.caption(
+        "Each analytical capability has editable inputs, assumptions, model drivers, and "
+        "scenario settings. Outputs refresh automatically on every change."
+    )
+    framework = _analytics_framework_store()
+    linked_sources = [
+        "Input Schedule",
+        "Assumptions",
+        "Scenario Output",
+        "Financial Statements",
+        "Dashboard KPIs",
+        "Supplementary Schedules",
+        "External Market Data",
+        "ESG Data",
+        "Peer Benchmark Data",
+    ]
+
+    for tool in ANALYTICS_FRAMEWORK_TOOLS:
+        tool_key = tool["key"]
+        config = framework[tool_key]
+        with st.expander(tool["title"], expanded=False):
+            left, right = st.columns([1, 2])
+            config["enabled"] = left.checkbox(
+                "Enable tool",
+                value=bool(config.get("enabled", False)),
+                key=f"framework_enabled::{tool_key}",
+            )
+            selected_sources = right.multiselect(
+                "Linked data inputs",
+                options=linked_sources,
+                default=config.get("data_sources", ["Scenario Output"]),
+                key=f"framework_sources::{tool_key}",
+                help="Choose datasets this tool should consume.",
+            )
+            config["data_sources"] = selected_sources
+
+            st.markdown("**Methodology**")
+            st.write(tool["methodology"])
+
+            st.markdown("**Configurable Input Mapping**")
+            config["inputs"] = st.data_editor(
+                config.get("inputs", pd.DataFrame()),
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"framework_inputs::{tool_key}",
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Adjustable Assumptions**")
+                config["assumptions"] = st.data_editor(
+                    config.get("assumptions", pd.DataFrame()),
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"framework_assumptions::{tool_key}",
+                )
+            with c2:
+                st.markdown("**Model Drivers & Ranges**")
+                config["drivers"] = st.data_editor(
+                    config.get("drivers", pd.DataFrame()),
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"framework_drivers::{tool_key}",
+                )
+
+            st.markdown("**Scenario Settings**")
+            config["scenarios"] = st.data_editor(
+                config.get("scenarios", pd.DataFrame()),
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"framework_scenarios::{tool_key}",
+            )
+
+            output_df = _analytics_framework_output(config, results)
+            st.markdown("**Dynamic Outputs**")
+            st.dataframe(output_df, use_container_width=True)
+            chart_df = output_df.set_index("Metric")
+            if "Value" in chart_df.columns:
+                st.bar_chart(chart_df[["Value"]])
+            st.caption(f"Suggested visualisation: {tool['visualization']}")
+
+            framework[tool_key] = config
+
+    st.session_state["analytics_framework"] = framework
+
+
 
 def main() -> None:
     st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
@@ -6016,36 +6350,10 @@ def main() -> None:
     with tabs[4]:
         st.subheader("Advanced Analytics")
         st.markdown(
-            "Complement Monte Carlo simulation with the following advanced analytics to"
-            " deepen scenario insights:"
+            "Use the framework below to configure inputs, assumptions, model drivers, "
+            "and scenarios for each analytics tool."
         )
-        st.markdown(
-            """
-- **Sensitivity analysis** to quantify how key drivers such as milk prices, feed costs, or herd productivity shift profitability.
-- **Scenario stress testing** that applies severe but plausible shocks (e.g., drought, disease outbreaks) to evaluate resilience.
-- **Trend and seasonality decomposition** on production and revenue series to isolate structural shifts from cyclical effects.
-- **Customer and product segmentation analysis** to spotlight high-margin channels and inform targeted growth initiatives.
-- **Monte Carlo simulation** to capture probabilistic distributions for revenues, costs, and valuation metrics.
-- **What-if analysis** to interactively adjust assumptions and observe real-time impacts on key outputs.
-- **Goal seek** routines to solve for the input levels required to hit specific profitability or liquidity targets.
-- **Tornado charts & spider diagrams** to visualise which assumptions have the greatest impact on outputs like NPV or IRR.
-- **Regression modeling** to predict revenues, costs, or asset performance based on historical data.
-- **Time series analysis (ARIMA, Prophet, LSTM)** for modelling cyclical or seasonal patterns in revenues, commodity prices, or expenses.
-- **Classification models** for credit risk, churn, or customer segmentation in finance-related business models.
-- **Linear and nonlinear optimization** to maximise profit or minimise cost given resource or capital constraints.
-- **Portfolio optimization** applying mean-variance or robust techniques to balance risk versus return across herds or product lines.
-- **Real options analysis** to incorporate managerial flexibility around deferring, expanding, or abandoning initiatives.
-- **Value at Risk (VaR) / Conditional VaR** to estimate potential losses under adverse conditions.
-- **Stress testing** that simulates extreme yet plausible shocks such as commodity price collapses or rapid interest-rate hikes.
-- **Copula models** to capture correlations between multiple risk factors (e.g., FX and interest rates).
-- **Macroeconomic linking** that integrates inflation, GDP growth, or exchange rates into financial projections.
-- **ESG & sustainability metrics** to model the financial implications of emissions, carbon pricing, or renewable adoption.
-- **Market intelligence integration** blending sentiment data or industry forecasts for dynamic demand projections.
-- **Probabilistic valuation** to generate distributions of NPVs or IRRs rather than single-point estimates.
-- **Comparative valuation with clustering** to benchmark projects or farms against statistically similar peers.
-- **Machine learning–based valuation** that trains models on historical market data to predict multiples or fair values.
-            """
-        )
+        _render_analytics_framework(results)
         if results is None:
             st.info("Run the scenarios to view advanced analytics.")
         else:
