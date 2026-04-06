@@ -4953,8 +4953,40 @@ def _retrieve_snapshot_context(index_df: pd.DataFrame, query: str, top_n: int = 
     return filtered.head(top_n)
 
 
+def _infer_orchestration_intent(query: str) -> str:
+    text = (query or "").lower()
+    intent_map = {
+        "risk": ["risk", "downside", "stress", "resilience", "volatility", "uncertainty"],
+        "valuation": ["valuation", "irr", "npv", "return", "discount", "wacc", "enterprise value"],
+        "assumptions": ["assumption", "assumptions", "driver", "input", "price", "yield", "cost"],
+        "operations": ["operations", "capacity", "production", "feed", "capex", "opex", "efficiency"],
+        "governance": ["governance", "control", "compliance", "board", "audit"],
+        "planning": ["plan", "roadmap", "milestone", "timeline", "execution", "90-day"],
+    }
+    for intent, keywords in intent_map.items():
+        if any(keyword in text for keyword in keywords):
+            return intent
+    return "strategy"
+
+
+def _response_depth_from_query(query: str) -> str:
+    q = (query or "").strip()
+    lower = q.lower()
+    if len(q) > 140 or any(
+        token in lower for token in ["compare", "trade-off", "why", "how", "sensitivity"]
+    ):
+        return "deep"
+    if any(token in lower for token in ["quick", "brief", "summary", "tldr"]):
+        return "brief"
+    return "standard"
+
+
 def _run_orchestration_engine(
-    query: str, config: Dict[str, Any], snapshot: Dict[str, Any], retrieved: pd.DataFrame
+    query: str,
+    config: Dict[str, Any],
+    snapshot: Dict[str, Any],
+    retrieved: pd.DataFrame,
+    history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     kpis = snapshot.get("kpis", {})
     irr = float(kpis.get("IRR", np.nan))
@@ -5011,12 +5043,46 @@ def _run_orchestration_engine(
             "Current plan is investor-ready; focus on scaling strategy and downside protection."
         )
 
-    context_strings = retrieved.get("Text", pd.Series(dtype=str)).tolist()
+    context_strings = retrieved.get("Text", pd.Series(dtype=str)).astype(str).tolist()
+    intent = _infer_orchestration_intent(query)
+    depth = _response_depth_from_query(query)
+    response_style = str(config.get("response_style", "Strategic and concise"))
+    scenario_name = snapshot.get("selected_scenario", "Scenario")
+    recent_history = history[-3:] if history else []
+    prior_focus = recent_history[-1]["Query"] if recent_history else ""
+
+    irr_text = f"{irr:.2%}" if pd.notna(irr) else "not available"
+    margin_text = f"{ebitda_margin:.2%}" if pd.notna(ebitda_margin) else "not available"
+    context_text = " | ".join(context_strings[:3]) if context_strings else "No indexed context found."
+    lead_by_style = {
+        "Strategic and concise": "Strategic view:",
+        "Detailed and technical": "Technical assessment:",
+        "Investor memo": "Investor memo:",
+    }.get(response_style, "Strategic view:")
+    intent_guidance = {
+        "risk": "Downside resilience is sensitive to margin compression and governance coverage.",
+        "valuation": "Valuation leans on return quality versus target hurdle rates.",
+        "assumptions": "Key assumptions should be validated for pricing, yield, and cost inflation.",
+        "operations": "Operational efficiency and cost control are the primary execution levers.",
+        "governance": "Governance sufficiency depends on controls, cadence, and quality signals.",
+        "planning": "Execution quality depends on sequencing, ownership, and measurable milestones.",
+        "strategy": "Overall strategy should balance growth, resilience, and investor confidence.",
+    }
+    continuity_line = (
+        f"Building on your prior question ('{prior_focus}'), "
+        if prior_focus and prior_focus.strip().lower() != (query or "").strip().lower()
+        else ""
+    )
+    depth_line = {
+        "brief": "Net: maintain focus on the top one to two value levers this quarter.",
+        "standard": "Recommended focus: protect margin while improving return quality and governance consistency.",
+        "deep": "Priority sequence: 1) stabilize unit economics, 2) run downside stress pack, 3) tighten governance reporting against investor thresholds.",
+    }[depth]
     grounded_answer = (
-        f"Query: {query or 'General strategic outlook'}. "
-        f"Using scenario '{snapshot.get('selected_scenario', 'Scenario')}', "
-        f"IRR={irr:.2%} and EBITDA margin={ebitda_margin:.2%} where available. "
-        f"Grounded context: {' | '.join(context_strings[:4]) if context_strings else 'No indexed context found.'}"
+        f"{lead_by_style} {continuity_line}For scenario '{scenario_name}', IRR is {irr_text} and EBITDA margin is {margin_text}. "
+        f"{intent_guidance.get(intent, intent_guidance['strategy'])} "
+        f"Indexed context: {context_text} "
+        f"{depth_line}"
     )
 
     business_plan = pd.DataFrame(
@@ -5149,12 +5215,13 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
     prompt = st.chat_input(
         "Ask a strategic question (e.g., Compare downside resilience and investor readiness)."
     )
+    history = st.session_state.setdefault("ai_orchestration_chat_history", [])
     current_query = ""
     if prompt:
         st.session_state["ai_orchestration_last_query"] = prompt
         current_query = prompt
         retrieved = _retrieve_rag_context(prompt)
-        output = _run_orchestration_engine(prompt, config, snapshot, retrieved)
+        output = _run_orchestration_engine(prompt, config, snapshot, retrieved, history)
         assistant_reply = (
             f"{output['grounded_answer']}\n\n"
             f"Top recommendations:\n- " + "\n- ".join(output["recommendations"])
@@ -5166,9 +5233,8 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         query = st.session_state.get("ai_orchestration_last_query", "Strategic overview")
         current_query = query
         retrieved = _retrieve_rag_context(query)
-        output = _run_orchestration_engine(query, config, snapshot, retrieved)
+        output = _run_orchestration_engine(query, config, snapshot, retrieved, history)
 
-    history = st.session_state.setdefault("ai_orchestration_chat_history", [])
     if current_query.strip():
         history.append(
             {
