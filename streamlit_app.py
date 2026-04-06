@@ -2379,7 +2379,16 @@ def _aggregate_direct_wages(
 def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
     totals = pd.to_numeric(core.get("Admin Wages"), errors="coerce")
-    total_values = totals.tolist() if totals is not None else []
+    if isinstance(totals, pd.Series):
+        total_values = totals.tolist()
+    elif totals is None:
+        total_values = []
+    else:
+        try:
+            scalar_total = float(totals)
+            total_values = [scalar_total] * len(periods)
+        except (TypeError, ValueError):
+            total_values = []
 
     rows: list[dict[str, object]] = []
     if periods:
@@ -2416,9 +2425,18 @@ def _ensure_admin_wage_table(
     if "Admin Wages" in work.columns and "Amount" not in work.columns:
         periods = _normalize_period(work.get("Period", pd.Series(dtype=str)))
         totals = pd.to_numeric(work.get("Admin Wages"), errors="coerce")
+        if isinstance(totals, pd.Series):
+            total_values = totals.tolist()
+        elif totals is None:
+            total_values = []
+        else:
+            try:
+                total_values = [float(totals)] * len(periods)
+            except (TypeError, ValueError):
+                total_values = []
         reconstructed: list[dict[str, object]] = []
         for idx, period in enumerate(periods):
-            total = totals.iloc[idx] if idx < len(totals) else np.nan
+            total = total_values[idx] if idx < len(total_values) else np.nan
             for function, share in _admin_wage_default_items():
                 amount = (
                     total * share
