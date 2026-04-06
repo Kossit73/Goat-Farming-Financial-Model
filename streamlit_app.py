@@ -4321,12 +4321,14 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
         ),
         key="analytics_global_scenario",
     )
-    controls["custom_shock_pct"] = g2.slider(
+    custom_shock_options = [round(x * 0.5, 1) for x in range(-100, 101)]
+    custom_shock_default = float(controls.get("custom_shock_pct", 0.0))
+    if custom_shock_default not in custom_shock_options:
+        custom_shock_default = 0.0
+    controls["custom_shock_pct"] = g2.selectbox(
         "Custom Shock (%)",
-        min_value=-50.0,
-        max_value=50.0,
-        value=float(controls.get("custom_shock_pct", 0.0)),
-        step=0.5,
+        options=custom_shock_options,
+        index=custom_shock_options.index(custom_shock_default),
         key="analytics_custom_shock",
     )
     controls["focus_metric"] = g3.selectbox(
@@ -4403,12 +4405,14 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
                 ),
                 key=f"framework_mode::{tool_key}",
             )
-            config["tool_shock_override"] = right.slider(
+            tool_shock_options = [round(x * 0.5, 1) for x in range(-60, 61)]
+            tool_shock_default = float(config.get("tool_shock_override", 0.0))
+            if tool_shock_default not in tool_shock_options:
+                tool_shock_default = 0.0
+            config["tool_shock_override"] = right.selectbox(
                 "Tool-level shock override (%)",
-                min_value=-30.0,
-                max_value=30.0,
-                value=float(config.get("tool_shock_override", 0.0)),
-                step=0.5,
+                options=tool_shock_options,
+                index=tool_shock_options.index(tool_shock_default),
                 key=f"framework_shock::{tool_key}",
             )
 
@@ -6339,12 +6343,15 @@ def main() -> None:
         milk_default = control_values.get("Milk price change (%)", 0.0)
         feed_default = control_values.get("Feed cost change (%)", 0.0)
 
-        milk_price = st.slider(
+        milk_options = list(range(-50, 51))
+        milk_selected_default = int(round(milk_default))
+        if milk_selected_default not in milk_options:
+            milk_selected_default = 0
+        milk_price = st.selectbox(
             "Milk price change (%)",
-            min_value=-50,
-            max_value=50,
-            value=int(round(milk_default)),
-            step=1,
+            options=milk_options,
+            index=milk_options.index(milk_selected_default),
+            key="milk_price_change_dropdown",
         )
         if float(milk_price) != float(milk_default):
             updated_table = _update_scenario_control_value(
@@ -6355,12 +6362,15 @@ def main() -> None:
             st.session_state.assumptions["Scenario Controls"] = updated_table
             _clear_schedule_editor_state("assump::scenario_controls")
 
-        feed_cost = st.slider(
+        feed_options = list(range(-50, 51))
+        feed_selected_default = int(round(feed_default))
+        if feed_selected_default not in feed_options:
+            feed_selected_default = 0
+        feed_cost = st.selectbox(
             "Feed cost change (%)",
-            min_value=-50,
-            max_value=50,
-            value=int(round(feed_default)),
-            step=1,
+            options=feed_options,
+            index=feed_options.index(feed_selected_default),
+            key="feed_cost_change_dropdown",
         )
         if float(feed_cost) != float(feed_default):
             updated_table = _update_scenario_control_value(
