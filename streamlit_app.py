@@ -4557,6 +4557,162 @@ def _sync_shared_model_context(results: Optional[Dict[str, Any]]) -> Dict[str, A
     return context
 
 
+def _rag_store() -> Dict[str, Any]:
+    store = st.session_state.setdefault(
+        "rag_framework",
+        {
+            "documents": [],
+            "index": pd.DataFrame(),
+            "version": 0,
+            "last_reindexed_at": None,
+        },
+    )
+    return store
+
+
+def _chunk_text(text: str, chunk_size: int = 450) -> List[str]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    return [cleaned[i : i + chunk_size] for i in range(0, len(cleaned), chunk_size)]
+
+
+def _ingest_rag_document(title: str, content: str, source: str) -> bool:
+    title_clean = (title or "").strip()
+    content_clean = (content or "").strip()
+    if not title_clean or not content_clean:
+        return False
+
+    store = _rag_store()
+    docs = list(store.get("documents", []))
+    doc_id = f"doc_{len(docs) + 1}"
+    docs.append(
+        {
+            "id": doc_id,
+            "title": title_clean,
+            "source": source,
+            "content": content_clean,
+            "updated_at": pd.Timestamp.utcnow().isoformat(),
+        }
+    )
+    store["documents"] = docs
+    st.session_state["rag_framework"] = store
+    return True
+
+
+def _reindex_rag(snapshot: Dict[str, Any]) -> pd.DataFrame:
+    store = _rag_store()
+    records: List[Dict[str, Any]] = []
+
+    snapshot_index = _snapshot_index(snapshot)
+    if not snapshot_index.empty:
+        for _, row in snapshot_index.iterrows():
+            records.append(
+                {
+                    "Chunk ID": f"snap::{row.get('Section')}::{row.get('Key')}",
+                    "Source": "model_snapshot",
+                    "Section": row.get("Section"),
+                    "Text": str(row.get("Text", "")),
+                }
+            )
+
+    for doc in store.get("documents", []):
+        chunks = _chunk_text(str(doc.get("content", "")))
+        for idx, chunk in enumerate(chunks, start=1):
+            records.append(
+                {
+                    "Chunk ID": f"{doc.get('id')}::chunk_{idx}",
+                    "Source": doc.get("source", "manual"),
+                    "Section": doc.get("title", "document"),
+                    "Text": chunk,
+                }
+            )
+
+    index_df = pd.DataFrame(records)
+    store["index"] = index_df
+    store["version"] = int(store.get("version", 0)) + 1
+    store["last_reindexed_at"] = pd.Timestamp.utcnow().isoformat()
+    st.session_state["rag_framework"] = store
+    return index_df
+
+
+def _retrieve_rag_context(query: str, top_n: int = 8) -> pd.DataFrame:
+    store = _rag_store()
+    index_df = store.get("index")
+    if not isinstance(index_df, pd.DataFrame) or index_df.empty:
+        return pd.DataFrame(columns=["Chunk ID", "Source", "Section", "Text", "score"])
+
+    tokens = {token for token in re.findall(r"[a-zA-Z0-9_]+", (query or "").lower()) if token}
+    scored = index_df.copy()
+    if not tokens:
+        scored["score"] = 0
+        return scored.head(top_n)
+
+    scored["score"] = scored["Text"].str.lower().apply(
+        lambda text: sum(1 for token in tokens if token in text)
+    )
+    scored = scored.sort_values(["score", "Source"], ascending=[False, True])
+    filtered = scored[scored["score"] > 0]
+    return (filtered if not filtered.empty else scored).head(top_n)
+
+
+def _render_rag_admin(snapshot: Dict[str, Any]) -> pd.DataFrame:
+    store = _rag_store()
+    st.markdown("### Retrieval-Augmented Generation (RAG) Hub")
+    st.caption(
+        "Ingest documents/data, re-index knowledge, and retrieve grounded context for the "
+        "orchestration engine."
+    )
+
+    with st.expander("RAG Ingestion & Indexing", expanded=False):
+        title = st.text_input("Document title", key="rag_doc_title")
+        content = st.text_area(
+            "Document or data content",
+            key="rag_doc_content",
+            placeholder="Paste policies, research notes, investor memos, or model assumptions...",
+        )
+        add_col, reindex_col = st.columns(2)
+        if add_col.button("Ingest Document", key="rag_ingest_btn"):
+            if _ingest_rag_document(title, content, source="manual_text"):
+                st.success("Document ingested.")
+            else:
+                st.warning("Provide both title and content before ingestion.")
+
+        uploaded = st.file_uploader(
+            "Upload TXT/CSV for ingestion",
+            type=["txt", "csv"],
+            key="rag_uploader",
+        )
+        if uploaded is not None and st.button("Ingest Uploaded File", key="rag_ingest_file"):
+            raw = uploaded.getvalue().decode("utf-8", errors="ignore")
+            if _ingest_rag_document(uploaded.name, raw, source="uploaded_file"):
+                st.success(f"Ingested {uploaded.name}.")
+
+        if reindex_col.button("Re-index Knowledge", key="rag_reindex_btn"):
+            _reindex_rag(snapshot)
+            st.success("RAG index refreshed.")
+
+        docs_df = pd.DataFrame(store.get("documents", []))
+        if not docs_df.empty:
+            st.markdown("**Ingested Documents**")
+            st.dataframe(
+                docs_df[[col for col in ["id", "title", "source", "updated_at"] if col in docs_df.columns]],
+                use_container_width=True,
+            )
+
+        index_df = store.get("index", pd.DataFrame())
+        st.markdown("**Index Status**")
+        st.write(
+            f"Version: {store.get('version', 0)} | "
+            f"Chunks: {len(index_df) if isinstance(index_df, pd.DataFrame) else 0} | "
+            f"Last Reindex: {store.get('last_reindexed_at')}"
+        )
+
+    if not isinstance(store.get("index"), pd.DataFrame) or store.get("index").empty:
+        return _reindex_rag(snapshot)
+    return store["index"]
+
+
 def _orchestration_default_config() -> Dict[str, Any]:
     return {
         "investor_profile": "Growth + resilience",
@@ -4875,8 +5031,8 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
     st.session_state["ai_orchestration_last_query"] = query
 
     snapshot = _build_orchestration_snapshot(results)
-    index_df = _snapshot_index(snapshot)
-    retrieved = _retrieve_snapshot_context(index_df, query)
+    index_df = _render_rag_admin(snapshot)
+    retrieved = _retrieve_rag_context(query)
     output = _run_orchestration_engine(query, config, snapshot, retrieved)
 
     score_cols = st.columns(3)
@@ -4887,7 +5043,7 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
     score_cols[1].metric("Governance", f"{output['governance_score']:.1f}/100")
     score_cols[2].metric(
         "Indexed Knowledge Records",
-        len(index_df),
+        len(index_df) if isinstance(index_df, pd.DataFrame) else 0,
     )
 
     st.markdown("### Unified Decision Support Output")
