@@ -3670,7 +3670,75 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
         identifier = f"detail::{_scenario_key_suffix(name)}"
         _clear_schedule_editor_state(identifier)
 
+    _sync_horizon_dependent_state(start_year, end_year)
     _reset_cached_results()
+
+
+def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
+    """Propagate horizon edits to dependent pages/tables."""
+
+    if start_year > end_year:
+        start_year, end_year = end_year, start_year
+
+    # Keep year-based assumption tables aligned to the active horizon.
+    assumptions = st.session_state.get("assumptions", {})
+    if isinstance(assumptions, dict):
+        for table_name in ["Pricing", "Operating Costs"]:
+            table = assumptions.get(table_name)
+            if not isinstance(table, pd.DataFrame) or table.empty or "Year" not in table:
+                continue
+            work = table.copy()
+            year_col = pd.to_numeric(work.get("Year"), errors="coerce")
+            work["Year"] = year_col
+            mask = year_col.between(start_year, end_year, inclusive="both")
+            if mask.any():
+                work = work.loc[mask].reset_index(drop=True)
+            elif not work.empty:
+                work.loc[:, "Year"] = start_year
+            assumptions[table_name] = work
+        st.session_state.assumptions = assumptions
+
+    # Keep supplementary schedules aligned where year columns exist.
+    supplementary = st.session_state.get("supplementary", {})
+    if isinstance(supplementary, dict):
+        for name, table in supplementary.items():
+            if not isinstance(table, pd.DataFrame) or table.empty or "Year" not in table:
+                continue
+            work = table.copy()
+            years = pd.to_numeric(work.get("Year"), errors="coerce")
+            mask = years.between(start_year, end_year, inclusive="both")
+            if mask.any():
+                work = work.loc[mask].reset_index(drop=True)
+            elif not work.empty:
+                work.loc[:, "Year"] = start_year
+            supplementary[name] = work
+        st.session_state.supplementary = supplementary
+
+    # Sync analytics-framework period labels to the rebased core schedule.
+    framework = st.session_state.get("analytics_framework", {})
+    core_periods = _normalize_period(
+        st.session_state.get("core_schedule", pd.DataFrame()).get("Period", pd.Series(dtype=str))
+    ).tolist()
+    if isinstance(framework, dict) and core_periods:
+        for tool_key, config in framework.items():
+            if not isinstance(config, dict):
+                continue
+            data_table = config.get("data")
+            if not isinstance(data_table, pd.DataFrame) or data_table.empty:
+                continue
+            if "Period" not in data_table.columns:
+                continue
+            work = data_table.copy()
+            count = len(work)
+            if count > 0:
+                work["Period"] = core_periods[:count] if len(core_periods) >= count else (
+                    core_periods + [core_periods[-1]] * (count - len(core_periods))
+                )
+            config["data"] = work
+            framework[tool_key] = config
+        st.session_state.analytics_framework = framework
+
+    _sync_shared_model_context(st.session_state.get("results"))
 
 def _default_capital_financing_table() -> pd.DataFrame:
     return pd.DataFrame(
