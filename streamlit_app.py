@@ -4309,6 +4309,7 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
     )
     framework = _analytics_framework_store()
     controls = _analytics_framework_control_store()
+    shared_context = _sync_shared_model_context(results)
 
     st.markdown("#### Global Analytics Controls")
     g1, g2, g3, g4 = st.columns(4)
@@ -4345,6 +4346,11 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
         key="analytics_period_filter",
     )
     st.session_state["analytics_framework_controls"] = controls
+    shared_context = _sync_shared_model_context(results)
+    current_scenario_label = shared_context.get("active_result_scenario") or shared_context.get(
+        "selected_scenario_name", "Scenario"
+    )
+    st.caption(f"Synced model context scenario: **{current_scenario_label}**")
 
     module_options = [tool["title"] for tool in ANALYTICS_FRAMEWORK_TOOLS]
     active_modules = st.multiselect(
@@ -4512,6 +4518,43 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
         st.bar_chart(module_summary_df.set_index("Module")[["Modeled Profit"]])
 
     st.session_state["analytics_framework"] = framework
+
+
+def _sync_shared_model_context(results: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    assumptions = st.session_state.get("assumptions", {})
+    production = assumptions.get("Production Horizon", pd.DataFrame()) if isinstance(assumptions, dict) else pd.DataFrame()
+    controls_table = assumptions.get("Scenario Controls", pd.DataFrame()) if isinstance(assumptions, dict) else pd.DataFrame()
+    valuation_table = assumptions.get("Valuation Inputs", pd.DataFrame()) if isinstance(assumptions, dict) else pd.DataFrame()
+
+    production_context: Dict[str, Any] = {}
+    if isinstance(production, pd.DataFrame) and not production.empty:
+        production_context = {
+            "start_year": int(pd.to_numeric(production.iloc[0].get("Start Year"), errors="coerce") or 0),
+            "end_year": int(pd.to_numeric(production.iloc[0].get("End Year"), errors="coerce") or 0),
+        }
+
+    scenario_controls = (
+        _scenario_controls_value_map(controls_table)
+        if isinstance(controls_table, pd.DataFrame)
+        else {}
+    )
+    valuation_inputs = (
+        _valuation_table_to_inputs(valuation_table)
+        if isinstance(valuation_table, pd.DataFrame)
+        else {}
+    )
+
+    context = {
+        "selected_scenario_name": st.session_state.get("selected_scenario_name"),
+        "active_result_scenario": (results or {}).get("selected_scenario"),
+        "production_horizon": production_context,
+        "scenario_controls": scenario_controls,
+        "valuation_inputs": valuation_inputs,
+        "analytics_controls": st.session_state.get("analytics_framework_controls", {}).copy(),
+        "ai_orchestration_config": st.session_state.get("ai_orchestration_config", {}).copy(),
+    }
+    st.session_state["shared_model_context"] = context
+    return context
 
 
 def _orchestration_default_config() -> Dict[str, Any]:
@@ -4755,6 +4798,11 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
     )
 
     config = _ai_orchestration_store()
+    shared_context = _sync_shared_model_context(results)
+    scenario_label = shared_context.get("active_result_scenario") or shared_context.get(
+        "selected_scenario_name", "Scenario"
+    )
+    st.caption(f"Using shared model context for scenario: **{scenario_label}**")
     with st.expander("Unified Configuration Model", expanded=True):
         c1, c2, c3 = st.columns(3)
         config["investor_profile"] = c1.text_input(
@@ -4917,6 +4965,7 @@ def main() -> None:
     _ensure_default_results_loaded()
 
     _ensure_active_scenario_selection()
+    _sync_shared_model_context(st.session_state.get("results"))
 
     excel_download_container = st.container()
 
