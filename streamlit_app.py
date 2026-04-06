@@ -4656,13 +4656,14 @@ def _retrieve_rag_context(query: str, top_n: int = 8) -> pd.DataFrame:
     return (filtered if not filtered.empty else scored).head(top_n)
 
 
-def _render_rag_admin(snapshot: Dict[str, Any]) -> pd.DataFrame:
+def _render_rag_admin(snapshot: Dict[str, Any], show_header: bool = True) -> pd.DataFrame:
     store = _rag_store()
-    st.markdown("### Retrieval-Augmented Generation (RAG) Hub")
-    st.caption(
-        "Ingest documents/data, re-index knowledge, and retrieve grounded context for the "
-        "orchestration engine."
-    )
+    if show_header:
+        st.markdown("### Retrieval-Augmented Generation (RAG) Hub")
+        st.caption(
+            "Ingest documents/data, re-index knowledge, and retrieve grounded context for the "
+            "orchestration engine."
+        )
 
     with st.expander("RAG Ingestion & Indexing", expanded=False):
         title = st.text_input("Document title", key="rag_doc_title")
@@ -4678,14 +4679,19 @@ def _render_rag_admin(snapshot: Dict[str, Any]) -> pd.DataFrame:
             else:
                 st.warning("Provide both title and content before ingestion.")
 
-        uploaded = st.file_uploader(
-            "Upload TXT/CSV for ingestion",
-            type=["txt", "csv"],
-            key="rag_uploader",
-        )
+        uploaded = st.file_uploader("Upload file for ingestion", key="rag_uploader")
         if uploaded is not None and st.button("Ingest Uploaded File", key="rag_ingest_file"):
-            raw = uploaded.getvalue().decode("utf-8", errors="ignore")
-            if _ingest_rag_document(uploaded.name, raw, source="uploaded_file"):
+            raw_bytes = uploaded.getvalue()
+            try:
+                raw_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                raw_text = (
+                    f"Binary document uploaded: {uploaded.name}\n"
+                    f"Content-Type: {uploaded.type}\n"
+                    f"Size (bytes): {len(raw_bytes)}\n"
+                    "Note: This binary file requires specialized parsing for full text extraction."
+                )
+            if _ingest_rag_document(uploaded.name, raw_text, source="uploaded_file"):
                 st.success(f"Ingested {uploaded.name}.")
 
         if reindex_col.button("Re-index Knowledge", key="rag_reindex_btn"):
@@ -4959,7 +4965,9 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         "selected_scenario_name", "Scenario"
     )
     st.caption(f"Using shared model context for scenario: **{scenario_label}**")
-    with st.expander("Unified Configuration Model", expanded=True):
+    snapshot = _build_orchestration_snapshot(results)
+    with st.expander("Unified Orchestration (Config + Runtime + RAG)", expanded=True):
+        st.markdown("#### Unified Configuration Model")
         c1, c2, c3 = st.columns(3)
         config["investor_profile"] = c1.text_input(
             "Investor Profile",
@@ -5018,22 +5026,39 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         )
         st.session_state["ai_orchestration_config"] = config
 
-    with st.expander("LLM & ML Runtime Settings", expanded=False):
+        st.markdown("#### LLM & ML Runtime Settings")
         _render_ai_settings(st.session_state.setdefault("ai_payload", {}))
 
-    query = st.text_area(
-        "Strategic Question / Decision Prompt",
-        value=st.session_state.get("ai_orchestration_last_query", ""),
-        placeholder=(
-            "Example: What actions improve investor readiness under a severe feed-cost shock?"
-        ),
-    )
-    st.session_state["ai_orchestration_last_query"] = query
+        st.markdown("#### Retrieval-Augmented Generation (RAG)")
+        index_df = _render_rag_admin(snapshot, show_header=False)
 
-    snapshot = _build_orchestration_snapshot(results)
-    index_df = _render_rag_admin(snapshot)
-    retrieved = _retrieve_rag_context(query)
-    output = _run_orchestration_engine(query, config, snapshot, retrieved)
+    messages = st.session_state.setdefault("ai_orchestration_chat_messages", [])
+    st.markdown("### Intelligent Orchestration Chat")
+    for msg in messages[-12:]:
+        with st.chat_message(msg.get("role", "assistant")):
+            st.markdown(msg.get("content", ""))
+
+    prompt = st.chat_input(
+        "Ask a strategic question (e.g., Compare downside resilience and investor readiness)."
+    )
+    current_query = ""
+    if prompt:
+        st.session_state["ai_orchestration_last_query"] = prompt
+        current_query = prompt
+        retrieved = _retrieve_rag_context(prompt)
+        output = _run_orchestration_engine(prompt, config, snapshot, retrieved)
+        assistant_reply = (
+            f"{output['grounded_answer']}\n\n"
+            f"Top recommendations:\n- " + "\n- ".join(output["recommendations"])
+        )
+        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "assistant", "content": assistant_reply})
+        st.session_state["ai_orchestration_chat_messages"] = messages
+    else:
+        query = st.session_state.get("ai_orchestration_last_query", "Strategic overview")
+        current_query = query
+        retrieved = _retrieve_rag_context(query)
+        output = _run_orchestration_engine(query, config, snapshot, retrieved)
 
     score_cols = st.columns(3)
     score_cols[0].metric(
@@ -5069,10 +5094,10 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
     st.dataframe(output["retrieved_context"], use_container_width=True)
 
     history = st.session_state.setdefault("ai_orchestration_chat_history", [])
-    if query.strip():
+    if current_query.strip():
         history.append(
             {
-                "Query": query.strip(),
+                "Query": current_query.strip(),
                 "Response": output["grounded_answer"],
                 "Scenario": snapshot.get("selected_scenario", "Scenario"),
             }
