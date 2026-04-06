@@ -5182,8 +5182,8 @@ def main() -> None:
 
     tabs = st.tabs(
         [
-            "Input Schedule",
             "Assumptions",
+            "Input Schedule",
             "Financials",
             "Dashboard",
             "Advanced Analytics",
@@ -5191,7 +5191,7 @@ def main() -> None:
         ]
     )
 
-    with tabs[0]:
+    with tabs[1]:
         st.subheader("Input Schedule")
         st.markdown("### Scenario Explorer")
         _render_model_author_editor()
@@ -6311,7 +6311,7 @@ def main() -> None:
 
     assumption_tables: Dict[str, pd.DataFrame] = {}
 
-    with tabs[1]:
+    with tabs[0]:
         st.subheader("Assumptions")
         st.caption(
             "All core model assumption categories are consolidated below on a single page."
