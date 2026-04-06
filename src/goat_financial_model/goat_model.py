@@ -360,6 +360,92 @@ class GoatModel:
             return None
         return float(value)
 
+    def computed_npv(self) -> Optional[float]:
+        """Return DCF-based NPV from UFCF timeline, WACC, and terminal value."""
+
+        cash_flows = self.ufcf()
+        if cash_flows is None or cash_flows.empty:
+            return None
+
+        rate = self.wacc()
+        if rate is None:
+            return None
+        if rate > 1:
+            rate = rate / 100.0
+        if rate <= -0.9999:
+            return None
+
+        timeline = cash_flows.index.to_series().sort_values()
+        diffs_days = timeline.diff().dt.days.astype(float)
+        diffs_years = (diffs_days / 365.25).fillna(1.0).clip(lower=1e-9)
+        periods = diffs_years.cumsum().to_numpy()
+
+        discount_factors = np.power(1 + rate, periods)
+        npv_value = float(np.nansum(cash_flows.to_numpy() / discount_factors))
+
+        terminal_value = self.terminal_value()
+        if terminal_value is not None:
+            last_step = float(diffs_years.iloc[-1]) if len(diffs_years) else 1.0
+            horizon = float(periods[-1] + last_step) if len(periods) else 1.0
+            npv_value += float(terminal_value) / ((1 + rate) ** horizon)
+
+        return npv_value
+
+    def computed_irr(self) -> Optional[float]:
+        """Solve an IRR from irregular UFCF timing using a bisection search."""
+
+        cash_flows = self.ufcf()
+        if cash_flows is None or cash_flows.empty:
+            return None
+
+        timeline = cash_flows.index.to_series().sort_values()
+        diffs_days = timeline.diff().dt.days.astype(float)
+        diffs_years = (diffs_days / 365.25).fillna(1.0).clip(lower=1e-9)
+        periods = diffs_years.cumsum().to_numpy()
+
+        values = cash_flows.to_numpy().astype(float)
+        terminal_value = self.terminal_value()
+        if terminal_value is not None and len(values) > 0:
+            last_step = float(diffs_years.iloc[-1]) if len(diffs_years) else 1.0
+            terminal_period = float(periods[-1] + last_step) if len(periods) else 1.0
+        else:
+            terminal_period = None
+
+        def _npv(rate: float) -> float:
+            if rate <= -0.9999:
+                return np.nan
+            discounted = np.nansum(values / np.power(1 + rate, periods))
+            if terminal_value is not None and terminal_period is not None:
+                discounted += float(terminal_value) / ((1 + rate) ** terminal_period)
+            return float(discounted)
+
+        low, high = -0.95, 5.0
+        npv_low, npv_high = _npv(low), _npv(high)
+        if not np.isfinite(npv_low) or not np.isfinite(npv_high):
+            return None
+        if npv_low == 0:
+            return low
+        if npv_high == 0:
+            return high
+        if npv_low * npv_high > 0:
+            return None
+
+        for _ in range(120):
+            mid = (low + high) / 2.0
+            npv_mid = _npv(mid)
+            if not np.isfinite(npv_mid):
+                return None
+            if abs(npv_mid) < 1e-7:
+                return mid
+            if npv_low * npv_mid < 0:
+                high = mid
+                npv_high = npv_mid
+            else:
+                low = mid
+                npv_low = npv_mid
+
+        return (low + high) / 2.0
+
     def ufcf(self, column: Optional[str] = None) -> Optional[pd.Series]:
         table = None
         for key in ("UFCF", "Unlevered Free Cash Flow"):
@@ -689,6 +775,14 @@ class GoatModel:
         out["Net Margin %"] = self._safe_divide(grp["NPAT"], grp["Revenue"])
         out["COGS % of Revenue"] = self._safe_divide(grp["COGS"], grp["Revenue"])
         out["Revenue YoY %"] = grp["Revenue"].pct_change()
+
+        computed_npv = self.computed_npv()
+        if computed_npv is not None:
+            out["NPV"] = computed_npv
+
+        computed_irr = self.computed_irr()
+        if computed_irr is not None:
+            out["IRR"] = computed_irr
         return out
 
     # ---------- Break-even ----------

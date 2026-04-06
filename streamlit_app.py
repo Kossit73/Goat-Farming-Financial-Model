@@ -7071,7 +7071,8 @@ def main() -> None:
 
         valuation_metrics = {
             "WACC": model.wacc(),
-            "NPV": model.npv(),
+            "NPV": model.computed_npv() if hasattr(model, "computed_npv") else model.npv(),
+            "IRR": model.computed_irr() if hasattr(model, "computed_irr") else None,
             "Terminal Value": model.terminal_value(),
         }
         non_null_metrics = [val for val in valuation_metrics.values() if val is not None]
@@ -7081,7 +7082,7 @@ def main() -> None:
             for label, value in valuation_metrics.items():
                 if value is None:
                     continue
-                if label == "WACC":
+                if label in {"WACC", "IRR"}:
                     summary_cols[idx].metric(label, f"{value * 100:.2f}%")
                 else:
                     summary_cols[idx].metric(label, f"{value:,.2f}")
