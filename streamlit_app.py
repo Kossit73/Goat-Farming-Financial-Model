@@ -4679,20 +4679,38 @@ def _render_rag_admin(snapshot: Dict[str, Any], show_header: bool = True) -> pd.
             else:
                 st.warning("Provide both title and content before ingestion.")
 
-        uploaded = st.file_uploader("Upload file for ingestion", key="rag_uploader")
-        if uploaded is not None and st.button("Ingest Uploaded File", key="rag_ingest_file"):
-            raw_bytes = uploaded.getvalue()
-            try:
-                raw_text = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                raw_text = (
-                    f"Binary document uploaded: {uploaded.name}\n"
-                    f"Content-Type: {uploaded.type}\n"
-                    f"Size (bytes): {len(raw_bytes)}\n"
-                    "Note: This binary file requires specialized parsing for full text extraction."
+        uploaded_files = st.file_uploader(
+            "Upload file(s) for ingestion (up to 200MB total)",
+            key="rag_uploader",
+            accept_multiple_files=True,
+        )
+        if uploaded_files and st.button("Ingest Uploaded File(s)", key="rag_ingest_file"):
+            total_size = sum(len(file.getvalue()) for file in uploaded_files)
+            max_size_bytes = 200 * 1024 * 1024
+            if total_size > max_size_bytes:
+                st.error(
+                    "Uploaded files exceed the 200MB combined limit. "
+                    "Please reduce the selection and try again."
                 )
-            if _ingest_rag_document(uploaded.name, raw_text, source="uploaded_file"):
-                st.success(f"Ingested {uploaded.name}.")
+            else:
+                ingested_count = 0
+                for uploaded in uploaded_files:
+                    raw_bytes = uploaded.getvalue()
+                    try:
+                        raw_text = raw_bytes.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raw_text = (
+                            f"Binary document uploaded: {uploaded.name}\n"
+                            f"Content-Type: {uploaded.type}\n"
+                            f"Size (bytes): {len(raw_bytes)}\n"
+                            "Note: This binary file requires specialized parsing for full text extraction."
+                        )
+                    if _ingest_rag_document(
+                        uploaded.name, raw_text, source="uploaded_file"
+                    ):
+                        ingested_count += 1
+                if ingested_count:
+                    st.success(f"Ingested {ingested_count} uploaded file(s).")
 
         if reindex_col.button("Re-index Knowledge", key="rag_reindex_btn"):
             _reindex_rag(snapshot)
