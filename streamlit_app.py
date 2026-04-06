@@ -6511,7 +6511,7 @@ def main() -> None:
                 "Base Price",
                 "Price Growth %",
             ]
-            default_frame = st.session_state.get("default_pricing_editor")
+            default_frame = st.session_state.get("default_pricing_editor_seed")
             if not isinstance(default_frame, pd.DataFrame):
                 default_frame = _template_to_dataframe(
                     _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
@@ -6548,7 +6548,7 @@ def main() -> None:
                 _set_template("pricing_rows", baseline_template)
                 pricing_table = _default_pricing_table()
                 st.session_state.assumptions["Pricing"] = pricing_table
-                st.session_state["default_pricing_editor"] = _template_to_dataframe(
+                st.session_state["default_pricing_editor_seed"] = _template_to_dataframe(
                     baseline_template, pricing_columns
                 )
                 st.success(
@@ -6561,7 +6561,7 @@ def main() -> None:
                 _set_template("pricing_rows", records)
                 pricing_table = _default_pricing_table()
                 st.session_state.assumptions["Pricing"] = pricing_table
-                st.session_state["default_pricing_editor"] = template_editor
+                st.session_state["default_pricing_editor_seed"] = template_editor
                 st.success(
                     "Pricing assumptions refreshed from updated defaults."
                 )
@@ -6687,7 +6687,7 @@ def main() -> None:
             )
 
             operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
-            default_frame = st.session_state.get("default_operating_editor")
+            default_frame = st.session_state.get("default_operating_editor_seed")
             if not isinstance(default_frame, pd.DataFrame):
                 default_frame = _template_to_dataframe(
                     _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
@@ -6725,7 +6725,7 @@ def main() -> None:
                 _set_template("operating_rows", baseline_template)
                 operating_table = _default_operating_cost_table()
                 st.session_state.assumptions["Operating Costs"] = operating_table
-                st.session_state["default_operating_editor"] = _template_to_dataframe(
+                st.session_state["default_operating_editor_seed"] = _template_to_dataframe(
                     baseline_template, operating_columns
                 )
                 st.success(
@@ -6738,7 +6738,7 @@ def main() -> None:
                 _set_template("operating_rows", records)
                 operating_table = _default_operating_cost_table()
                 st.session_state.assumptions["Operating Costs"] = operating_table
-                st.session_state["default_operating_editor"] = template_editor
+                st.session_state["default_operating_editor_seed"] = template_editor
                 st.success(
                     "Operating cost assumptions refreshed from updated defaults."
                 )
