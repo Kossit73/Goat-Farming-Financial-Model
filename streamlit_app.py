@@ -5060,6 +5060,20 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         retrieved = _retrieve_rag_context(query)
         output = _run_orchestration_engine(query, config, snapshot, retrieved)
 
+    history = st.session_state.setdefault("ai_orchestration_chat_history", [])
+    if current_query.strip():
+        history.append(
+            {
+                "Query": current_query.strip(),
+                "Response": output["grounded_answer"],
+                "Scenario": snapshot.get("selected_scenario", "Scenario"),
+            }
+        )
+        st.session_state["ai_orchestration_chat_history"] = history[-20:]
+    if history:
+        st.markdown("**Context Retention (Recent Q&A)**")
+        st.dataframe(pd.DataFrame(history[-10:]), use_container_width=True)
+
     score_cols = st.columns(3)
     score_cols[0].metric(
         "Investor Readiness",
@@ -5092,20 +5106,6 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
 
     st.markdown("**RAG Retrieval Context (Indexed Knowledge)**")
     st.dataframe(output["retrieved_context"], use_container_width=True)
-
-    history = st.session_state.setdefault("ai_orchestration_chat_history", [])
-    if current_query.strip():
-        history.append(
-            {
-                "Query": current_query.strip(),
-                "Response": output["grounded_answer"],
-                "Scenario": snapshot.get("selected_scenario", "Scenario"),
-            }
-        )
-        st.session_state["ai_orchestration_chat_history"] = history[-20:]
-    if history:
-        st.markdown("**Context Retention (Recent Q&A)**")
-        st.dataframe(pd.DataFrame(history[-10:]), use_container_width=True)
 
 
 def main() -> None:
