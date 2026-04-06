@@ -4119,6 +4119,17 @@ def _analytics_framework_store() -> Dict[str, Dict[str, Any]]:
         store[key] = {
             "enabled": False,
             "data_sources": ["Scenario Output"],
+            "model_mode": "Balanced",
+            "tool_shock_override": 0.0,
+            "data": _default_framework_table(
+                ["Period", "Revenue", "Cost", "Volume"],
+                [
+                    ("P1", 150000.0, 105000.0, 1200.0),
+                    ("P2", 158000.0, 109000.0, 1240.0),
+                    ("P3", 166000.0, 112500.0, 1280.0),
+                    ("P4", 172000.0, 115000.0, 1310.0),
+                ],
+            ),
             "inputs": _default_framework_table(
                 ["Input", "Source", "Transform", "Active"],
                 [
@@ -4152,6 +4163,16 @@ def _analytics_framework_store() -> Dict[str, Dict[str, Any]]:
     return store
 
 
+def _analytics_framework_control_store() -> Dict[str, Any]:
+    default_controls = {
+        "scenario": "Base",
+        "custom_shock_pct": 0.0,
+        "focus_metric": "Profit",
+        "period_filter": "All",
+    }
+    return st.session_state.setdefault("analytics_framework_controls", default_controls)
+
+
 def _numeric_column_mean(df: pd.DataFrame, column: str) -> float:
     if column not in df.columns:
         return 0.0
@@ -4161,42 +4182,86 @@ def _numeric_column_mean(df: pd.DataFrame, column: str) -> float:
     return float(numeric.mean())
 
 
+def _scenario_shock_value(controls: Dict[str, Any]) -> float:
+    scenario = controls.get("scenario", "Base")
+    if scenario == "Upside":
+        return 8.0
+    if scenario == "Downside":
+        return -10.0
+    if scenario == "Stress":
+        return -25.0
+    if scenario == "Custom":
+        return float(controls.get("custom_shock_pct", 0.0))
+    return 0.0
+
+
 def _analytics_framework_output(
-    tool_config: Dict[str, Any], results: Optional[Dict[str, Any]]
-) -> pd.DataFrame:
+    tool_config: Dict[str, Any],
+    results: Optional[Dict[str, Any]],
+    controls: Dict[str, Any],
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     assumptions = tool_config.get("assumptions", pd.DataFrame())
     drivers = tool_config.get("drivers", pd.DataFrame())
     scenarios = tool_config.get("scenarios", pd.DataFrame())
+    data_table = tool_config.get("data", pd.DataFrame())
 
     assumption_level = _numeric_column_mean(assumptions, "Value")
     driver_range = (
         abs(_numeric_column_mean(drivers, "High"))
         + abs(_numeric_column_mean(drivers, "Low"))
     ) / 2.0
-    avg_shock = _numeric_column_mean(scenarios, "Shock %")
-    stress_probability = _numeric_column_mean(scenarios, "Probability %")
+    tool_shock = _numeric_column_mean(scenarios, "Shock %")
+    scenario_shock = _scenario_shock_value(controls)
+    override_shock = float(tool_config.get("tool_shock_override", 0.0))
+    total_shock = tool_shock + scenario_shock + override_shock
 
     base_npv = np.nan
     base_irr = np.nan
     if results is not None and isinstance(results.get("kpis"), pd.DataFrame):
         kpi_df = results["kpis"]
         if "NPV" in kpi_df.columns:
-            base_npv = float(kpi_df["NPV"].iloc[0])
+            base_npv = float(pd.to_numeric(kpi_df["NPV"], errors="coerce").iloc[0])
         if "IRR" in kpi_df.columns:
-            base_irr = float(kpi_df["IRR"].iloc[0])
+            base_irr = float(pd.to_numeric(kpi_df["IRR"], errors="coerce").iloc[0])
 
-    impact_score = (driver_range * 0.4) + (assumption_level * 0.2) + (avg_shock * -0.3)
-    resilience_score = max(0.0, 100.0 - abs(avg_shock) - (stress_probability * 0.2))
+    modeled = data_table.copy(deep=True) if isinstance(data_table, pd.DataFrame) else pd.DataFrame()
+    if modeled.empty:
+        modeled = _default_framework_table(
+            ["Period", "Revenue", "Cost", "Volume"],
+            [("P1", 150000.0, 105000.0, 1200.0)],
+        )
+    for col in ["Revenue", "Cost", "Volume"]:
+        if col not in modeled.columns:
+            modeled[col] = 0.0
+        modeled[col] = pd.to_numeric(modeled[col], errors="coerce").fillna(0.0)
 
-    return pd.DataFrame(
+    modeled["Revenue_adj"] = modeled["Revenue"] * (1 + (total_shock / 100.0))
+    modeled["Cost_adj"] = modeled["Cost"] * (1 - (total_shock * 0.35 / 100.0))
+    modeled["Profit_adj"] = modeled["Revenue_adj"] - modeled["Cost_adj"]
+    modeled["Margin_adj"] = np.where(
+        modeled["Revenue_adj"] != 0,
+        modeled["Profit_adj"] / modeled["Revenue_adj"],
+        0.0,
+    )
+
+    base_profit = float(modeled["Profit_adj"].mean())
+    base_margin = float(modeled["Margin_adj"].mean())
+    impact_score = (driver_range * 0.35) + (assumption_level * 0.2) + (total_shock * -0.25)
+    resilience_score = max(0.0, 100.0 - abs(total_shock) - max(0.0, -base_margin * 40))
+    npv_proxy = base_profit * max(1.0, assumption_level / 12.0)
+
+    summary = pd.DataFrame(
         {
             "Metric": [
                 "Configured Data Sources",
                 "Average Assumption Level",
                 "Average Driver Stress Range",
-                "Average Scenario Shock",
+                "Applied Shock (%)",
+                "Modeled Profit",
+                "Modeled Margin",
                 "Resilience Score",
                 "Indicative Impact Score",
+                "Modeled NPV Proxy",
                 "Reference NPV",
                 "Reference IRR",
             ],
@@ -4204,14 +4269,36 @@ def _analytics_framework_output(
                 len(tool_config.get("data_sources", [])),
                 round(assumption_level, 2),
                 round(driver_range, 2),
-                round(avg_shock, 2),
+                round(total_shock, 2),
+                round(base_profit, 2),
+                round(base_margin, 4),
                 round(resilience_score, 2),
                 round(impact_score, 2),
+                round(npv_proxy, 2),
                 round(base_npv, 2) if pd.notna(base_npv) else np.nan,
                 round(base_irr, 4) if pd.notna(base_irr) else np.nan,
             ],
         }
     )
+
+    sensitivity = pd.DataFrame({"Shock %": [-20, -10, 0, 10, 20]})
+    sensitivity["Profit"] = sensitivity["Shock %"].apply(
+        lambda shock: base_profit * (1 + (shock / 100.0))
+    )
+
+    scenario_compare = scenarios.copy(deep=True) if isinstance(scenarios, pd.DataFrame) else pd.DataFrame()
+    if scenario_compare.empty:
+        scenario_compare = pd.DataFrame(
+            {"Scenario": ["Base"], "Shock %": [0.0], "Probability %": [100.0]}
+        )
+    scenario_compare["Shock %"] = pd.to_numeric(
+        scenario_compare.get("Shock %", pd.Series(dtype=float)), errors="coerce"
+    ).fillna(0.0)
+    scenario_compare["Modeled Profit"] = scenario_compare["Shock %"].apply(
+        lambda shock: base_profit * (1 + (shock / 100.0))
+    )
+
+    return summary, modeled, sensitivity, scenario_compare
 
 
 def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
@@ -4221,6 +4308,53 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
         "scenario settings. Outputs refresh automatically on every change."
     )
     framework = _analytics_framework_store()
+    controls = _analytics_framework_control_store()
+
+    st.markdown("#### Global Analytics Controls")
+    g1, g2, g3, g4 = st.columns(4)
+    controls["scenario"] = g1.selectbox(
+        "Scenario View",
+        options=["Base", "Upside", "Downside", "Stress", "Custom"],
+        index=["Base", "Upside", "Downside", "Stress", "Custom"].index(
+            controls.get("scenario", "Base")
+        ),
+        key="analytics_global_scenario",
+    )
+    controls["custom_shock_pct"] = g2.slider(
+        "Custom Shock (%)",
+        min_value=-50.0,
+        max_value=50.0,
+        value=float(controls.get("custom_shock_pct", 0.0)),
+        step=0.5,
+        key="analytics_custom_shock",
+    )
+    controls["focus_metric"] = g3.selectbox(
+        "Focus Metric",
+        options=["Profit", "Margin", "NPV Proxy", "Resilience Score"],
+        index=["Profit", "Margin", "NPV Proxy", "Resilience Score"].index(
+            controls.get("focus_metric", "Profit")
+        ),
+        key="analytics_focus_metric",
+    )
+    controls["period_filter"] = g4.selectbox(
+        "Period Filter",
+        options=["All", "P1", "P2", "P3", "P4"],
+        index=["All", "P1", "P2", "P3", "P4"].index(
+            controls.get("period_filter", "All")
+        ),
+        key="analytics_period_filter",
+    )
+    st.session_state["analytics_framework_controls"] = controls
+
+    module_options = [tool["title"] for tool in ANALYTICS_FRAMEWORK_TOOLS]
+    active_modules = st.multiselect(
+        "Module Filter",
+        options=module_options,
+        default=module_options,
+        key="analytics_module_filter",
+        help="Show only selected modules below.",
+    )
+
     linked_sources = [
         "Input Schedule",
         "Assumptions",
@@ -4233,7 +4367,11 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
         "Peer Benchmark Data",
     ]
 
+    module_summary_rows: list[Dict[str, Any]] = []
+
     for tool in ANALYTICS_FRAMEWORK_TOOLS:
+        if tool["title"] not in active_modules:
+            continue
         tool_key = tool["key"]
         config = framework[tool_key]
         with st.expander(tool["title"], expanded=False):
@@ -4251,9 +4389,33 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
                 help="Choose datasets this tool should consume.",
             )
             config["data_sources"] = selected_sources
+            config["model_mode"] = left.selectbox(
+                "Model Mode",
+                options=["Conservative", "Balanced", "Aggressive"],
+                index=["Conservative", "Balanced", "Aggressive"].index(
+                    config.get("model_mode", "Balanced")
+                ),
+                key=f"framework_mode::{tool_key}",
+            )
+            config["tool_shock_override"] = right.slider(
+                "Tool-level shock override (%)",
+                min_value=-30.0,
+                max_value=30.0,
+                value=float(config.get("tool_shock_override", 0.0)),
+                step=0.5,
+                key=f"framework_shock::{tool_key}",
+            )
 
             st.markdown("**Methodology**")
             st.write(tool["methodology"])
+
+            st.markdown("**Underlying Data Schedule (Editable)**")
+            config["data"] = st.data_editor(
+                config.get("data", pd.DataFrame()),
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"framework_data::{tool_key}",
+            )
 
             st.markdown("**Configurable Input Mapping**")
             config["inputs"] = st.data_editor(
@@ -4289,15 +4451,65 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
                 key=f"framework_scenarios::{tool_key}",
             )
 
-            output_df = _analytics_framework_output(config, results)
+            output_df, modeled_df, sensitivity_df, scenario_compare_df = _analytics_framework_output(
+                config, results, controls
+            )
             st.markdown("**Dynamic Outputs**")
             st.dataframe(output_df, use_container_width=True)
-            chart_df = output_df.set_index("Metric")
-            if "Value" in chart_df.columns:
-                st.bar_chart(chart_df[["Value"]])
+            module_summary_rows.append(
+                {
+                    "Module": tool["title"],
+                    "Modeled Profit": float(
+                        output_df.loc[output_df["Metric"] == "Modeled Profit", "Value"].iloc[0]
+                    ),
+                    "Applied Shock (%)": float(
+                        output_df.loc[output_df["Metric"] == "Applied Shock (%)", "Value"].iloc[0]
+                    ),
+                    "Resilience Score": float(
+                        output_df.loc[output_df["Metric"] == "Resilience Score", "Value"].iloc[0]
+                    ),
+                }
+            )
+
+            if controls.get("period_filter") != "All" and "Period" in modeled_df.columns:
+                modeled_view = modeled_df.loc[
+                    modeled_df["Period"].astype(str) == str(controls["period_filter"])
+                ]
+                if modeled_view.empty:
+                    modeled_view = modeled_df
+            else:
+                modeled_view = modeled_df
+
+            st.markdown("**Modeled Time-Series Output**")
+            st.dataframe(modeled_view, use_container_width=True)
+            if {"Revenue_adj", "Cost_adj", "Profit_adj"}.issubset(modeled_view.columns):
+                st.line_chart(
+                    modeled_view.set_index("Period")[["Revenue_adj", "Cost_adj", "Profit_adj"]]
+                )
+
+            c_left, c_right = st.columns(2)
+            with c_left:
+                st.markdown("**What-if & Sensitivity Grid**")
+                st.dataframe(sensitivity_df, use_container_width=True)
+                st.area_chart(sensitivity_df.set_index("Shock %")[["Profit"]])
+            with c_right:
+                st.markdown("**Scenario Comparison**")
+                st.dataframe(scenario_compare_df, use_container_width=True)
+                if {"Scenario", "Modeled Profit"}.issubset(scenario_compare_df.columns):
+                    compare_chart = scenario_compare_df.set_index("Scenario")[
+                        ["Modeled Profit"]
+                    ]
+                    st.bar_chart(compare_chart)
+
             st.caption(f"Suggested visualisation: {tool['visualization']}")
 
             framework[tool_key] = config
+
+    if module_summary_rows:
+        st.markdown("#### Cross-Module Scenario Scorecard")
+        module_summary_df = pd.DataFrame(module_summary_rows)
+        st.dataframe(module_summary_df, use_container_width=True)
+        st.bar_chart(module_summary_df.set_index("Module")[["Modeled Profit"]])
 
     st.session_state["analytics_framework"] = framework
 
