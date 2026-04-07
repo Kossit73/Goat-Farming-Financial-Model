@@ -2323,7 +2323,7 @@ def _ensure_herd_plan_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     else:
         work = table.copy()
 
-    for column in ["Year", "Herd Size (heads)", "Herd Growth %"]:
+    for column in ["Year", "Herd Size (heads)", "Herd Growth %", "yearly_increment_percent"]:
         if column not in work.columns:
             work[column] = np.nan
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
@@ -2336,6 +2336,8 @@ def _ensure_herd_plan_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     for idx in work.index:
         size = work.at[idx, "Herd Size (heads)"]
         growth = work.at[idx, "Herd Growth %"]
+        if pd.isna(growth):
+            growth = work.at[idx, "yearly_increment_percent"]
         if pd.isna(size):
             if previous_size is not None and pd.notna(growth):
                 size = previous_size * (1.0 + float(growth) / 100.0)
@@ -2349,9 +2351,32 @@ def _ensure_herd_plan_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
             work.at[idx, "Herd Growth %"] = (float(work.at[idx, "Herd Size (heads)"]) / previous_size - 1.0) * 100.0
         previous_size = float(work.at[idx, "Herd Size (heads)"])
 
-    ordered = ["Year", "Herd Size (heads)", "Herd Growth %"]
+    work["yearly_increment_percent"] = pd.to_numeric(work["Herd Growth %"], errors="coerce")
+    ordered = ["Year", "Herd Size (heads)", "Herd Growth %", "yearly_increment_percent"]
     remainder = [col for col in work.columns if col not in ordered]
     return work[ordered + remainder].reset_index(drop=True)
+
+
+def _apply_herd_yearly_increment(table: pd.DataFrame, yearly_increment_percent: float) -> pd.DataFrame:
+    work = _ensure_herd_plan_table(table)
+    if work.empty:
+        return work
+
+    increment = float(yearly_increment_percent)
+    base_size = pd.to_numeric(pd.Series([work.iloc[0].get("Herd Size (heads)")]), errors="coerce").iloc[0]
+    if pd.isna(base_size) or base_size <= 0:
+        base_size = 100.0
+    work.at[0, "Herd Size (heads)"] = float(base_size)
+    work.at[0, "Herd Growth %"] = np.nan
+
+    for idx in work.index[1:]:
+        prev_size = float(work.at[idx - 1, "Herd Size (heads)"])
+        next_size = prev_size * (1.0 + increment / 100.0)
+        work.at[idx, "Herd Size (heads)"] = float(next_size)
+        work.at[idx, "Herd Growth %"] = increment
+
+    work["yearly_increment_percent"] = pd.to_numeric(work["Herd Growth %"], errors="coerce")
+    return _ensure_herd_plan_table(work)
 
 
 def _apply_herd_plan_to_schedule(schedule_df: pd.DataFrame, herd_plan: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -6987,6 +7012,23 @@ def main() -> None:
         st.caption(
             "Set herd size by year and optional growth %. Revenue and key variable costs are scaled from the baseline herd level."
         )
+        st.session_state.setdefault("herd_yearly_increment_percent", 0.0)
+        herd_inc_col, herd_inc_btn_col = st.columns([2, 1])
+        herd_inc_col.number_input(
+            "Yearly Increment (%)",
+            min_value=-100.0,
+            max_value=300.0,
+            step=0.1,
+            key="herd_yearly_increment_percent",
+        )
+        if herd_inc_btn_col.button("Apply Increment Across Years", key="apply_herd_yearly_increment"):
+            herd_plan = _apply_herd_yearly_increment(
+                herd_plan,
+                st.session_state.get("herd_yearly_increment_percent", 0.0),
+            )
+            st.session_state.assumptions["Herd Plan"] = herd_plan
+            _clear_schedule_editor_state("assump::herd_plan")
+
         herd_add_col, herd_remove_select_col, herd_remove_btn_col = st.columns([1, 2, 1])
         if herd_add_col.button("Add Herd Year", key="herd_plan_add_row"):
             herd_plan = pd.concat(
