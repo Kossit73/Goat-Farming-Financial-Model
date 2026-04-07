@@ -1743,33 +1743,55 @@ DEFAULT_PRICING_ROWS = [
 
 
 DEFAULT_OPERATING_COST_ROWS = [
-    {"Year": 2024, "Category": "Feed", "Monthly Cost": 8500.0, "Inflation %": 4.0},
-    {"Year": 2025, "Category": "Feed", "Monthly Cost": 8840.0, "Inflation %": 4.0},
     {
         "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Monthly Cost": 26.56,
+        "Inflation %": 4.0,
+    },
+    {
+        "Year": 2025,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Monthly Cost": 27.62,
+        "Inflation %": 4.0,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "Monthly Cost": 1800.0,
+        "Monthly Cost": 5.63,
         "Inflation %": 3.5,
     },
     {
         "Year": 2025,
+        "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "Monthly Cost": 1863.0,
+        "Monthly Cost": 5.83,
         "Inflation %": 3.5,
     },
     {
         "Year": 2024,
+        "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "Monthly Cost": 1200.0,
+        "Monthly Cost": 3.75,
         "Inflation %": 2.0,
     },
     {
         "Year": 2025,
+        "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "Monthly Cost": 1224.0,
+        "Monthly Cost": 3.83,
         "Inflation %": 2.0,
     },
 ]
+
+OPERATING_COST_FIELD_TO_CATEGORY = {
+    "variable_feed_cost_per_herd": "Feed",
+    "variable_healthcare_cost_per_herd": "Healthcare",
+    "fixed_utility_cost_per_herd": "Utilities",
+}
 
 
 DEFAULT_INPUT_CONFIG_KEY = "default_input_templates"
@@ -2041,13 +2063,14 @@ def _default_operating_cost_table() -> pd.DataFrame:
     rows = _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS)
     table = _template_to_dataframe(
         rows,
-        ["Year", "Category", "Monthly Cost", "Inflation %"],
+        ["Year", "Field", "Category", "Monthly Cost", "Inflation %"],
     )
 
     if table.empty:
         return pd.DataFrame(
             {
                 "Year": [pd.Timestamp.today().year],
+                "Field": ["variable_feed_cost_per_herd"],
                 "Category": ["Operating Item"],
                 "Monthly Cost": [np.nan],
                 "Inflation %": [np.nan],
@@ -2064,10 +2087,31 @@ def _ensure_operating_cost_table(
         return _default_operating_cost_table()
 
     work = table.copy()
+    if "Field" not in work.columns:
+        work["Field"] = np.nan
     work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+    work["Field"] = work.get("Field", "").astype(str).str.strip()
     work["Category"] = work.get("Category", "").astype(str).str.strip()
     work.loc[work["Category"] == "", "Category"] = np.nan
-    work["Monthly Cost"] = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
+    for idx in work.index:
+        category = str(work.at[idx, "Category"]).strip()
+        field = str(work.at[idx, "Field"]).strip()
+        if (not field or field.lower() == "nan") and category:
+            for key, label in OPERATING_COST_FIELD_TO_CATEGORY.items():
+                if label.casefold() == category.casefold():
+                    field = key
+                    break
+            if not field or field.lower() == "nan":
+                field = f"variable_{category.lower().replace(' ', '_')}_cost_per_herd"
+            work.at[idx, "Field"] = field
+        elif field and (not category or category.lower() == "nan"):
+            work.at[idx, "Category"] = OPERATING_COST_FIELD_TO_CATEGORY.get(field, "Operating Item")
+    work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
+    alias_unit = pd.to_numeric(work.get("unit_cost_per_head_per_month"), errors="coerce")
+    monthly = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
+    monthly = monthly.where(monthly.notna(), alias_unit)
+    work["Monthly Cost"] = monthly
+    work["unit_cost_per_head_per_month"] = monthly
     work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
 
     work = work.dropna(how="all")
@@ -2087,13 +2131,20 @@ def _ensure_operating_cost_table(
         work["Year"] = work["Year"].fillna(pd.Timestamp.today().year)
     work["Year"] = work["Year"].round().astype("Int64")
 
-    required_cols = ["Year", "Category", "Monthly Cost", "Inflation %"]
+    required_cols = [
+        "Year",
+        "Field",
+        "Category",
+        "Monthly Cost",
+        "unit_cost_per_head_per_month",
+        "Inflation %",
+    ]
     for col in required_cols:
         if col not in work.columns:
             work[col] = np.nan
 
     ordered = work[required_cols + [c for c in work.columns if c not in required_cols]]
-    return ordered.sort_values(["Category", "Year"], kind="stable").reset_index(drop=True)
+    return ordered.sort_values(["Field", "Year"], kind="stable").reset_index(drop=True)
 
 
 def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
@@ -2106,8 +2157,10 @@ def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
         default_year = pd.Timestamp.today().year
     new_row = {
         "Year": default_year,
-        "Category": f"Operating Item {len(work) + 1}",
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
         "Monthly Cost": np.nan,
+        "unit_cost_per_head_per_month": np.nan,
         "Inflation %": np.nan,
     }
     return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
@@ -2169,7 +2222,85 @@ def _apply_operating_cost_increment(
 
             work.at[idx, column] = last_value
 
-    return work.sort_values(["Category", "Year"], kind="stable").reset_index(drop=True)
+    if "Monthly Cost" in work.columns:
+        work["Monthly Cost"] = pd.to_numeric(work["Monthly Cost"], errors="coerce")
+        work["unit_cost_per_head_per_month"] = work["Monthly Cost"]
+    if column == "unit_cost_per_head_per_month":
+        work["Monthly Cost"] = pd.to_numeric(
+            work["unit_cost_per_head_per_month"], errors="coerce"
+        )
+
+    return work.sort_values(["Field", "Year"], kind="stable").reset_index(drop=True)
+
+
+def _apply_operating_cost_assumptions_to_schedule(
+    schedule_df: pd.DataFrame, operating_table: Optional[pd.DataFrame]
+) -> pd.DataFrame:
+    if schedule_df.empty or operating_table is None or operating_table.empty:
+        return schedule_df
+
+    assumptions = _ensure_operating_cost_table(operating_table)
+    if assumptions.empty:
+        return schedule_df
+
+    work = schedule_df.copy()
+    herd = pd.to_numeric(work.get("Herd Size (heads)"), errors="coerce")
+    if herd.isna().all():
+        return work
+    herd = herd.ffill().bfill()
+    period_days = work.index.to_series().diff().dt.days.astype(float)
+    valid_days = period_days.iloc[1:][np.isfinite(period_days.iloc[1:])]
+    default_days = float(np.median(valid_days)) if not valid_days.empty else 30.44
+    if not np.isfinite(default_days) or default_days <= 0:
+        default_days = 30.44
+    months_factor = (period_days / 30.44).fillna(default_days / 30.44).clip(lower=1e-6)
+
+    assumptions = assumptions.sort_values(["Field", "Year"], kind="stable")
+    year_values = work.index.year
+
+    field_period_costs: Dict[str, pd.Series] = {}
+    for field in assumptions["Field"].dropna().astype(str).unique().tolist():
+        field_rows = assumptions[assumptions["Field"].astype(str) == field]
+        unit_map = {
+            int(row["Year"]): float(row["unit_cost_per_head_per_month"])
+            for _, row in field_rows.iterrows()
+            if pd.notna(row.get("Year")) and pd.notna(row.get("unit_cost_per_head_per_month"))
+        }
+        if not unit_map:
+            continue
+        unit_series = pd.Series(
+            [unit_map.get(int(y), np.nan) for y in year_values],
+            index=work.index,
+            dtype=float,
+        ).ffill()
+        field_period_costs[field] = unit_series * herd * months_factor
+
+    if "variable_feed_cost_per_herd" in field_period_costs:
+        work["COGS"] = field_period_costs["variable_feed_cost_per_herd"]
+    if "variable_healthcare_cost_per_herd" in field_period_costs:
+        work["Variable Expenses"] = field_period_costs["variable_healthcare_cost_per_herd"]
+    if "fixed_utility_cost_per_herd" in field_period_costs:
+        utility = field_period_costs["fixed_utility_cost_per_herd"]
+        if "Fixed Expenses" in work.columns:
+            base_fixed = pd.to_numeric(work["Fixed Expenses"], errors="coerce").fillna(0.0)
+            work["Fixed Expenses"] = base_fixed + utility
+        else:
+            work["Fixed Expenses"] = utility
+
+    if {"Revenue", "COGS"}.issubset(work.columns):
+        work["Gross Margin"] = pd.to_numeric(work["Revenue"], errors="coerce") - pd.to_numeric(
+            work["COGS"], errors="coerce"
+        )
+    if {"Gross Margin", "Variable Expenses", "Fixed Expenses", "Direct Wages", "Admin Wages"}.issubset(work.columns):
+        work["EBITDA"] = (
+            pd.to_numeric(work["Gross Margin"], errors="coerce")
+            - pd.to_numeric(work["Variable Expenses"], errors="coerce")
+            - pd.to_numeric(work["Fixed Expenses"], errors="coerce")
+            - pd.to_numeric(work["Direct Wages"], errors="coerce")
+            - pd.to_numeric(work["Admin Wages"], errors="coerce")
+        )
+
+    return work
 
 
 def _default_herd_plan_table() -> pd.DataFrame:
@@ -3797,9 +3928,13 @@ def _dedupe_horizon_assumption_rows(table_name: str, table: pd.DataFrame) -> pd.
         return table
 
     work = table.copy()
-    if table_name == "Operating Costs" and "Category" in work.columns:
-        work["Category"] = work["Category"].astype(str).str.strip()
-        return work.drop_duplicates(subset=["Year", "Category"], keep="last").reset_index(drop=True)
+    if table_name == "Operating Costs":
+        if "Field" in work.columns:
+            work["Field"] = work["Field"].astype(str).str.strip()
+            return work.drop_duplicates(subset=["Year", "Field"], keep="last").reset_index(drop=True)
+        if "Category" in work.columns:
+            work["Category"] = work["Category"].astype(str).str.strip()
+            return work.drop_duplicates(subset=["Year", "Category"], keep="last").reset_index(drop=True)
     if table_name == "Pricing" and {"Product", "Unit"}.issubset(work.columns):
         work["Product"] = work["Product"].astype(str).str.strip()
         work["Unit"] = work["Unit"].astype(str).str.strip()
@@ -4014,6 +4149,11 @@ def _ensure_default_results_loaded() -> None:
         herd_plan = assumptions.get("Herd Plan")
         if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
             schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
+        operating_costs = assumptions.get("Operating Costs")
+        if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
+            schedule_df = _apply_operating_cost_assumptions_to_schedule(
+                schedule_df, operating_costs
+            )
 
     valuation_inputs = dict(DEFAULT_VALUATION_INPUTS)
     supplementary_copy = {
@@ -7078,6 +7218,11 @@ def main() -> None:
 
         st.markdown("---")
         st.markdown("#### Operating Cost Assumptions")
+        st.caption(
+            "Fields `variable_feed_cost_per_herd`, `variable_healthcare_cost_per_herd`, and "
+            "`fixed_utility_cost_per_herd` are treated as unit_cost_per_head_per_month values. "
+            "Monthly total cost = unit cost × herd heads × months."
+        )
         operating_table = _ensure_operating_cost_table(
             st.session_state.assumptions.get("Operating Costs")
         )
@@ -7144,7 +7289,7 @@ def main() -> None:
 
         inc_column_col.selectbox(
             "Column",
-            options=["Monthly Cost", "Inflation %"],
+            options=["Monthly Cost", "unit_cost_per_head_per_month", "Inflation %"],
             key="operating_increment_column",
         )
 
@@ -7193,7 +7338,14 @@ def main() -> None:
                 "Update the baseline operating cost table used when refreshing these assumptions."
             )
 
-            operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
+            operating_columns = [
+                "Year",
+                "Field",
+                "Category",
+                "Monthly Cost",
+                "unit_cost_per_head_per_month",
+                "Inflation %",
+            ]
             default_frame = st.session_state.get("default_operating_editor_seed")
             if not isinstance(default_frame, pd.DataFrame):
                 default_frame = _template_to_dataframe(
@@ -7208,8 +7360,12 @@ def main() -> None:
                 key="default_operating_editor",
                 column_config={
                     "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Field": st.column_config.TextColumn("Field"),
                     "Monthly Cost": st.column_config.NumberColumn(
-                        "Monthly Cost", format="%.2f"
+                        "Unit Cost / Head / Month", format="%.4f"
+                    ),
+                    "unit_cost_per_head_per_month": st.column_config.NumberColumn(
+                        "Unit Cost / Head / Month (Alias)", format="%.4f"
                     ),
                     "Inflation %": st.column_config.NumberColumn(
                         "Inflation (%)", format="%.2f"
@@ -7454,6 +7610,11 @@ def main() -> None:
         herd_plan = assumption_tables.get("Herd Plan")
         if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
             schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
+        operating_costs = assumption_tables.get("Operating Costs")
+        if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
+            schedule_df = _apply_operating_cost_assumptions_to_schedule(
+                schedule_df, operating_costs
+            )
 
         combined_supplementary = dict(supplementary_tables)
         for name, table in assumption_tables.items():
