@@ -2138,6 +2138,87 @@ def _apply_operating_cost_increment(
     return work.sort_values(["Category", "Year"], kind="stable").reset_index(drop=True)
 
 
+def _default_herd_plan_table() -> pd.DataFrame:
+    current_year = pd.Timestamp.today().year
+    return pd.DataFrame(
+        {
+            "Year": [current_year, current_year + 1, current_year + 2],
+            "Herd Size (heads)": [320.0, 336.0, 353.0],
+            "Herd Growth %": [np.nan, 5.0, 5.0],
+        }
+    )
+
+
+def _ensure_herd_plan_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_herd_plan_table()
+    else:
+        work = table.copy()
+
+    for column in ["Year", "Herd Size (heads)", "Herd Growth %"]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    work = work.dropna(how="all").dropna(subset=["Year"]).sort_values("Year").reset_index(drop=True)
+    if work.empty:
+        return _default_herd_plan_table()
+
+    previous_size: Optional[float] = None
+    for idx in work.index:
+        size = work.at[idx, "Herd Size (heads)"]
+        growth = work.at[idx, "Herd Growth %"]
+        if pd.isna(size):
+            if previous_size is not None and pd.notna(growth):
+                size = previous_size * (1.0 + float(growth) / 100.0)
+            elif previous_size is not None:
+                size = previous_size
+            else:
+                size = 100.0
+            work.at[idx, "Herd Size (heads)"] = float(size)
+
+        if previous_size is not None and previous_size > 0 and pd.isna(growth):
+            work.at[idx, "Herd Growth %"] = (float(work.at[idx, "Herd Size (heads)"]) / previous_size - 1.0) * 100.0
+        previous_size = float(work.at[idx, "Herd Size (heads)"])
+
+    ordered = ["Year", "Herd Size (heads)", "Herd Growth %"]
+    remainder = [col for col in work.columns if col not in ordered]
+    return work[ordered + remainder].reset_index(drop=True)
+
+
+def _apply_herd_plan_to_schedule(schedule_df: pd.DataFrame, herd_plan: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if schedule_df.empty or herd_plan is None or herd_plan.empty:
+        return schedule_df
+
+    plan = _ensure_herd_plan_table(herd_plan)
+    size_map = {
+        int(row["Year"]): float(row["Herd Size (heads)"])
+        for _, row in plan.iterrows()
+        if pd.notna(row.get("Year")) and pd.notna(row.get("Herd Size (heads)"))
+    }
+    if not size_map:
+        return schedule_df
+
+    baseline_size = next((v for _, v in sorted(size_map.items()) if v > 0), None)
+    if baseline_size is None:
+        return schedule_df
+
+    work = schedule_df.copy()
+    herd_sizes = work.index.year.map(lambda year: size_map.get(int(year), float(baseline_size))).astype(float)
+    multipliers = herd_sizes / float(baseline_size)
+    work["Herd Size (heads)"] = herd_sizes
+    work["Herd Multiplier"] = multipliers
+
+    for col in ["Revenue", "COGS", "Variable Expenses", "Direct Wages"]:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce") * multipliers
+
+    if {"Revenue", "COGS"}.issubset(work.columns):
+        work["Gross Margin"] = work["Revenue"] - work["COGS"]
+
+    return work
+
+
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
     if "Period" not in core.columns or "Revenue" not in core.columns:
         return {}
@@ -3683,7 +3764,7 @@ def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
     # Keep year-based assumption tables aligned to the active horizon.
     assumptions = st.session_state.get("assumptions", {})
     if isinstance(assumptions, dict):
-        for table_name in ["Pricing", "Operating Costs"]:
+        for table_name in ["Pricing", "Operating Costs", "Herd Plan"]:
             table = assumptions.get(table_name)
             if not isinstance(table, pd.DataFrame) or table.empty or "Year" not in table:
                 continue
@@ -3820,6 +3901,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
     return {
         "Scenario Controls": _default_scenario_controls_table(),
         "Production Horizon": _default_production_horizon_table(),
+        "Herd Plan": _default_herd_plan_table(),
         "Pricing": _default_pricing_table(),
         "Operating Costs": _default_operating_cost_table(),
         "Capital & Financing": _default_capital_financing_table(),
@@ -3871,6 +3953,12 @@ def _ensure_default_results_loaded() -> None:
         schedule_df = _assemble_schedule(core_prepared, prepared_details)
     except ValueError:
         return
+
+    assumptions = st.session_state.get("assumptions", {})
+    if isinstance(assumptions, dict):
+        herd_plan = assumptions.get("Herd Plan")
+        if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+            schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
 
     valuation_inputs = dict(DEFAULT_VALUATION_INPUTS)
     supplementary_copy = {
@@ -6593,6 +6681,66 @@ def main() -> None:
             assumption_tables["Production Horizon"] = production_table
 
         st.markdown("---")
+        st.markdown("#### Herd Plan (Heads)")
+        herd_plan = _ensure_herd_plan_table(
+            st.session_state.assumptions.get("Herd Plan", pd.DataFrame())
+        )
+        st.session_state.assumptions["Herd Plan"] = herd_plan
+
+        st.caption(
+            "Set herd size by year and optional growth %. Revenue and key variable costs are scaled from the baseline herd level."
+        )
+        herd_add_col, herd_remove_select_col, herd_remove_btn_col = st.columns([1, 2, 1])
+        if herd_add_col.button("Add Herd Year", key="herd_plan_add_row"):
+            herd_plan = pd.concat(
+                [
+                    herd_plan,
+                    pd.DataFrame(
+                        {
+                            "Year": [int(pd.to_numeric(herd_plan.get("Year"), errors="coerce").dropna().max() + 1)
+                                     if pd.to_numeric(herd_plan.get("Year"), errors="coerce").notna().any()
+                                     else pd.Timestamp.today().year],
+                            "Herd Size (heads)": [np.nan],
+                            "Herd Growth %": [np.nan],
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+            st.session_state.assumptions["Herd Plan"] = herd_plan
+            _clear_schedule_editor_state("assump::herd_plan")
+
+        herd_labels: list[str] = []
+        herd_index: Dict[str, int] = {}
+        for idx_row, row in herd_plan.iterrows():
+            year_label = row.get("Year")
+            label = str(int(year_label)) if pd.notna(year_label) else f"Row {idx_row + 1}"
+            herd_labels.append(label)
+            herd_index[label] = idx_row
+        herd_remove_select_col.selectbox(
+            "Remove year",
+            options=["-- Select Year --"] + herd_labels,
+            key="herd_plan_remove_choice",
+        )
+        if herd_remove_btn_col.button("Remove", key="herd_plan_remove_row"):
+            choice = st.session_state.get("herd_plan_remove_choice")
+            if choice in herd_index:
+                herd_plan = herd_plan.drop(index=herd_index[choice]).reset_index(drop=True)
+                herd_plan = _ensure_herd_plan_table(herd_plan)
+                st.session_state.assumptions["Herd Plan"] = herd_plan
+                st.session_state.herd_plan_remove_choice = "-- Select Year --"
+                _clear_schedule_editor_state("assump::herd_plan")
+
+        _render_schedule_row_editor(
+            "assump::herd_plan",
+            st.session_state.assumptions["Herd Plan"],
+            lambda updated: st.session_state.assumptions.__setitem__(
+                "Herd Plan", _ensure_herd_plan_table(updated)
+            ),
+        )
+        assumption_tables["Herd Plan"] = st.session_state.assumptions["Herd Plan"]
+
+        st.markdown("---")
         st.markdown("#### Pricing Assumptions")
         pricing_table = _ensure_pricing_table(
             st.session_state.assumptions.get("Pricing", pd.DataFrame())
@@ -7149,6 +7297,9 @@ def main() -> None:
                     )
                     return
                 schedule_df = horizon_filtered
+        herd_plan = assumption_tables.get("Herd Plan")
+        if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+            schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
 
         combined_supplementary = dict(supplementary_tables)
         for name, table in assumption_tables.items():
