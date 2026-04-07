@@ -5087,6 +5087,34 @@ def _response_depth_from_query(query: str) -> str:
     return "standard"
 
 
+def _classify_orchestration_task(query: str, intent: str) -> str:
+    text = (query or "").lower()
+    if any(token in text for token in ["compare", "versus", "vs ", "difference"]):
+        return "comparative_assessment"
+    if any(token in text for token in ["run", "execute", "perform", "do ", "action"]):
+        return "action_plan"
+    if intent == "valuation":
+        return "valuation_diagnostic"
+    if intent in {"risk", "governance"}:
+        return "risk_governance_check"
+    if intent in {"assumptions", "operations"}:
+        return "driver_diagnostic"
+    return "strategic_summary"
+
+
+def _confidence_from_evidence(
+    *,
+    available_kpis: int,
+    retrieved_hits: int,
+    missing_requirements: int,
+) -> float:
+    score = 0.35
+    score += min(0.35, available_kpis * 0.04)
+    score += min(0.2, retrieved_hits * 0.03)
+    score -= min(0.3, missing_requirements * 0.08)
+    return float(max(0.05, min(0.95, score)))
+
+
 def _run_orchestration_engine(
     query: str,
     config: Dict[str, Any],
@@ -5151,6 +5179,7 @@ def _run_orchestration_engine(
 
     context_strings = retrieved.get("Text", pd.Series(dtype=str)).astype(str).tolist()
     intent = _infer_orchestration_intent(query)
+    task_type = _classify_orchestration_task(query, intent)
     depth = _response_depth_from_query(query)
     response_style = str(config.get("response_style", "Strategic and concise"))
     scenario_name = snapshot.get("selected_scenario", "Scenario")
@@ -5174,6 +5203,52 @@ def _run_orchestration_engine(
         "planning": "Execution quality depends on sequencing, ownership, and measurable milestones.",
         "strategy": "Overall strategy should balance growth, resilience, and investor confidence.",
     }
+    task_guidance = {
+        "comparative_assessment": "Workflow selected: comparative assessment using KPI gaps and available indexed records.",
+        "action_plan": "Workflow selected: actionable execution plan based on model constraints and risk posture.",
+        "valuation_diagnostic": "Workflow selected: valuation diagnostic with hurdle-rate and margin validation.",
+        "risk_governance_check": "Workflow selected: risk-governance check with control-threshold validation.",
+        "driver_diagnostic": "Workflow selected: driver diagnostic focused on assumptions and operating levers.",
+        "strategic_summary": "Workflow selected: strategic summary from current model state.",
+    }
+    limitations: list[str] = []
+    if pd.isna(irr):
+        limitations.append("IRR is unavailable in current model outputs.")
+    if pd.isna(ebitda_margin):
+        limitations.append("EBITDA margin is unavailable in current model outputs.")
+    if retrieved.empty:
+        limitations.append("No indexed retrieval evidence matched the query.")
+    if not snapshot.get("framework_enabled"):
+        limitations.append("No analytics framework modules are enabled for cross-checking.")
+
+    requirements_by_task = {
+        "comparative_assessment": ["IRR", "EBITDA Margin"],
+        "valuation_diagnostic": ["IRR"],
+        "risk_governance_check": ["EBITDA Margin"],
+        "driver_diagnostic": ["EBITDA Margin"],
+        "action_plan": [],
+        "strategic_summary": [],
+    }
+    missing_requirements = [
+        req
+        for req in requirements_by_task.get(task_type, [])
+        if (req == "IRR" and pd.isna(irr)) or (req == "EBITDA Margin" and pd.isna(ebitda_margin))
+    ]
+    if missing_requirements:
+        limitations.append(
+            f"Requested workflow has missing required metrics: {', '.join(missing_requirements)}."
+        )
+
+    assumptions_used = [
+        f"Target IRR={target_irr:.2%}",
+        f"Target EBITDA margin={target_ebitda:.2%}",
+        f"Minimum governance score={float(config.get('min_governance_score', 80.0)):.1f}",
+    ]
+    confidence = _confidence_from_evidence(
+        available_kpis=len(kpis),
+        retrieved_hits=len(context_strings),
+        missing_requirements=len(missing_requirements),
+    )
     continuity_line = (
         f"Building on your prior question ('{prior_focus}'), "
         if prior_focus and prior_focus.strip().lower() != (query or "").strip().lower()
@@ -5184,12 +5259,22 @@ def _run_orchestration_engine(
         "standard": "Recommended focus: protect margin while improving return quality and governance consistency.",
         "deep": "Priority sequence: 1) stabilize unit economics, 2) run downside stress pack, 3) tighten governance reporting against investor thresholds.",
     }[depth]
-    grounded_answer = (
-        f"{lead_by_style} {continuity_line}For scenario '{scenario_name}', IRR is {irr_text} and EBITDA margin is {margin_text}. "
-        f"{intent_guidance.get(intent, intent_guidance['strategy'])} "
-        f"Indexed context: {context_text} "
-        f"{depth_line}"
-    )
+    if missing_requirements and task_type in {"comparative_assessment", "valuation_diagnostic"}:
+        grounded_answer = (
+            f"{lead_by_style} {continuity_line}I cannot fully execute the requested {task_type.replace('_', ' ')} "
+            f"because required evidence is missing ({', '.join(missing_requirements)}). "
+            f"Available evidence for scenario '{scenario_name}': IRR={irr_text}, EBITDA margin={margin_text}. "
+            f"Indexed context: {context_text} "
+            "Please provide the missing data or run the scenario again."
+        )
+    else:
+        grounded_answer = (
+            f"{lead_by_style} {continuity_line}For scenario '{scenario_name}', IRR is {irr_text} and EBITDA margin is {margin_text}. "
+            f"{task_guidance.get(task_type, task_guidance['strategic_summary'])} "
+            f"{intent_guidance.get(intent, intent_guidance['strategy'])} "
+            f"Indexed context: {context_text} "
+            f"{depth_line}"
+        )
 
     business_plan = pd.DataFrame(
         {
@@ -5226,6 +5311,10 @@ def _run_orchestration_engine(
         "benchmark_table": benchmark_table,
         "recommendations": recommendations,
         "grounded_answer": grounded_answer,
+        "task_type": task_type,
+        "confidence": confidence,
+        "limitations": limitations,
+        "assumptions_used": assumptions_used,
         "business_plan": business_plan,
         "explainability": explainability,
         "retrieved_context": retrieved,
@@ -5368,6 +5457,16 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
     st.markdown("### Unified Decision Support Output")
     st.markdown("**Grounded Strategic Response**")
     st.write(output["grounded_answer"])
+    st.caption(
+        f"Workflow: **{output.get('task_type', 'strategic_summary').replace('_', ' ')}** | "
+        f"Confidence: **{output.get('confidence', 0.0):.0%}**"
+    )
+    limitations = output.get("limitations", [])
+    if limitations:
+        st.warning("Limitations: " + " ".join(f"- {item}" for item in limitations))
+    assumptions_used = output.get("assumptions_used", [])
+    if assumptions_used:
+        st.info("Assumptions used: " + "; ".join(assumptions_used))
 
     st.markdown("**Investor Benchmarking & Scorecard**")
     st.dataframe(output["benchmark_table"], use_container_width=True)
