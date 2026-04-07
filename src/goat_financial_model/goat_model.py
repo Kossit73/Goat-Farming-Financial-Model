@@ -446,6 +446,65 @@ class GoatModel:
 
         return (low + high) / 2.0
 
+    def payback_period_years(self) -> Optional[float]:
+        """Estimate simple payback period (years) from UFCF timeline."""
+
+        cash_flows = self.ufcf()
+        if cash_flows is None or cash_flows.empty:
+            return None
+
+        ordered = cash_flows.sort_index()
+        values = ordered.to_numpy(dtype=float)
+        if not np.isfinite(values).any():
+            return None
+
+        diffs_days = ordered.index.to_series().diff().dt.days.astype(float)
+        valid_diffs = diffs_days.iloc[1:][np.isfinite(diffs_days.iloc[1:])]
+        median_days = float(np.median(valid_diffs)) if not valid_diffs.empty else 365.25
+        if not np.isfinite(median_days) or median_days <= 0:
+            median_days = 365.25
+        diffs_years = (diffs_days / 365.25).fillna(median_days / 365.25).clip(lower=1e-9)
+        periods = diffs_years.cumsum().to_numpy()
+
+        cumulative = np.cumsum(values)
+        if cumulative[0] >= 0:
+            return 0.0
+
+        crossing = np.where(cumulative >= 0)[0]
+        if len(crossing) == 0:
+            return None
+
+        idx = int(crossing[0])
+        if idx == 0:
+            return float(periods[0])
+        prev_cum = float(cumulative[idx - 1])
+        curr_cum = float(cumulative[idx])
+        prev_t = float(periods[idx - 1])
+        curr_t = float(periods[idx])
+        if np.isclose(curr_cum, prev_cum):
+            return curr_t
+        frac = (0.0 - prev_cum) / (curr_cum - prev_cum)
+        frac = float(np.clip(frac, 0.0, 1.0))
+        return prev_t + (curr_t - prev_t) * frac
+
+    def _reference_milk_price_per_litre(self) -> Optional[float]:
+        pricing = self.supplementary_tables.get("Assumptions - Pricing")
+        if pricing is None or pricing.empty:
+            return None
+        work = pricing.copy()
+        if "Base Price" not in work.columns:
+            return None
+        prices = pd.to_numeric(work.get("Base Price"), errors="coerce")
+        if "Unit" in work.columns:
+            units = work["Unit"].astype(str).str.lower()
+            litre_mask = units.str.contains("litre|liter|l", regex=True)
+            filtered = prices[litre_mask]
+            if filtered.notna().any():
+                return float(filtered.median())
+        if prices.notna().any():
+            return float(prices.median())
+        return None
+
     def ufcf(self, column: Optional[str] = None) -> Optional[pd.Series]:
         table = None
         for key in ("UFCF", "Unlevered Free Cash Flow"):
@@ -776,6 +835,21 @@ class GoatModel:
         out["COGS % of Revenue"] = self._safe_divide(grp["COGS"], grp["Revenue"])
         out["Revenue YoY %"] = grp["Revenue"].pct_change()
 
+        price_per_litre = self._reference_milk_price_per_litre()
+        herd_series = (
+            pd.to_numeric(df["Herd Size (heads)"], errors="coerce")
+            if "Herd Size (heads)" in df
+            else None
+        )
+        if price_per_litre is not None and price_per_litre > 0 and herd_series is not None:
+            if annual:
+                herd_group = herd_series.groupby(df.index.year).mean()
+            else:
+                herd_group = herd_series.copy()
+            litres = self._safe_divide(grp["Revenue"], price_per_litre)
+            out["Milk Yield per Doe"] = self._safe_divide(litres, herd_group)
+            out["Feed Cost per Litre"] = self._safe_divide(grp["COGS"], litres)
+
         computed_npv = self.computed_npv()
         if computed_npv is not None:
             out["NPV"] = computed_npv
@@ -783,6 +857,9 @@ class GoatModel:
         computed_irr = self.computed_irr()
         if computed_irr is not None:
             out["IRR"] = computed_irr
+        payback = self.payback_period_years()
+        if payback is not None:
+            out["Payback Period (Years)"] = payback
         return out
 
     # ---------- Break-even ----------

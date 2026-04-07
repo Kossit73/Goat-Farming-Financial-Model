@@ -1361,6 +1361,33 @@ def _build_scenario_suite(
     return suite
 
 
+def _dynamic_outputs_table(model: GoatModel, scenario_df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[Dict[str, Any]] = []
+    metrics = {
+        "IRR": model.computed_irr() if hasattr(model, "computed_irr") else None,
+        "Payback Period (Years)": model.payback_period_years()
+        if hasattr(model, "payback_period_years")
+        else None,
+    }
+    for metric, value in metrics.items():
+        if value is None or pd.isna(value):
+            continue
+        rows.append({"Metric": metric, "Value": float(value)})
+    return pd.DataFrame(rows)
+
+
+def _dynamic_benchmark_kpis_table(kpi_df: pd.DataFrame) -> pd.DataFrame:
+    if kpi_df is None or kpi_df.empty:
+        return pd.DataFrame(columns=["KPI", "Benchmark"])
+    last_row = kpi_df.iloc[-1]
+    rows: list[Dict[str, Any]] = []
+    for col in ["Milk Yield per Doe", "Feed Cost per Litre", "IRR", "Payback Period (Years)"]:
+        value = pd.to_numeric(pd.Series([last_row.get(col)]), errors="coerce").iloc[0]
+        if pd.notna(value):
+            rows.append({"KPI": col, "Benchmark": float(value)})
+    return pd.DataFrame(rows)
+
+
 def _execute_scenario_suite(
     schedule_df: pd.DataFrame,
     valuation_inputs: Dict[str, float],
@@ -1396,6 +1423,13 @@ def _execute_scenario_suite(
         scenario_supplementary = {
             key: value.copy() for key, value in base_supplementary.items()
         }
+        scenario_kpis = model.kpis(scenario_df, annual=True)
+        outputs_table = _dynamic_outputs_table(model, scenario_df)
+        if not outputs_table.empty:
+            scenario_supplementary["Outputs"] = outputs_table
+        benchmark_table = _dynamic_benchmark_kpis_table(scenario_kpis)
+        if not benchmark_table.empty:
+            scenario_supplementary["Benchmark KPIs"] = benchmark_table
 
         scenario_inputs: Dict[str, Any] = {
             "Milk price change (%)": milk_pct,
@@ -1408,7 +1442,7 @@ def _execute_scenario_suite(
             "model": model,
             "base": base,
             "scenario": scenario_df,
-            "kpis": model.kpis(scenario_df, annual=True),
+            "kpis": scenario_kpis,
             "break_even": model.break_even(scenario_df, annual=True),
             "supplementary": scenario_supplementary,
             "selected_scenario": name,
@@ -3399,6 +3433,9 @@ def _default_schedule_components(
     core_columns = [
         "Period",
         "Revenue",
+        "Variable Expenses",
+        "Direct Wages",
+        "Admin Wages",
         "Fixed Expenses",
         "Depreciation & Amortization",
         "EBIT",
@@ -3470,7 +3507,7 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
         ),
         "Outputs": pd.DataFrame(
             {
-                "Metric": ["IRR", "Payback (years)"],
+                "Metric": ["IRR", "Payback Period (Years)"],
                 "Value": [0.17, 4.2],
             }
         ),
