@@ -3755,6 +3755,23 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
     _reset_cached_results()
 
 
+def _dedupe_horizon_assumption_rows(table_name: str, table: pd.DataFrame) -> pd.DataFrame:
+    if table.empty:
+        return table
+
+    work = table.copy()
+    if table_name == "Operating Costs" and "Category" in work.columns:
+        work["Category"] = work["Category"].astype(str).str.strip()
+        return work.drop_duplicates(subset=["Year", "Category"], keep="last").reset_index(drop=True)
+    if table_name == "Pricing" and {"Product", "Unit"}.issubset(work.columns):
+        work["Product"] = work["Product"].astype(str).str.strip()
+        work["Unit"] = work["Unit"].astype(str).str.strip()
+        return work.drop_duplicates(subset=["Year", "Product", "Unit"], keep="last").reset_index(drop=True)
+    if table_name == "Herd Plan":
+        return work.drop_duplicates(subset=["Year"], keep="last").reset_index(drop=True)
+    return work
+
+
 def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
     """Propagate horizon edits to dependent pages/tables."""
 
@@ -3776,6 +3793,7 @@ def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
                 work = work.loc[mask].reset_index(drop=True)
             elif not work.empty:
                 work.loc[:, "Year"] = start_year
+            work = _dedupe_horizon_assumption_rows(table_name, work)
             assumptions[table_name] = work
         st.session_state.assumptions = assumptions
 
