@@ -354,6 +354,20 @@ class GoatModel:
             return None
         return float(value)
 
+    def irr(self) -> Optional[float]:
+        value = self.valuation_inputs.get("IRR")
+        if value is None:
+            outputs_table = self.outputs()
+            if outputs_table is not None and not outputs_table.empty and {"Metric", "Value"}.issubset(outputs_table.columns):
+                metrics = outputs_table.copy()
+                metrics["Metric"] = metrics["Metric"].astype(str).str.strip().str.casefold()
+                matched = metrics.loc[metrics["Metric"] == "irr", "Value"]
+                if not matched.empty:
+                    value = pd.to_numeric(matched, errors="coerce").iloc[0]
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+
     def terminal_value(self) -> Optional[float]:
         value = self.valuation_inputs.get("Terminal Value")
         if value is None:
@@ -851,12 +865,16 @@ class GoatModel:
             out["Feed Cost per Litre"] = self._safe_divide(grp["COGS"], litres)
 
         computed_npv = self.computed_npv()
+        if computed_npv is None:
+            computed_npv = self.npv()
         if computed_npv is not None:
-            out["NPV"] = computed_npv
+            out["NPV"] = float(computed_npv)
 
         computed_irr = self.computed_irr()
+        if computed_irr is None:
+            computed_irr = self.irr()
         if computed_irr is not None:
-            out["IRR"] = computed_irr
+            out["IRR"] = float(computed_irr)
         payback = self.payback_period_years()
         if payback is not None:
             out["Payback Period (Years)"] = payback

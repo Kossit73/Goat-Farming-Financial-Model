@@ -1363,8 +1363,11 @@ def _build_scenario_suite(
 
 def _dynamic_outputs_table(model: GoatModel, scenario_df: pd.DataFrame) -> pd.DataFrame:
     rows: list[Dict[str, Any]] = []
+    irr_value = model.computed_irr() if hasattr(model, "computed_irr") else None
+    if irr_value is None and hasattr(model, "irr"):
+        irr_value = model.irr()
     metrics = {
-        "IRR": model.computed_irr() if hasattr(model, "computed_irr") else None,
+        "IRR": irr_value,
         "Payback Period (Years)": model.payback_period_years()
         if hasattr(model, "payback_period_years")
         else None,
@@ -7697,10 +7700,12 @@ def main() -> None:
         selected_scenario = results.get("selected_scenario", "Scenario")
         model.scenario_name = selected_scenario
 
+        computed_npv = model.computed_npv() if hasattr(model, "computed_npv") else None
+        computed_irr = model.computed_irr() if hasattr(model, "computed_irr") else None
         valuation_metrics = {
             "WACC": model.wacc(),
-            "NPV": model.computed_npv() if hasattr(model, "computed_npv") else model.npv(),
-            "IRR": model.computed_irr() if hasattr(model, "computed_irr") else None,
+            "NPV": computed_npv if computed_npv is not None else model.npv(),
+            "IRR": computed_irr if computed_irr is not None else (model.irr() if hasattr(model, "irr") else None),
             "Terminal Value": model.terminal_value(),
         }
         non_null_metrics = [val for val in valuation_metrics.values() if val is not None]
