@@ -19,7 +19,7 @@ from pandas.api.types import (
     is_integer_dtype,
     is_numeric_dtype,
 )
-from pandas.tseries.offsets import MonthEnd
+from pandas.tseries.offsets import MonthEnd, QuarterEnd
 from streamlit.delta_generator import DeltaGenerator
 
 from goat_financial_model import GoatModel, InputSchedule
@@ -108,8 +108,9 @@ AI_PROVIDER_OPTIONS = ("OpenAI", "Azure OpenAI", "Anthropic")
 
 DEFAULT_VALUATION_INPUTS = {
     "WACC": 0.12,
-    "NPV": 750000.0,
-    "Terminal Value": 1500000.0,
+    "NPV": 0.0,
+    "IRR": 0.0,
+    "Terminal Value": 0.0,
 }
 
 ML_METHOD_LABELS = {
@@ -1361,6 +1362,67 @@ def _build_scenario_suite(
     return suite
 
 
+def _dynamic_outputs_table(model: GoatModel, scenario_df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[Dict[str, Any]] = []
+    irr_value = model.computed_irr() if hasattr(model, "computed_irr") else None
+    if irr_value is None and hasattr(model, "irr"):
+        irr_value = model.irr()
+    metrics = {
+        "IRR": irr_value,
+        "Payback Period (Years)": model.payback_period_years()
+        if hasattr(model, "payback_period_years")
+        else None,
+    }
+    for metric, value in metrics.items():
+        if value is None or pd.isna(value):
+            continue
+        rows.append({"Metric": metric, "Value": float(value)})
+    return pd.DataFrame(rows)
+
+
+def _dynamic_benchmark_kpis_table(kpi_df: pd.DataFrame) -> pd.DataFrame:
+    if kpi_df is None or kpi_df.empty:
+        return pd.DataFrame(columns=["KPI", "Benchmark"])
+    last_row = kpi_df.iloc[-1]
+    rows: list[Dict[str, Any]] = []
+    for col in ["Milk Yield per Doe", "Feed Cost per Litre", "IRR", "Payback Period (Years)"]:
+        value = pd.to_numeric(pd.Series([last_row.get(col)]), errors="coerce").iloc[0]
+        if pd.notna(value):
+            rows.append({"KPI": col, "Benchmark": float(value)})
+    return pd.DataFrame(rows)
+
+
+def _format_kpis_for_display(kpi_df: pd.DataFrame) -> pd.DataFrame:
+    """Format KPI dataframe for UI display with selective percentage scaling."""
+    if kpi_df is None or kpi_df.empty:
+        return pd.DataFrame()
+
+    formatted = kpi_df.copy()
+    for column in formatted.columns:
+        values = pd.to_numeric(formatted[column], errors="coerce")
+        if not values.notna().any():
+            continue
+        is_percent_metric = "%" in str(column) or str(column).strip().upper() in {"IRR", "WACC"}
+        formatted[column] = (values * 100.0) if is_percent_metric else values
+    return formatted.round(2)
+
+
+def _valuation_diagnostic_messages(model: GoatModel) -> List[str]:
+    messages: List[str] = []
+    if model.wacc() is None:
+        messages.append("Valuation input missing: WACC.")
+    if model.terminal_value() is None:
+        messages.append("Valuation input missing: Terminal Value.")
+    try:
+        ufcf = model.ufcf()
+    except ValueError as exc:
+        messages.append(f"UFCF validation issue: {exc}")
+        return messages
+    if ufcf is None or ufcf.empty:
+        messages.append("UFCF series is missing or empty; computed NPV/IRR cannot be derived.")
+    return messages
+
+
 def _execute_scenario_suite(
     schedule_df: pd.DataFrame,
     valuation_inputs: Dict[str, float],
@@ -1396,6 +1458,13 @@ def _execute_scenario_suite(
         scenario_supplementary = {
             key: value.copy() for key, value in base_supplementary.items()
         }
+        scenario_kpis = model.kpis(scenario_df, annual=True)
+        outputs_table = _dynamic_outputs_table(model, scenario_df)
+        if not outputs_table.empty:
+            scenario_supplementary["Outputs"] = outputs_table
+        benchmark_table = _dynamic_benchmark_kpis_table(scenario_kpis)
+        if not benchmark_table.empty:
+            scenario_supplementary["Benchmark KPIs"] = benchmark_table
 
         scenario_inputs: Dict[str, Any] = {
             "Milk price change (%)": milk_pct,
@@ -1408,7 +1477,7 @@ def _execute_scenario_suite(
             "model": model,
             "base": base,
             "scenario": scenario_df,
-            "kpis": model.kpis(scenario_df, annual=True),
+            "kpis": scenario_kpis,
             "break_even": model.break_even(scenario_df, annual=True),
             "supplementary": scenario_supplementary,
             "selected_scenario": name,
@@ -1709,33 +1778,55 @@ DEFAULT_PRICING_ROWS = [
 
 
 DEFAULT_OPERATING_COST_ROWS = [
-    {"Year": 2024, "Category": "Feed", "Monthly Cost": 8500.0, "Inflation %": 4.0},
-    {"Year": 2025, "Category": "Feed", "Monthly Cost": 8840.0, "Inflation %": 4.0},
     {
         "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "unit_cost_per_head_per_month": 26.56,
+        "Inflation %": 4.0,
+    },
+    {
+        "Year": 2025,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "unit_cost_per_head_per_month": 27.62,
+        "Inflation %": 4.0,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "Monthly Cost": 1800.0,
+        "unit_cost_per_head_per_month": 5.63,
         "Inflation %": 3.5,
     },
     {
         "Year": 2025,
+        "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "Monthly Cost": 1863.0,
+        "unit_cost_per_head_per_month": 5.83,
         "Inflation %": 3.5,
     },
     {
         "Year": 2024,
+        "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "Monthly Cost": 1200.0,
+        "unit_cost_per_head_per_month": 3.75,
         "Inflation %": 2.0,
     },
     {
         "Year": 2025,
+        "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "Monthly Cost": 1224.0,
+        "unit_cost_per_head_per_month": 3.83,
         "Inflation %": 2.0,
     },
 ]
+
+OPERATING_COST_FIELD_TO_CATEGORY = {
+    "variable_feed_cost_per_herd": "Feed",
+    "variable_healthcare_cost_per_herd": "Healthcare",
+    "fixed_utility_cost_per_herd": "Utilities",
+}
 
 
 DEFAULT_INPUT_CONFIG_KEY = "default_input_templates"
@@ -2007,15 +2098,16 @@ def _default_operating_cost_table() -> pd.DataFrame:
     rows = _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS)
     table = _template_to_dataframe(
         rows,
-        ["Year", "Category", "Monthly Cost", "Inflation %"],
+        ["Year", "Field", "Category", "unit_cost_per_head_per_month", "Inflation %"],
     )
 
     if table.empty:
         return pd.DataFrame(
             {
                 "Year": [pd.Timestamp.today().year],
+                "Field": ["variable_feed_cost_per_herd"],
                 "Category": ["Operating Item"],
-                "Monthly Cost": [np.nan],
+                "unit_cost_per_head_per_month": [np.nan],
                 "Inflation %": [np.nan],
             }
         )
@@ -2030,10 +2122,30 @@ def _ensure_operating_cost_table(
         return _default_operating_cost_table()
 
     work = table.copy()
+    if "Field" not in work.columns:
+        work["Field"] = np.nan
     work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+    work["Field"] = work.get("Field", "").astype(str).str.strip()
     work["Category"] = work.get("Category", "").astype(str).str.strip()
     work.loc[work["Category"] == "", "Category"] = np.nan
-    work["Monthly Cost"] = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
+    for idx in work.index:
+        category = str(work.at[idx, "Category"]).strip()
+        field = str(work.at[idx, "Field"]).strip()
+        if (not field or field.lower() == "nan") and category:
+            for key, label in OPERATING_COST_FIELD_TO_CATEGORY.items():
+                if label.casefold() == category.casefold():
+                    field = key
+                    break
+            if not field or field.lower() == "nan":
+                field = f"variable_{category.lower().replace(' ', '_')}_cost_per_herd"
+            work.at[idx, "Field"] = field
+        elif field and (not category or category.lower() == "nan"):
+            work.at[idx, "Category"] = OPERATING_COST_FIELD_TO_CATEGORY.get(field, "Operating Item")
+    work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
+    unit_cost = pd.to_numeric(work.get("unit_cost_per_head_per_month"), errors="coerce")
+    # Backward compatibility for historical tables still carrying "Monthly Cost".
+    monthly_legacy = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
+    work["unit_cost_per_head_per_month"] = unit_cost.where(unit_cost.notna(), monthly_legacy)
     work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
 
     work = work.dropna(how="all")
@@ -2053,13 +2165,19 @@ def _ensure_operating_cost_table(
         work["Year"] = work["Year"].fillna(pd.Timestamp.today().year)
     work["Year"] = work["Year"].round().astype("Int64")
 
-    required_cols = ["Year", "Category", "Monthly Cost", "Inflation %"]
+    required_cols = [
+        "Year",
+        "Field",
+        "Category",
+        "unit_cost_per_head_per_month",
+        "Inflation %",
+    ]
     for col in required_cols:
         if col not in work.columns:
             work[col] = np.nan
 
-    ordered = work[required_cols + [c for c in work.columns if c not in required_cols]]
-    return ordered.sort_values(["Category", "Year"], kind="stable").reset_index(drop=True)
+    ordered = work[required_cols + [c for c in work.columns if c not in required_cols and c != "Monthly Cost"]]
+    return ordered.sort_values(["Field", "Year"], kind="stable").reset_index(drop=True)
 
 
 def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
@@ -2072,8 +2190,9 @@ def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
         default_year = pd.Timestamp.today().year
     new_row = {
         "Year": default_year,
-        "Category": f"Operating Item {len(work) + 1}",
-        "Monthly Cost": np.nan,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "unit_cost_per_head_per_month": np.nan,
         "Inflation %": np.nan,
     }
     return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
@@ -2092,7 +2211,7 @@ def _apply_operating_cost_increment(
     table: pd.DataFrame,
     increment_pct: float,
     target_category: Optional[str] = None,
-    column: str = "Monthly Cost",
+    column: str = "unit_cost_per_head_per_month",
 ) -> pd.DataFrame:
     if table is None or table.empty or increment_pct == 0:
         return table
@@ -2135,7 +2254,171 @@ def _apply_operating_cost_increment(
 
             work.at[idx, column] = last_value
 
-    return work.sort_values(["Category", "Year"], kind="stable").reset_index(drop=True)
+    work["unit_cost_per_head_per_month"] = pd.to_numeric(
+        work["unit_cost_per_head_per_month"], errors="coerce"
+    )
+
+    return work.sort_values(["Field", "Year"], kind="stable").reset_index(drop=True)
+
+
+def _apply_operating_cost_assumptions_to_schedule(
+    schedule_df: pd.DataFrame, operating_table: Optional[pd.DataFrame]
+) -> pd.DataFrame:
+    if schedule_df.empty or operating_table is None or operating_table.empty:
+        return schedule_df
+
+    assumptions = _ensure_operating_cost_table(operating_table)
+    if assumptions.empty:
+        return schedule_df
+
+    work = schedule_df.copy()
+    herd = pd.to_numeric(work.get("Herd Size (heads)"), errors="coerce")
+    if herd.isna().all():
+        return work
+    herd = herd.ffill().bfill()
+    period_days = work.index.to_series().diff().dt.days.astype(float)
+    valid_days = period_days.iloc[1:][np.isfinite(period_days.iloc[1:])]
+    default_days = float(np.median(valid_days)) if not valid_days.empty else 30.44
+    if not np.isfinite(default_days) or default_days <= 0:
+        default_days = 30.44
+    months_factor = (period_days / 30.44).fillna(default_days / 30.44).clip(lower=1e-6)
+
+    assumptions = assumptions.sort_values(["Field", "Year"], kind="stable")
+    year_values = work.index.year
+
+    field_period_costs: Dict[str, pd.Series] = {}
+    for field in assumptions["Field"].dropna().astype(str).unique().tolist():
+        field_rows = assumptions[assumptions["Field"].astype(str) == field]
+        unit_map = {
+            int(row["Year"]): float(row["unit_cost_per_head_per_month"])
+            for _, row in field_rows.iterrows()
+            if pd.notna(row.get("Year")) and pd.notna(row.get("unit_cost_per_head_per_month"))
+        }
+        if not unit_map:
+            continue
+        unit_series = pd.Series(
+            [unit_map.get(int(y), np.nan) for y in year_values],
+            index=work.index,
+            dtype=float,
+        ).ffill()
+        field_period_costs[field] = unit_series * herd * months_factor
+
+    if "variable_feed_cost_per_herd" in field_period_costs:
+        work["COGS"] = field_period_costs["variable_feed_cost_per_herd"]
+    if "variable_healthcare_cost_per_herd" in field_period_costs:
+        work["Variable Expenses"] = field_period_costs["variable_healthcare_cost_per_herd"]
+    if "fixed_utility_cost_per_herd" in field_period_costs:
+        utility = field_period_costs["fixed_utility_cost_per_herd"]
+        if "Fixed Expenses" in work.columns:
+            base_fixed = pd.to_numeric(work["Fixed Expenses"], errors="coerce").fillna(0.0)
+            work["Fixed Expenses"] = base_fixed + utility
+        else:
+            work["Fixed Expenses"] = utility
+
+    return _synchronize_financial_algorithms(work)
+
+
+def _default_herd_plan_table() -> pd.DataFrame:
+    current_year = pd.Timestamp.today().year
+    return pd.DataFrame(
+        {
+            "Year": [current_year, current_year + 1, current_year + 2],
+            "Herd Size (heads)": [320.0, 336.0, 353.0],
+            "Herd Growth %": [np.nan, 5.0, 5.0],
+        }
+    )
+
+
+def _ensure_herd_plan_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_herd_plan_table()
+    else:
+        work = table.copy()
+
+    for column in ["Year", "Herd Size (heads)", "Herd Growth %", "yearly_increment_percent"]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    work = work.dropna(how="all").dropna(subset=["Year"]).sort_values("Year").reset_index(drop=True)
+    if work.empty:
+        return _default_herd_plan_table()
+
+    previous_size: Optional[float] = None
+    for idx in work.index:
+        size = work.at[idx, "Herd Size (heads)"]
+        growth = work.at[idx, "Herd Growth %"]
+        if pd.isna(growth):
+            growth = work.at[idx, "yearly_increment_percent"]
+        if pd.isna(size):
+            if previous_size is not None and pd.notna(growth):
+                size = previous_size * (1.0 + float(growth) / 100.0)
+            elif previous_size is not None:
+                size = previous_size
+            else:
+                size = 100.0
+            work.at[idx, "Herd Size (heads)"] = float(size)
+
+        if previous_size is not None and previous_size > 0 and pd.isna(growth):
+            work.at[idx, "Herd Growth %"] = (float(work.at[idx, "Herd Size (heads)"]) / previous_size - 1.0) * 100.0
+        previous_size = float(work.at[idx, "Herd Size (heads)"])
+
+    work["yearly_increment_percent"] = pd.to_numeric(work["Herd Growth %"], errors="coerce")
+    ordered = ["Year", "Herd Size (heads)", "Herd Growth %", "yearly_increment_percent"]
+    remainder = [col for col in work.columns if col not in ordered]
+    return work[ordered + remainder].reset_index(drop=True)
+
+
+def _apply_herd_yearly_increment(table: pd.DataFrame, yearly_increment_percent: float) -> pd.DataFrame:
+    work = _ensure_herd_plan_table(table)
+    if work.empty:
+        return work
+
+    increment = float(yearly_increment_percent)
+    base_size = pd.to_numeric(pd.Series([work.iloc[0].get("Herd Size (heads)")]), errors="coerce").iloc[0]
+    if pd.isna(base_size) or base_size <= 0:
+        base_size = 100.0
+    work.at[0, "Herd Size (heads)"] = float(base_size)
+    work.at[0, "Herd Growth %"] = np.nan
+
+    for idx in work.index[1:]:
+        prev_size = float(work.at[idx - 1, "Herd Size (heads)"])
+        next_size = prev_size * (1.0 + increment / 100.0)
+        work.at[idx, "Herd Size (heads)"] = float(next_size)
+        work.at[idx, "Herd Growth %"] = increment
+
+    work["yearly_increment_percent"] = pd.to_numeric(work["Herd Growth %"], errors="coerce")
+    return _ensure_herd_plan_table(work)
+
+
+def _apply_herd_plan_to_schedule(schedule_df: pd.DataFrame, herd_plan: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if schedule_df.empty or herd_plan is None or herd_plan.empty:
+        return schedule_df
+
+    plan = _ensure_herd_plan_table(herd_plan)
+    size_map = {
+        int(row["Year"]): float(row["Herd Size (heads)"])
+        for _, row in plan.iterrows()
+        if pd.notna(row.get("Year")) and pd.notna(row.get("Herd Size (heads)"))
+    }
+    if not size_map:
+        return schedule_df
+
+    baseline_size = next((v for _, v in sorted(size_map.items()) if v > 0), None)
+    if baseline_size is None:
+        return schedule_df
+
+    work = schedule_df.copy()
+    herd_sizes = work.index.year.map(lambda year: size_map.get(int(year), float(baseline_size))).astype(float)
+    multipliers = herd_sizes / float(baseline_size)
+    work["Herd Size (heads)"] = herd_sizes
+    work["Herd Multiplier"] = multipliers
+
+    for col in ["Revenue", "COGS", "Variable Expenses", "Direct Wages"]:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce") * multipliers
+
+    return _synchronize_financial_algorithms(work)
 
 
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
@@ -2208,6 +2491,51 @@ def _ensure_cogs_schedule(
     return _sync_cogs_table(table, core, default_pct=default_pct)
 
 
+def _sync_cogs_from_operating_assumptions(
+    cogs_table: pd.DataFrame,
+    core_schedule: pd.DataFrame,
+    assumptions: Optional[Dict[str, pd.DataFrame]] = None,
+    default_pct: float = 45.0,
+) -> pd.DataFrame:
+    """Project COGS from Herd Plan + Operating Costs and sync COGS/% rows by period."""
+    if cogs_table is None or cogs_table.empty or core_schedule is None or core_schedule.empty:
+        return cogs_table
+
+    assumptions_map = assumptions or {}
+    herd_plan = assumptions_map.get("Herd Plan")
+    operating_costs = assumptions_map.get("Operating Costs")
+    if not isinstance(operating_costs, pd.DataFrame) or operating_costs.empty:
+        return _sync_cogs_table(cogs_table, core_schedule, default_pct=default_pct)
+
+    projected = core_schedule.copy()
+    if "Period" in projected.columns:
+        period_values = pd.to_datetime(projected["Period"], errors="coerce")
+        projected = projected.set_index(period_values)
+    projected.index = pd.to_datetime(projected.index, errors="coerce")
+    projected = projected.loc[projected.index.notna()].sort_index()
+    if projected.empty:
+        return _sync_cogs_table(cogs_table, core_schedule, default_pct=default_pct)
+
+    if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+        projected = _apply_herd_plan_to_schedule(projected, herd_plan)
+    projected = _apply_operating_cost_assumptions_to_schedule(projected, operating_costs)
+
+    mapped = cogs_table.copy()
+    mapped["Period"] = _normalize_period(mapped.get("Period", pd.Series(dtype=str)))
+    projected_map = {
+        idx.strftime("%Y-%m-%d"): float(value)
+        for idx, value in zip(
+            projected.index,
+            pd.to_numeric(projected.get("COGS"), errors="coerce"),
+        )
+        if pd.notna(idx) and pd.notna(value)
+    }
+    mapped["COGS"] = mapped["Period"].map(projected_map).combine_first(
+        pd.to_numeric(mapped.get("COGS"), errors="coerce")
+    )
+    return _sync_cogs_table(mapped, core_schedule, default_pct=default_pct)
+
+
 # ---------- Direct wages helpers ----------
 
 
@@ -2244,7 +2572,8 @@ def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
                 )
 
     if not rows:
-        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
         rows.append({"Period": today, "Role": "Direct Wage", "Amount": np.nan})
 
     return pd.DataFrame(rows)
@@ -2283,7 +2612,8 @@ def _add_direct_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFram
         if not core_periods.empty:
             default_period = core_periods.iloc[-1]
     if default_period is None or pd.isna(default_period):
-        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        default_period = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
 
     new_row = {
         "Period": default_period,
@@ -2379,7 +2709,16 @@ def _aggregate_direct_wages(
 def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
     totals = pd.to_numeric(core.get("Admin Wages"), errors="coerce")
-    total_values = totals.tolist() if totals is not None else []
+    if isinstance(totals, pd.Series):
+        total_values = totals.tolist()
+    elif totals is None:
+        total_values = []
+    else:
+        try:
+            scalar_total = float(totals)
+            total_values = [scalar_total] * len(periods)
+        except (TypeError, ValueError):
+            total_values = []
 
     rows: list[dict[str, object]] = []
     if periods:
@@ -2400,7 +2739,8 @@ def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
                 )
 
     if not rows:
-        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
         rows.append({"Period": today, "Function": "Admin Wage", "Amount": np.nan})
 
     return pd.DataFrame(rows)
@@ -2416,9 +2756,18 @@ def _ensure_admin_wage_table(
     if "Admin Wages" in work.columns and "Amount" not in work.columns:
         periods = _normalize_period(work.get("Period", pd.Series(dtype=str)))
         totals = pd.to_numeric(work.get("Admin Wages"), errors="coerce")
+        if isinstance(totals, pd.Series):
+            total_values = totals.tolist()
+        elif totals is None:
+            total_values = []
+        else:
+            try:
+                total_values = [float(totals)] * len(periods)
+            except (TypeError, ValueError):
+                total_values = []
         reconstructed: list[dict[str, object]] = []
         for idx, period in enumerate(periods):
-            total = totals.iloc[idx] if idx < len(totals) else np.nan
+            total = total_values[idx] if idx < len(total_values) else np.nan
             for function, share in _admin_wage_default_items():
                 amount = (
                     total * share
@@ -2462,7 +2811,8 @@ def _add_admin_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame
         if not core_periods.empty:
             default_period = core_periods.iloc[-1]
     if default_period is None or pd.isna(default_period):
-        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        default_period = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
 
     new_row = {
         "Period": default_period,
@@ -2576,7 +2926,8 @@ def _default_variable_expense_table(core: pd.DataFrame) -> pd.DataFrame:
                 })
 
     if not rows:
-        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
         rows.append({"Period": today, "Item": "Variable Expense", "Amount": np.nan})
 
     return pd.DataFrame(rows)
@@ -2615,7 +2966,8 @@ def _add_variable_expense_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.Dat
         if not core_periods.empty:
             default_period = core_periods.iloc[-1]
     if default_period is None or pd.isna(default_period):
-        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        default_period = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
 
     new_row = {
         "Period": default_period,
@@ -2754,6 +3106,7 @@ def _add_cogs_row(
 ) -> pd.DataFrame:
     work = _sync_cogs_table(table, core, default_pct=default_pct)
     periods = pd.to_datetime(work["Period"], errors="coerce")
+    period_type = _infer_period_type_from_schedule(core)
 
     if periods.notna().any():
         last_period = periods.max()
@@ -2762,12 +3115,12 @@ def _add_cogs_row(
         if core_periods.notna().any():
             last_period = core_periods.max()
         else:
-            last_period = pd.Timestamp.today() + MonthEnd(0)
+            last_period = _next_period_from_last(None, period_type)
 
-    next_period = (last_period + MonthEnd(1)) if last_period is not None else pd.Timestamp.today() + MonthEnd(0)
+    next_period = _next_period_from_last(last_period, period_type)
     existing_periods = set(work["Period"].astype(str))
     while next_period.strftime("%Y-%m-%d") in existing_periods:
-        next_period += MonthEnd(1)
+        next_period = _next_period_from_last(next_period, period_type)
 
     next_period_str = next_period.strftime("%Y-%m-%d")
 
@@ -3184,8 +3537,59 @@ def _remove_capex_row(table: Optional[pd.DataFrame], index: int) -> pd.DataFrame
     return _recalculate_capex_schedule(reduced)
 
 
-def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
-    dates = pd.date_range(start, periods=periods, freq=MonthEnd(1))
+def _normalize_period_type(value: Optional[str]) -> str:
+    candidate = str(value or "").strip().lower()
+    return "quarterly" if candidate == "quarterly" else "monthly"
+
+
+def _period_end_offset(period_type: str) -> Union[MonthEnd, QuarterEnd]:
+    return QuarterEnd(1) if _normalize_period_type(period_type) == "quarterly" else MonthEnd(1)
+
+
+def _period_label(period_type: str) -> str:
+    return "Quarterly" if _normalize_period_type(period_type) == "quarterly" else "Monthly"
+
+
+def _period_index_for_horizon(start_year: int, end_year: int, period_type: str) -> pd.DatetimeIndex:
+    normalized = _normalize_period_type(period_type)
+    if normalized == "quarterly":
+        start_date = pd.Timestamp(start_year, 3, 31)
+        end_date = pd.Timestamp(end_year, 12, 31)
+        return pd.date_range(start=start_date, end=end_date, freq=QuarterEnd())
+
+    start_date = pd.Timestamp(start_year, 1, 1) + MonthEnd(0)
+    end_date = pd.Timestamp(end_year, 12, 1) + MonthEnd(0)
+    return pd.date_range(start=start_date, end=end_date, freq=MonthEnd())
+
+
+def _infer_period_type_from_schedule(core_schedule: Optional[pd.DataFrame]) -> str:
+    if not isinstance(core_schedule, pd.DataFrame) or core_schedule.empty:
+        return "monthly"
+    raw_periods = core_schedule.get("Period", pd.Series(dtype=str))
+    periods = pd.to_datetime(raw_periods, errors="coerce")
+    if not isinstance(periods, pd.Series):
+        periods = pd.Series(periods)
+    periods = periods.dropna()
+    if len(periods) < 2:
+        return "monthly"
+    month_diffs = periods.sort_values().diff().dt.days.dropna()
+    if month_diffs.empty:
+        return "monthly"
+    median_days = float(month_diffs.median())
+    return "quarterly" if median_days >= 75 else "monthly"
+
+
+def _next_period_from_last(last_period: Optional[pd.Timestamp], period_type: str) -> pd.Timestamp:
+    normalized = _normalize_period_type(period_type)
+    if last_period is None or pd.isna(last_period):
+        return pd.Timestamp.today() + (QuarterEnd(0) if normalized == "quarterly" else MonthEnd(0))
+    return last_period + _period_end_offset(normalized)
+
+
+def _default_income_schedule(
+    periods: int = 12, start: str = "2024-01-31", period_type: str = "monthly"
+) -> pd.DataFrame:
+    dates = pd.date_range(start, periods=periods, freq=_period_end_offset(period_type))
     revenue = np.linspace(45000, 70000, periods)
     cogs = revenue * 0.45
     variable = revenue * 0.12
@@ -3282,24 +3686,35 @@ def _default_schedule_components(
     periods: Optional[int] = None,
     start: Optional[str] = None,
     production_horizon: Optional[pd.DataFrame] = None,
+    period_type: str = "monthly",
 ) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     if production_horizon is None:
         production_horizon = _default_production_horizon_table()
 
     start_year, end_year = _derive_horizon_years(production_horizon)
+    normalized_period_type = _normalize_period_type(period_type)
 
     if periods is None:
-        periods = max(1, (end_year - start_year + 1) * 12)
+        per_year = 4 if normalized_period_type == "quarterly" else 12
+        periods = max(1, (end_year - start_year + 1) * per_year)
 
     if start is None:
-        start_date = pd.Timestamp(start_year, 1, 1) + pd.offsets.MonthEnd(0)
+        if normalized_period_type == "quarterly":
+            start_date = pd.Timestamp(start_year, 3, 31)
+        else:
+            start_date = pd.Timestamp(start_year, 1, 1) + MonthEnd(0)
         start = start_date.strftime("%Y-%m-%d")
 
-    base = _default_income_schedule(periods=periods, start=start)
+    base = _default_income_schedule(
+        periods=periods, start=start, period_type=normalized_period_type
+    )
 
     core_columns = [
         "Period",
         "Revenue",
+        "Variable Expenses",
+        "Direct Wages",
+        "Admin Wages",
         "Fixed Expenses",
         "Depreciation & Amortization",
         "EBIT",
@@ -3371,7 +3786,7 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
         ),
         "Outputs": pd.DataFrame(
             {
-                "Metric": ["IRR", "Payback (years)"],
+                "Metric": ["IRR", "Payback Period (Years)"],
                 "Value": [0.17, 4.2],
             }
         ),
@@ -3595,6 +4010,7 @@ def _rebase_schedule_to_horizon(
     detail_tables: Optional[Dict[str, pd.DataFrame]],
     start_year: int,
     end_year: int,
+    period_type: str = "monthly",
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """Return schedule tables that span the requested production horizon."""
 
@@ -3603,12 +4019,11 @@ def _rebase_schedule_to_horizon(
 
     horizon_table = pd.DataFrame({"Start Year": [start_year], "End Year": [end_year]})
     default_core, default_details = _default_schedule_components(
-        production_horizon=horizon_table
+        production_horizon=horizon_table,
+        period_type=period_type,
     )
 
-    start_date = (pd.Timestamp(start_year, 1, 1) + MonthEnd(0))
-    end_date = (pd.Timestamp(end_year, 12, 1) + MonthEnd(0))
-    period_index = pd.date_range(start=start_date, end=end_date, freq=MonthEnd())
+    period_index = _period_index_for_horizon(start_year, end_year, period_type)
 
     merged_core = _merge_schedule_table(core, default_core, period_index)
 
@@ -3639,9 +4054,10 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
 
     core_table = st.session_state.get("core_schedule")
     detail_tables = st.session_state.get("detail_schedules")
+    period_type = _normalize_period_type(st.session_state.get("schedule_period_type"))
 
     merged_core, merged_details = _rebase_schedule_to_horizon(
-        core_table, detail_tables, start_year, end_year
+        core_table, detail_tables, start_year, end_year, period_type=period_type
     )
 
     st.session_state.core_schedule = merged_core
@@ -3652,7 +4068,123 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
         identifier = f"detail::{_scenario_key_suffix(name)}"
         _clear_schedule_editor_state(identifier)
 
+    _sync_horizon_dependent_state(start_year, end_year)
     _reset_cached_results()
+
+
+def _sync_schedule_period_type(period_type: str) -> None:
+    """Rebuild period-based schedules to monthly/quarterly while preserving data."""
+    production_table = _ensure_production_horizon_table(
+        st.session_state.assumptions.get("Production Horizon")
+    )
+    start_year, end_year = _derive_horizon_years(production_table)
+    st.session_state["schedule_period_type"] = _normalize_period_type(period_type)
+
+    core_table = st.session_state.get("core_schedule")
+    detail_tables = st.session_state.get("detail_schedules")
+    merged_core, merged_details = _rebase_schedule_to_horizon(
+        core_table,
+        detail_tables,
+        start_year,
+        end_year,
+        period_type=st.session_state["schedule_period_type"],
+    )
+
+    st.session_state.core_schedule = merged_core
+    st.session_state.detail_schedules = merged_details
+    _clear_schedule_editor_state("core_schedule")
+    for name in merged_details:
+        _clear_schedule_editor_state(f"detail::{_scenario_key_suffix(name)}")
+    _reset_cached_results()
+
+
+def _dedupe_horizon_assumption_rows(table_name: str, table: pd.DataFrame) -> pd.DataFrame:
+    if table.empty:
+        return table
+
+    work = table.copy()
+    if table_name == "Operating Costs":
+        if "Field" in work.columns:
+            work["Field"] = work["Field"].astype(str).str.strip()
+            return work.drop_duplicates(subset=["Year", "Field"], keep="last").reset_index(drop=True)
+        if "Category" in work.columns:
+            work["Category"] = work["Category"].astype(str).str.strip()
+            return work.drop_duplicates(subset=["Year", "Category"], keep="last").reset_index(drop=True)
+    if table_name == "Pricing" and {"Product", "Unit"}.issubset(work.columns):
+        work["Product"] = work["Product"].astype(str).str.strip()
+        work["Unit"] = work["Unit"].astype(str).str.strip()
+        return work.drop_duplicates(subset=["Year", "Product", "Unit"], keep="last").reset_index(drop=True)
+    if table_name == "Herd Plan":
+        return work.drop_duplicates(subset=["Year"], keep="last").reset_index(drop=True)
+    return work
+
+
+def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
+    """Propagate horizon edits to dependent pages/tables."""
+
+    if start_year > end_year:
+        start_year, end_year = end_year, start_year
+
+    # Keep year-based assumption tables aligned to the active horizon.
+    assumptions = st.session_state.get("assumptions", {})
+    if isinstance(assumptions, dict):
+        for table_name in ["Pricing", "Operating Costs", "Herd Plan"]:
+            table = assumptions.get(table_name)
+            if not isinstance(table, pd.DataFrame) or table.empty or "Year" not in table:
+                continue
+            work = table.copy()
+            year_col = pd.to_numeric(work.get("Year"), errors="coerce")
+            work["Year"] = year_col
+            mask = year_col.between(start_year, end_year, inclusive="both")
+            if mask.any():
+                work = work.loc[mask].reset_index(drop=True)
+            elif not work.empty:
+                work.loc[:, "Year"] = start_year
+            work = _dedupe_horizon_assumption_rows(table_name, work)
+            assumptions[table_name] = work
+        st.session_state.assumptions = assumptions
+
+    # Keep supplementary schedules aligned where year columns exist.
+    supplementary = st.session_state.get("supplementary", {})
+    if isinstance(supplementary, dict):
+        for name, table in supplementary.items():
+            if not isinstance(table, pd.DataFrame) or table.empty or "Year" not in table:
+                continue
+            work = table.copy()
+            years = pd.to_numeric(work.get("Year"), errors="coerce")
+            mask = years.between(start_year, end_year, inclusive="both")
+            if mask.any():
+                work = work.loc[mask].reset_index(drop=True)
+            elif not work.empty:
+                work.loc[:, "Year"] = start_year
+            supplementary[name] = work
+        st.session_state.supplementary = supplementary
+
+    # Sync analytics-framework period labels to the rebased core schedule.
+    framework = st.session_state.get("analytics_framework", {})
+    core_periods = _normalize_period(
+        st.session_state.get("core_schedule", pd.DataFrame()).get("Period", pd.Series(dtype=str))
+    ).tolist()
+    if isinstance(framework, dict) and core_periods:
+        for tool_key, config in framework.items():
+            if not isinstance(config, dict):
+                continue
+            data_table = config.get("data")
+            if not isinstance(data_table, pd.DataFrame) or data_table.empty:
+                continue
+            if "Period" not in data_table.columns:
+                continue
+            work = data_table.copy()
+            count = len(work)
+            if count > 0:
+                work["Period"] = core_periods[:count] if len(core_periods) >= count else (
+                    core_periods + [core_periods[-1]] * (count - len(core_periods))
+                )
+            config["data"] = work
+            framework[tool_key] = config
+        st.session_state.analytics_framework = framework
+
+    _sync_shared_model_context(st.session_state.get("results"))
 
 def _default_capital_financing_table() -> pd.DataFrame:
     return pd.DataFrame(
@@ -3688,11 +4220,78 @@ def _ensure_capital_financing_table(
     return work[ordered_cols + remainder].reset_index(drop=True)
 
 
+def _estimate_default_wacc_from_capital_table() -> float:
+    cap_table = _default_capital_financing_table()
+    amounts = pd.to_numeric(cap_table.get("Amount"), errors="coerce")
+    returns = pd.to_numeric(cap_table.get("Interest/Return %"), errors="coerce") / 100.0
+    valid = amounts.notna() & returns.notna() & (amounts > 0)
+    if not valid.any():
+        return float(DEFAULT_VALUATION_INPUTS.get("WACC", 0.12))
+    total = float(amounts[valid].sum())
+    if total <= 0:
+        return float(DEFAULT_VALUATION_INPUTS.get("WACC", 0.12))
+    weighted = float((amounts[valid] * returns[valid]).sum() / total)
+    return weighted if np.isfinite(weighted) and weighted > 0 else float(
+        DEFAULT_VALUATION_INPUTS.get("WACC", 0.12)
+    )
+
+
+def _computed_default_valuation_inputs() -> Dict[str, float]:
+    fallback = {k: float(v) for k, v in DEFAULT_VALUATION_INPUTS.items() if pd.notna(v)}
+    try:
+        core, detail_tables = _default_schedule_components()
+        core_prepared = _prepare_timeline_table(core)
+        prepared_details: Dict[str, pd.DataFrame] = {}
+        for name, table in detail_tables.items():
+            cleaned = _clean_editor_table(table)
+            if cleaned is None:
+                continue
+            prepared_details[name] = _prepare_timeline_table(cleaned)
+        schedule_df = _assemble_schedule(core_prepared, prepared_details)
+
+        ufcf_series = pd.to_numeric(schedule_df.get("Net Cash Flow"), errors="coerce")
+        if ufcf_series.isna().all():
+            ufcf_series = pd.to_numeric(schedule_df.get("CFO"), errors="coerce")
+        ufcf_df = pd.DataFrame(
+            {"Period": schedule_df.index, "UFCF": ufcf_series.to_numpy()}
+        )
+
+        wacc = _estimate_default_wacc_from_capital_table()
+        valid_ufcf = pd.to_numeric(ufcf_df["UFCF"], errors="coerce").dropna()
+        last_ufcf = float(valid_ufcf.iloc[-1]) if not valid_ufcf.empty else 0.0
+        growth_rate = 0.02
+        terminal_value = (
+            (last_ufcf * (1.0 + growth_rate)) / max(wacc - growth_rate, 1e-6)
+            if np.isfinite(last_ufcf)
+            else 0.0
+        )
+
+        valuation_inputs = {"WACC": float(wacc), "Terminal Value": float(terminal_value)}
+        schedule = InputSchedule(
+            data=schedule_df,
+            valuation_inputs=valuation_inputs,
+            supplementary_tables={"UFCF": ufcf_df},
+        )
+        model = schedule.to_model()
+        npv_value = model.computed_npv()
+        irr_value = model.computed_irr()
+        computed = {
+            "WACC": float(wacc),
+            "NPV": float(npv_value) if npv_value is not None else float(fallback.get("NPV", 0.0)),
+            "IRR": float(irr_value) if irr_value is not None else float(fallback.get("IRR", 0.0)),
+            "Terminal Value": float(terminal_value),
+        }
+        return computed
+    except Exception:
+        return fallback
+
+
 def _default_valuation_inputs_table() -> pd.DataFrame:
+    computed_defaults = _computed_default_valuation_inputs()
     return pd.DataFrame(
         {
-            "Metric": list(DEFAULT_VALUATION_INPUTS.keys()),
-            "Value": list(DEFAULT_VALUATION_INPUTS.values()),
+            "Metric": list(computed_defaults.keys()),
+            "Value": list(computed_defaults.values()),
         }
     )
 
@@ -3734,6 +4333,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
     return {
         "Scenario Controls": _default_scenario_controls_table(),
         "Production Horizon": _default_production_horizon_table(),
+        "Herd Plan": _default_herd_plan_table(),
         "Pricing": _default_pricing_table(),
         "Operating Costs": _default_operating_cost_table(),
         "Capital & Financing": _default_capital_financing_table(),
@@ -3786,6 +4386,17 @@ def _ensure_default_results_loaded() -> None:
     except ValueError:
         return
 
+    assumptions = st.session_state.get("assumptions", {})
+    if isinstance(assumptions, dict):
+        herd_plan = assumptions.get("Herd Plan")
+        if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+            schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
+        operating_costs = assumptions.get("Operating Costs")
+        if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
+            schedule_df = _apply_operating_cost_assumptions_to_schedule(
+                schedule_df, operating_costs
+            )
+
     valuation_inputs = dict(DEFAULT_VALUATION_INPUTS)
     supplementary_copy = {
         name: table.copy()
@@ -3812,6 +4423,9 @@ def _ensure_default_results_loaded() -> None:
 
     st.session_state.selected_scenario_name = preferred
     st.session_state.results = scenario_results[preferred]
+    st.session_state.setdefault(
+        "model_last_run_at", pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    )
 
 
 def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -3837,12 +4451,89 @@ def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
     return values.sort_index()
 
 
+def _synchronize_financial_algorithms(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    numeric_cols = [
+        "Revenue",
+        "COGS",
+        "Gross Margin",
+        "Variable Expenses",
+        "Fixed Expenses",
+        "Direct Wages",
+        "Admin Wages",
+        "EBITDA",
+        "Depreciation & Amortization",
+        "EBIT",
+        "Interest Expense",
+        "NPBT",
+        "Tax Expense",
+        "NPAT",
+        "CFO",
+        "CFI",
+        "CFF",
+        "Net Cash Flow",
+        "Opening Cash Balance",
+        "Closing Cash Balance",
+        "Cash and Cash Equivalents",
+    ]
+    for col in numeric_cols:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    if {"Revenue", "COGS"}.issubset(work.columns):
+        work["Gross Margin"] = work["Revenue"] - work["COGS"]
+    if {"Gross Margin", "Variable Expenses", "Fixed Expenses", "Direct Wages", "Admin Wages"}.issubset(work.columns):
+        work["EBITDA"] = (
+            work["Gross Margin"]
+            - work["Variable Expenses"].fillna(0)
+            - work["Fixed Expenses"].fillna(0)
+            - work["Direct Wages"].fillna(0)
+            - work["Admin Wages"].fillna(0)
+        )
+    if {"EBITDA", "Depreciation & Amortization"}.issubset(work.columns):
+        work["EBIT"] = work["EBITDA"] - work["Depreciation & Amortization"].fillna(0)
+    if {"EBIT", "Interest Expense"}.issubset(work.columns):
+        work["NPBT"] = work["EBIT"] - work["Interest Expense"].fillna(0)
+    if {"NPBT", "Tax Expense"}.issubset(work.columns):
+        tax_ratio = pd.Series(0.28, index=work.index)
+        if work["NPBT"].notna().any():
+            implied = work["Tax Expense"] / work["NPBT"].replace(0, np.nan)
+            implied = implied.replace([np.inf, -np.inf], np.nan).dropna()
+            if not implied.empty:
+                tax_ratio[:] = float(np.clip(implied.median(), 0.0, 0.6))
+        work["Tax Expense"] = np.maximum(work["NPBT"], 0.0) * tax_ratio
+        work["NPAT"] = work["NPBT"] - work["Tax Expense"]
+    if {"CFO", "CFI", "CFF"}.issubset(work.columns):
+        work["Net Cash Flow"] = work[["CFO", "CFI", "CFF"]].sum(axis=1, min_count=1)
+    if {"Opening Cash Balance", "Net Cash Flow"}.issubset(work.columns):
+        opening = work["Opening Cash Balance"].ffill()
+        work["Closing Cash Balance"] = opening + work["Net Cash Flow"].fillna(0.0)
+        if "Cash and Cash Equivalents" in work.columns:
+            work["Cash and Cash Equivalents"] = work["Closing Cash Balance"]
+    return work
+
+
 def _assemble_schedule(
     core: pd.DataFrame, detail_tables: Dict[str, pd.DataFrame]
 ) -> pd.DataFrame:
     combined = core.copy()
     for table in detail_tables.values():
-        combined = combined.join(table, how="outer")
+        if table is None or table.empty:
+            continue
+        detail = table.copy()
+        union_index = combined.index.union(detail.index)
+        combined = combined.reindex(union_index)
+        detail = detail.reindex(union_index)
+
+        overlap = [col for col in detail.columns if col in combined.columns]
+        new_cols = [col for col in detail.columns if col not in combined.columns]
+
+        for col in overlap:
+            combined[col] = pd.to_numeric(detail[col], errors="coerce").combine_first(
+                pd.to_numeric(combined[col], errors="coerce")
+            )
+        for col in new_cols:
+            combined[col] = detail[col]
 
     required_columns = [
         "Revenue",
@@ -3878,41 +4569,7 @@ def _assemble_schedule(
         if col not in combined.columns:
             combined[col] = np.nan
 
-    if {"Revenue", "COGS"}.issubset(combined.columns):
-        combined["Gross Margin"] = combined["Revenue"] - combined["COGS"]
-
-    if {
-        "Gross Margin",
-        "Variable Expenses",
-        "Fixed Expenses",
-        "Direct Wages",
-        "Admin Wages",
-    }.issubset(combined.columns):
-        combined["EBITDA"] = (
-            combined["Gross Margin"]
-            - combined["Variable Expenses"].fillna(0)
-            - combined["Fixed Expenses"].fillna(0)
-            - combined["Direct Wages"].fillna(0)
-            - combined["Admin Wages"].fillna(0)
-        )
-
-    if {"EBITDA", "Depreciation & Amortization"}.issubset(combined.columns):
-        combined["EBIT"] = combined["EBITDA"] - combined["Depreciation & Amortization"].fillna(0)
-
-    if "Interest Expense" not in combined.columns or combined["Interest Expense"].isna().all():
-        if {"EBIT", "NPBT"}.issubset(combined.columns):
-            combined["Interest Expense"] = (
-                combined["EBIT"] - combined["NPBT"]
-            )
-
-    if "Tax Expense" not in combined.columns or combined["Tax Expense"].isna().all():
-        if {"NPBT", "NPAT"}.issubset(combined.columns):
-            combined["Tax Expense"] = combined["NPBT"] - combined["NPAT"]
-
-    if {"CFO", "CFI", "CFF"}.issubset(combined.columns):
-        combined["Net Cash Flow"] = combined[["CFO", "CFI", "CFF"]].sum(
-            axis=1, min_count=1
-        )
+    combined = _synchronize_financial_algorithms(combined)
 
     ordered_columns = [
         "Revenue",
@@ -3968,6 +4625,1366 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
     st.dataframe(table)
 
 
+def _render_workflow_status_strip() -> None:
+    cols = st.columns(3)
+    assumptions_ready = isinstance(st.session_state.get("assumptions"), dict)
+    schedule_ready = isinstance(st.session_state.get("core_schedule"), pd.DataFrame)
+    last_run = st.session_state.get("model_last_run_at")
+    cols[0].metric("Assumptions", "Ready" if assumptions_ready else "Pending")
+    cols[1].metric("Schedule", "Ready" if schedule_ready else "Pending")
+    cols[2].metric("Last Recalculated", str(last_run) if last_run else "Not run")
+
+
+def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) -> None:
+    issues: list[str] = []
+    operating = assumptions.get("Operating Costs", pd.DataFrame())
+    if isinstance(operating, pd.DataFrame) and not operating.empty and {"Year", "Field"}.issubset(operating.columns):
+        duplicate_mask = operating.duplicated(subset=["Year", "Field"], keep=False)
+        if duplicate_mask.any():
+            issues.append("Operating Costs has duplicate Year+Field rows.")
+    herd = assumptions.get("Herd Plan", pd.DataFrame())
+    if isinstance(herd, pd.DataFrame) and not herd.empty and "Year" in herd.columns:
+        duplicate_years = herd.duplicated(subset=["Year"], keep=False)
+        if duplicate_years.any():
+            issues.append("Herd Plan has duplicate years.")
+    pricing = assumptions.get("Pricing", pd.DataFrame())
+    if isinstance(pricing, pd.DataFrame) and not pricing.empty and {"Year", "Product", "Unit"}.issubset(pricing.columns):
+        dup = pricing.duplicated(subset=["Year", "Product", "Unit"], keep=False)
+        if dup.any():
+            issues.append("Pricing has duplicate Year+Product+Unit rows.")
+
+    if issues:
+        st.warning("Validation summary: " + " ".join(f"- {msg}" for msg in issues))
+    else:
+        st.success("Validation summary: no duplicate key rows detected.")
+
+
+ANALYTICS_FRAMEWORK_TOOLS: List[Dict[str, str]] = [
+    {
+        "key": "sensitivity_analysis",
+        "title": "Sensitivity Analysis",
+        "methodology": "One-at-a-time and multi-driver elasticity tests against profitability and cash flow outputs.",
+        "visualization": "Spider plot + elasticity heatmap",
+    },
+    {
+        "key": "scenario_stress_testing",
+        "title": "Scenario & Stress Testing",
+        "methodology": "Apply severe but plausible shocks and compare resilience across operating, liquidity, and valuation KPIs.",
+        "visualization": "Scenario bridge chart + downside table",
+    },
+    {
+        "key": "trend_seasonality",
+        "title": "Trend & Seasonality Decomposition",
+        "methodology": "Decompose historical production/revenue signals into trend, seasonal, and residual components.",
+        "visualization": "Trend-season-residual line charts",
+    },
+    {
+        "key": "customer_product_segmentation",
+        "title": "Customer & Product Segmentation",
+        "methodology": "Segment products/channels by margin, growth, and volatility to prioritize strategic focus areas.",
+        "visualization": "Segment matrix + contribution waterfall",
+    },
+    {
+        "key": "monte_carlo_simulation",
+        "title": "Monte Carlo Simulation",
+        "methodology": "Run probabilistic simulations for revenue, costs, NPV, and IRR based on configured distributions.",
+        "visualization": "Distribution histogram + percentile fan chart",
+    },
+    {
+        "key": "what_if_analysis",
+        "title": "What-If Analysis",
+        "methodology": "Interactive assumption perturbation with immediate recalc of key KPI outputs.",
+        "visualization": "Delta KPI cards + before/after bars",
+    },
+    {
+        "key": "goal_seek",
+        "title": "Goal Seek Routines",
+        "methodology": "Solve for required input values that satisfy target profitability, liquidity, and return constraints.",
+        "visualization": "Target vs solved-input table",
+    },
+    {
+        "key": "tornado_spider",
+        "title": "Tornado Charts & Spider Diagrams",
+        "methodology": "Rank assumptions by marginal impact on NPV/IRR and display response curves.",
+        "visualization": "Tornado bar chart + spider line chart",
+    },
+    {
+        "key": "regression_modeling",
+        "title": "Regression Modeling",
+        "methodology": "Estimate explanatory relationships between historical drivers and financial outcomes.",
+        "visualization": "Coefficient chart + fitted vs actual scatter",
+    },
+    {
+        "key": "time_series_models",
+        "title": "Time Series (ARIMA/Prophet/LSTM)",
+        "methodology": "Forecast cyclical and seasonal patterns in revenues, prices, and expenses using multiple model classes.",
+        "visualization": "Forecast bands + model comparison table",
+    },
+    {
+        "key": "classification_models",
+        "title": "Classification Models",
+        "methodology": "Classify credit risk/churn/segment outcomes from labeled features and operational indicators.",
+        "visualization": "Confusion matrix + lift chart",
+    },
+    {
+        "key": "linear_nonlinear_optimization",
+        "title": "Linear/Nonlinear Optimization",
+        "methodology": "Optimize objective functions under operational and capital constraints.",
+        "visualization": "Optimal allocation table + constraint slack chart",
+    },
+    {
+        "key": "portfolio_optimization",
+        "title": "Portfolio Optimization",
+        "methodology": "Balance risk and return across herds/product lines using mean-variance and robust alternatives.",
+        "visualization": "Efficient frontier + allocation pie",
+    },
+    {
+        "key": "real_options_analysis",
+        "title": "Real Options Analysis",
+        "methodology": "Value defer/expand/abandon flexibility embedded in strategic initiatives.",
+        "visualization": "Option decision tree + value uplift table",
+    },
+    {
+        "key": "var_cvar",
+        "title": "VaR & Conditional VaR",
+        "methodology": "Estimate downside tail risk at configurable confidence levels.",
+        "visualization": "Loss distribution + tail expectation chart",
+    },
+    {
+        "key": "copula_models",
+        "title": "Copula Models",
+        "methodology": "Model joint tail dependencies across multiple risk factors.",
+        "visualization": "Dependence heatmap + tail copula diagnostics",
+    },
+    {
+        "key": "macroeconomic_linking",
+        "title": "Macroeconomic Linking",
+        "methodology": "Link inflation/GDP/rates/FX assumptions into model drivers for macro-consistent projections.",
+        "visualization": "Macro-to-driver linkage table",
+    },
+    {
+        "key": "esg_sustainability",
+        "title": "ESG & Sustainability Metrics",
+        "methodology": "Quantify financial impact of emissions, carbon pricing, and renewable adoption pathways.",
+        "visualization": "ESG scorecard + cost-benefit trend",
+    },
+    {
+        "key": "market_intelligence",
+        "title": "Market Intelligence Integration",
+        "methodology": "Blend external sentiment and industry outlook data into dynamic demand forecasts.",
+        "visualization": "Sentiment index + demand response chart",
+    },
+    {
+        "key": "probabilistic_valuation",
+        "title": "Probabilistic Valuation",
+        "methodology": "Produce valuation ranges and confidence intervals instead of single-point estimates.",
+        "visualization": "Valuation percentile chart",
+    },
+    {
+        "key": "comparative_valuation_clustering",
+        "title": "Comparative Valuation with Clustering",
+        "methodology": "Benchmark against statistically similar peers using clustering and relative multiples.",
+        "visualization": "Peer cluster map + valuation spread",
+    },
+    {
+        "key": "ml_based_valuation",
+        "title": "Machine Learning–Based Valuation",
+        "methodology": "Predict fair value/multiples from historical market and operational feature sets.",
+        "visualization": "Feature importance + predicted range chart",
+    },
+]
+
+
+def _default_framework_table(
+    columns: Sequence[str], rows: Sequence[Sequence[Any]]
+) -> pd.DataFrame:
+    return pd.DataFrame(list(rows), columns=list(columns))
+
+
+def _analytics_framework_store() -> Dict[str, Dict[str, Any]]:
+    store = st.session_state.setdefault("analytics_framework", {})
+    for tool in ANALYTICS_FRAMEWORK_TOOLS:
+        key = tool["key"]
+        if key in store:
+            continue
+        store[key] = {
+            "enabled": False,
+            "data_sources": ["Scenario Output"],
+            "model_mode": "Balanced",
+            "tool_shock_override": 0.0,
+            "data": _default_framework_table(
+                ["Period", "Revenue", "Cost", "Volume"],
+                [
+                    ("P1", 150000.0, 105000.0, 1200.0),
+                    ("P2", 158000.0, 109000.0, 1240.0),
+                    ("P3", 166000.0, 112500.0, 1280.0),
+                    ("P4", 172000.0, 115000.0, 1310.0),
+                ],
+            ),
+            "inputs": _default_framework_table(
+                ["Input", "Source", "Transform", "Active"],
+                [
+                    ("Milk Price Series", "Scenario Output", "none", True),
+                    ("Feed Cost Series", "Scenario Output", "none", True),
+                    ("Herd Productivity", "Input Schedule", "rolling_mean", True),
+                ],
+            ),
+            "assumptions": _default_framework_table(
+                ["Assumption", "Value", "Units"],
+                [("Confidence Level", 95.0, "%"), ("Lookback Window", 12.0, "months")],
+            ),
+            "drivers": _default_framework_table(
+                ["Driver", "Base", "Low", "High"],
+                [
+                    ("Milk Price", 1.0, -20.0, 20.0),
+                    ("Feed Cost", 1.0, -20.0, 20.0),
+                    ("Herd Productivity", 1.0, -15.0, 15.0),
+                ],
+            ),
+            "scenarios": _default_framework_table(
+                ["Scenario", "Shock %", "Probability %", "Active"],
+                [
+                    ("Base", 0.0, 60.0, True),
+                    ("Downside", -15.0, 25.0, True),
+                    ("Severe Stress", -35.0, 15.0, False),
+                ],
+            ),
+        }
+    st.session_state["analytics_framework"] = store
+    return store
+
+
+def _analytics_framework_control_store() -> Dict[str, Any]:
+    default_controls = {
+        "scenario": "Base",
+        "custom_shock_pct": 0.0,
+        "focus_metric": "Profit",
+        "period_filter": "All",
+    }
+    return st.session_state.setdefault("analytics_framework_controls", default_controls)
+
+
+def _numeric_column_mean(df: pd.DataFrame, column: str) -> float:
+    if column not in df.columns:
+        return 0.0
+    numeric = pd.to_numeric(df[column], errors="coerce")
+    if numeric.dropna().empty:
+        return 0.0
+    return float(numeric.mean())
+
+
+def _scenario_shock_value(controls: Dict[str, Any]) -> float:
+    scenario = controls.get("scenario", "Base")
+    if scenario == "Upside":
+        return 8.0
+    if scenario == "Downside":
+        return -10.0
+    if scenario == "Stress":
+        return -25.0
+    if scenario == "Custom":
+        return float(controls.get("custom_shock_pct", 0.0))
+    return 0.0
+
+
+def _analytics_framework_output(
+    tool_config: Dict[str, Any],
+    results: Optional[Dict[str, Any]],
+    controls: Dict[str, Any],
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    assumptions = tool_config.get("assumptions", pd.DataFrame())
+    drivers = tool_config.get("drivers", pd.DataFrame())
+    scenarios = tool_config.get("scenarios", pd.DataFrame())
+    data_table = tool_config.get("data", pd.DataFrame())
+
+    assumption_level = _numeric_column_mean(assumptions, "Value")
+    driver_range = (
+        abs(_numeric_column_mean(drivers, "High"))
+        + abs(_numeric_column_mean(drivers, "Low"))
+    ) / 2.0
+    tool_shock = _numeric_column_mean(scenarios, "Shock %")
+    scenario_shock = _scenario_shock_value(controls)
+    override_shock = float(tool_config.get("tool_shock_override", 0.0))
+    total_shock = tool_shock + scenario_shock + override_shock
+
+    base_npv = np.nan
+    base_irr = np.nan
+    if results is not None and isinstance(results.get("kpis"), pd.DataFrame):
+        kpi_df = results["kpis"]
+        if "NPV" in kpi_df.columns:
+            base_npv = float(pd.to_numeric(kpi_df["NPV"], errors="coerce").iloc[0])
+        if "IRR" in kpi_df.columns:
+            base_irr = float(pd.to_numeric(kpi_df["IRR"], errors="coerce").iloc[0])
+
+    modeled = data_table.copy(deep=True) if isinstance(data_table, pd.DataFrame) else pd.DataFrame()
+    if modeled.empty:
+        modeled = _default_framework_table(
+            ["Period", "Revenue", "Cost", "Volume"],
+            [("P1", 150000.0, 105000.0, 1200.0)],
+        )
+    for col in ["Revenue", "Cost", "Volume"]:
+        if col not in modeled.columns:
+            modeled[col] = 0.0
+        modeled[col] = pd.to_numeric(modeled[col], errors="coerce").fillna(0.0)
+
+    modeled["Revenue_adj"] = modeled["Revenue"] * (1 + (total_shock / 100.0))
+    modeled["Cost_adj"] = modeled["Cost"] * (1 - (total_shock * 0.35 / 100.0))
+    modeled["Profit_adj"] = modeled["Revenue_adj"] - modeled["Cost_adj"]
+    modeled["Margin_adj"] = np.where(
+        modeled["Revenue_adj"] != 0,
+        modeled["Profit_adj"] / modeled["Revenue_adj"],
+        0.0,
+    )
+
+    base_profit = float(modeled["Profit_adj"].mean())
+    base_margin = float(modeled["Margin_adj"].mean())
+    impact_score = (driver_range * 0.35) + (assumption_level * 0.2) + (total_shock * -0.25)
+    resilience_score = max(0.0, 100.0 - abs(total_shock) - max(0.0, -base_margin * 40))
+    npv_proxy = base_profit * max(1.0, assumption_level / 12.0)
+
+    summary = pd.DataFrame(
+        {
+            "Metric": [
+                "Configured Data Sources",
+                "Average Assumption Level",
+                "Average Driver Stress Range",
+                "Applied Shock (%)",
+                "Modeled Profit",
+                "Modeled Margin",
+                "Resilience Score",
+                "Indicative Impact Score",
+                "Modeled NPV Proxy",
+                "Reference NPV",
+                "Reference IRR",
+            ],
+            "Value": [
+                len(tool_config.get("data_sources", [])),
+                round(assumption_level, 2),
+                round(driver_range, 2),
+                round(total_shock, 2),
+                round(base_profit, 2),
+                round(base_margin, 4),
+                round(resilience_score, 2),
+                round(impact_score, 2),
+                round(npv_proxy, 2),
+                round(base_npv, 2) if pd.notna(base_npv) else np.nan,
+                round(base_irr, 4) if pd.notna(base_irr) else np.nan,
+            ],
+        }
+    )
+
+    sensitivity = pd.DataFrame({"Shock %": [-20, -10, 0, 10, 20]})
+    sensitivity["Profit"] = sensitivity["Shock %"].apply(
+        lambda shock: base_profit * (1 + (shock / 100.0))
+    )
+
+    scenario_compare = scenarios.copy(deep=True) if isinstance(scenarios, pd.DataFrame) else pd.DataFrame()
+    if scenario_compare.empty:
+        scenario_compare = pd.DataFrame(
+            {"Scenario": ["Base"], "Shock %": [0.0], "Probability %": [100.0]}
+        )
+    scenario_compare["Shock %"] = pd.to_numeric(
+        scenario_compare.get("Shock %", pd.Series(dtype=float)), errors="coerce"
+    ).fillna(0.0)
+    scenario_compare["Modeled Profit"] = scenario_compare["Shock %"].apply(
+        lambda shock: base_profit * (1 + (shock / 100.0))
+    )
+
+    return summary, modeled, sensitivity, scenario_compare
+
+
+def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
+    st.markdown("### Editable Analytics Schedule Framework")
+    st.caption(
+        "Each analytical capability has editable inputs, assumptions, model drivers, and "
+        "scenario settings. Outputs refresh automatically on every change."
+    )
+    framework = _analytics_framework_store()
+    controls = _analytics_framework_control_store()
+    shared_context = _sync_shared_model_context(results)
+
+    st.markdown("#### Global Analytics Controls")
+    g1, g2, g3, g4 = st.columns(4)
+    controls["scenario"] = g1.selectbox(
+        "Scenario View",
+        options=["Base", "Upside", "Downside", "Stress", "Custom"],
+        index=["Base", "Upside", "Downside", "Stress", "Custom"].index(
+            controls.get("scenario", "Base")
+        ),
+        key="analytics_global_scenario",
+    )
+    custom_shock_options = [round(x * 0.5, 1) for x in range(-100, 101)]
+    custom_shock_default = float(controls.get("custom_shock_pct", 0.0))
+    if custom_shock_default not in custom_shock_options:
+        custom_shock_default = 0.0
+    controls["custom_shock_pct"] = g2.selectbox(
+        "Custom Shock (%)",
+        options=custom_shock_options,
+        index=custom_shock_options.index(custom_shock_default),
+        key="analytics_custom_shock",
+    )
+    controls["focus_metric"] = g3.selectbox(
+        "Focus Metric",
+        options=["Profit", "Margin", "NPV Proxy", "Resilience Score"],
+        index=["Profit", "Margin", "NPV Proxy", "Resilience Score"].index(
+            controls.get("focus_metric", "Profit")
+        ),
+        key="analytics_focus_metric",
+    )
+    controls["period_filter"] = g4.selectbox(
+        "Period Filter",
+        options=["All", "P1", "P2", "P3", "P4"],
+        index=["All", "P1", "P2", "P3", "P4"].index(
+            controls.get("period_filter", "All")
+        ),
+        key="analytics_period_filter",
+    )
+    st.session_state["analytics_framework_controls"] = controls
+    shared_context = _sync_shared_model_context(results)
+    current_scenario_label = shared_context.get("active_result_scenario") or shared_context.get(
+        "selected_scenario_name", "Scenario"
+    )
+    st.caption(f"Synced model context scenario: **{current_scenario_label}**")
+
+    module_options = [tool["title"] for tool in ANALYTICS_FRAMEWORK_TOOLS]
+    active_modules = st.multiselect(
+        "Module Filter",
+        options=module_options,
+        default=module_options,
+        key="analytics_module_filter",
+        help="Show only selected modules below.",
+    )
+
+    linked_sources = [
+        "Input Schedule",
+        "Assumptions",
+        "Scenario Output",
+        "Financial Statements",
+        "Dashboard KPIs",
+        "Supplementary Schedules",
+        "External Market Data",
+        "ESG Data",
+        "Peer Benchmark Data",
+    ]
+
+    module_summary_rows: list[Dict[str, Any]] = []
+
+    for tool in ANALYTICS_FRAMEWORK_TOOLS:
+        if tool["title"] not in active_modules:
+            continue
+        tool_key = tool["key"]
+        config = framework[tool_key]
+        with st.expander(tool["title"], expanded=False):
+            left, right = st.columns([1, 2])
+            config["enabled"] = left.checkbox(
+                "Enable tool",
+                value=bool(config.get("enabled", False)),
+                key=f"framework_enabled::{tool_key}",
+            )
+            selected_sources = right.multiselect(
+                "Linked data inputs",
+                options=linked_sources,
+                default=config.get("data_sources", ["Scenario Output"]),
+                key=f"framework_sources::{tool_key}",
+                help="Choose datasets this tool should consume.",
+            )
+            config["data_sources"] = selected_sources
+            config["model_mode"] = left.selectbox(
+                "Model Mode",
+                options=["Conservative", "Balanced", "Aggressive"],
+                index=["Conservative", "Balanced", "Aggressive"].index(
+                    config.get("model_mode", "Balanced")
+                ),
+                key=f"framework_mode::{tool_key}",
+            )
+            tool_shock_options = [round(x * 0.5, 1) for x in range(-60, 61)]
+            tool_shock_default = float(config.get("tool_shock_override", 0.0))
+            if tool_shock_default not in tool_shock_options:
+                tool_shock_default = 0.0
+            config["tool_shock_override"] = right.selectbox(
+                "Tool-level shock override (%)",
+                options=tool_shock_options,
+                index=tool_shock_options.index(tool_shock_default),
+                key=f"framework_shock::{tool_key}",
+            )
+
+            st.markdown("**Methodology**")
+            st.write(tool["methodology"])
+
+            st.markdown("**Underlying Data Schedule (Editable)**")
+            config["data"] = st.data_editor(
+                config.get("data", pd.DataFrame()),
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"framework_data::{tool_key}",
+            )
+
+            st.markdown("**Configurable Input Mapping**")
+            config["inputs"] = st.data_editor(
+                config.get("inputs", pd.DataFrame()),
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"framework_inputs::{tool_key}",
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Adjustable Assumptions**")
+                config["assumptions"] = st.data_editor(
+                    config.get("assumptions", pd.DataFrame()),
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"framework_assumptions::{tool_key}",
+                )
+            with c2:
+                st.markdown("**Model Drivers & Ranges**")
+                config["drivers"] = st.data_editor(
+                    config.get("drivers", pd.DataFrame()),
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"framework_drivers::{tool_key}",
+                )
+
+            st.markdown("**Scenario Settings**")
+            config["scenarios"] = st.data_editor(
+                config.get("scenarios", pd.DataFrame()),
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"framework_scenarios::{tool_key}",
+            )
+
+            output_df, modeled_df, sensitivity_df, scenario_compare_df = _analytics_framework_output(
+                config, results, controls
+            )
+            st.markdown("**Dynamic Outputs**")
+            st.dataframe(output_df, use_container_width=True)
+            module_summary_rows.append(
+                {
+                    "Module": tool["title"],
+                    "Modeled Profit": float(
+                        output_df.loc[output_df["Metric"] == "Modeled Profit", "Value"].iloc[0]
+                    ),
+                    "Applied Shock (%)": float(
+                        output_df.loc[output_df["Metric"] == "Applied Shock (%)", "Value"].iloc[0]
+                    ),
+                    "Resilience Score": float(
+                        output_df.loc[output_df["Metric"] == "Resilience Score", "Value"].iloc[0]
+                    ),
+                }
+            )
+
+            if controls.get("period_filter") != "All" and "Period" in modeled_df.columns:
+                modeled_view = modeled_df.loc[
+                    modeled_df["Period"].astype(str) == str(controls["period_filter"])
+                ]
+                if modeled_view.empty:
+                    modeled_view = modeled_df
+            else:
+                modeled_view = modeled_df
+
+            st.markdown("**Modeled Time-Series Output**")
+            st.dataframe(modeled_view, use_container_width=True)
+            if {"Revenue_adj", "Cost_adj", "Profit_adj"}.issubset(modeled_view.columns):
+                st.line_chart(
+                    modeled_view.set_index("Period")[["Revenue_adj", "Cost_adj", "Profit_adj"]]
+                )
+
+            c_left, c_right = st.columns(2)
+            with c_left:
+                st.markdown("**What-if & Sensitivity Grid**")
+                st.dataframe(sensitivity_df, use_container_width=True)
+                st.area_chart(sensitivity_df.set_index("Shock %")[["Profit"]])
+            with c_right:
+                st.markdown("**Scenario Comparison**")
+                st.dataframe(scenario_compare_df, use_container_width=True)
+                if {"Scenario", "Modeled Profit"}.issubset(scenario_compare_df.columns):
+                    compare_chart = scenario_compare_df.set_index("Scenario")[
+                        ["Modeled Profit"]
+                    ]
+                    st.bar_chart(compare_chart)
+
+            st.caption(f"Suggested visualisation: {tool['visualization']}")
+
+            framework[tool_key] = config
+
+    if module_summary_rows:
+        st.markdown("#### Cross-Module Scenario Scorecard")
+        module_summary_df = pd.DataFrame(module_summary_rows)
+        st.dataframe(module_summary_df, use_container_width=True)
+        st.bar_chart(module_summary_df.set_index("Module")[["Modeled Profit"]])
+
+    st.session_state["analytics_framework"] = framework
+
+
+def _sync_shared_model_context(results: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    assumptions = st.session_state.get("assumptions", {})
+    production = assumptions.get("Production Horizon", pd.DataFrame()) if isinstance(assumptions, dict) else pd.DataFrame()
+    controls_table = assumptions.get("Scenario Controls", pd.DataFrame()) if isinstance(assumptions, dict) else pd.DataFrame()
+    valuation_table = assumptions.get("Valuation Inputs", pd.DataFrame()) if isinstance(assumptions, dict) else pd.DataFrame()
+
+    production_context: Dict[str, Any] = {}
+    if isinstance(production, pd.DataFrame) and not production.empty:
+        production_context = {
+            "start_year": int(pd.to_numeric(production.iloc[0].get("Start Year"), errors="coerce") or 0),
+            "end_year": int(pd.to_numeric(production.iloc[0].get("End Year"), errors="coerce") or 0),
+        }
+
+    scenario_controls = (
+        _scenario_controls_value_map(controls_table)
+        if isinstance(controls_table, pd.DataFrame)
+        else {}
+    )
+    valuation_inputs = (
+        _valuation_table_to_inputs(valuation_table)
+        if isinstance(valuation_table, pd.DataFrame)
+        else {}
+    )
+
+    context = {
+        "selected_scenario_name": st.session_state.get("selected_scenario_name"),
+        "active_result_scenario": (results or {}).get("selected_scenario"),
+        "production_horizon": production_context,
+        "scenario_controls": scenario_controls,
+        "valuation_inputs": valuation_inputs,
+        "analytics_controls": st.session_state.get("analytics_framework_controls", {}).copy(),
+        "ai_orchestration_config": st.session_state.get("ai_orchestration_config", {}).copy(),
+    }
+    st.session_state["shared_model_context"] = context
+    return context
+
+
+def _rag_store() -> Dict[str, Any]:
+    store = st.session_state.setdefault(
+        "rag_framework",
+        {
+            "documents": [],
+            "index": pd.DataFrame(),
+            "version": 0,
+            "last_reindexed_at": None,
+        },
+    )
+    return store
+
+
+def _chunk_text(text: str, chunk_size: int = 450) -> List[str]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    return [cleaned[i : i + chunk_size] for i in range(0, len(cleaned), chunk_size)]
+
+
+def _ingest_rag_document(title: str, content: str, source: str) -> bool:
+    title_clean = (title or "").strip()
+    content_clean = (content or "").strip()
+    if not title_clean or not content_clean:
+        return False
+
+    store = _rag_store()
+    docs = list(store.get("documents", []))
+    doc_id = f"doc_{len(docs) + 1}"
+    docs.append(
+        {
+            "id": doc_id,
+            "title": title_clean,
+            "source": source,
+            "content": content_clean,
+            "updated_at": pd.Timestamp.utcnow().isoformat(),
+        }
+    )
+    store["documents"] = docs
+    st.session_state["rag_framework"] = store
+    return True
+
+
+def _reindex_rag(snapshot: Dict[str, Any]) -> pd.DataFrame:
+    store = _rag_store()
+    records: List[Dict[str, Any]] = []
+
+    snapshot_index = _snapshot_index(snapshot)
+    if not snapshot_index.empty:
+        for _, row in snapshot_index.iterrows():
+            records.append(
+                {
+                    "Chunk ID": f"snap::{row.get('Section')}::{row.get('Key')}",
+                    "Source": "model_snapshot",
+                    "Section": row.get("Section"),
+                    "Text": str(row.get("Text", "")),
+                }
+            )
+
+    for doc in store.get("documents", []):
+        chunks = _chunk_text(str(doc.get("content", "")))
+        for idx, chunk in enumerate(chunks, start=1):
+            records.append(
+                {
+                    "Chunk ID": f"{doc.get('id')}::chunk_{idx}",
+                    "Source": doc.get("source", "manual"),
+                    "Section": doc.get("title", "document"),
+                    "Text": chunk,
+                }
+            )
+
+    index_df = pd.DataFrame(records)
+    store["index"] = index_df
+    store["version"] = int(store.get("version", 0)) + 1
+    store["last_reindexed_at"] = pd.Timestamp.utcnow().isoformat()
+    st.session_state["rag_framework"] = store
+    return index_df
+
+
+def _retrieve_rag_context(query: str, top_n: int = 8) -> pd.DataFrame:
+    store = _rag_store()
+    index_df = store.get("index")
+    if not isinstance(index_df, pd.DataFrame) or index_df.empty:
+        return pd.DataFrame(columns=["Chunk ID", "Source", "Section", "Text", "score"])
+
+    tokens = {token for token in re.findall(r"[a-zA-Z0-9_]+", (query or "").lower()) if token}
+    scored = index_df.copy()
+    if not tokens:
+        scored["score"] = 0
+        return scored.head(top_n)
+
+    scored["score"] = scored["Text"].str.lower().apply(
+        lambda text: sum(1 for token in tokens if token in text)
+    )
+    scored = scored.sort_values(["score", "Source"], ascending=[False, True])
+    filtered = scored[scored["score"] > 0]
+    return (filtered if not filtered.empty else scored).head(top_n)
+
+
+def _render_rag_admin(snapshot: Dict[str, Any], show_header: bool = True) -> pd.DataFrame:
+    store = _rag_store()
+    if show_header:
+        st.markdown("### Retrieval-Augmented Generation (RAG) Hub")
+        st.caption(
+            "Ingest documents/data, re-index knowledge, and retrieve grounded context for the "
+            "orchestration engine."
+        )
+
+    with st.expander("RAG Ingestion & Indexing", expanded=False):
+        title = st.text_input("Document title", key="rag_doc_title")
+        content = st.text_area(
+            "Document or data content",
+            key="rag_doc_content",
+            placeholder="Paste policies, research notes, investor memos, or model assumptions...",
+        )
+        add_col, reindex_col = st.columns(2)
+        if add_col.button("Ingest Document", key="rag_ingest_btn"):
+            if _ingest_rag_document(title, content, source="manual_text"):
+                st.success("Document ingested.")
+            else:
+                st.warning("Provide both title and content before ingestion.")
+
+        uploaded_files = st.file_uploader(
+            "Upload file(s) for ingestion (up to 200MB total)",
+            key="rag_uploader",
+            accept_multiple_files=True,
+        )
+        if uploaded_files and st.button("Ingest Uploaded File(s)", key="rag_ingest_file"):
+            total_size = sum(len(file.getvalue()) for file in uploaded_files)
+            max_size_bytes = 200 * 1024 * 1024
+            if total_size > max_size_bytes:
+                st.error(
+                    "Uploaded files exceed the 200MB combined limit. "
+                    "Please reduce the selection and try again."
+                )
+            else:
+                ingested_count = 0
+                for uploaded in uploaded_files:
+                    raw_bytes = uploaded.getvalue()
+                    try:
+                        raw_text = raw_bytes.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raw_text = (
+                            f"Binary document uploaded: {uploaded.name}\n"
+                            f"Content-Type: {uploaded.type}\n"
+                            f"Size (bytes): {len(raw_bytes)}\n"
+                            "Note: This binary file requires specialized parsing for full text extraction."
+                        )
+                    if _ingest_rag_document(
+                        uploaded.name, raw_text, source="uploaded_file"
+                    ):
+                        ingested_count += 1
+                if ingested_count:
+                    st.success(f"Ingested {ingested_count} uploaded file(s).")
+
+        if reindex_col.button("Re-index Knowledge", key="rag_reindex_btn"):
+            _reindex_rag(snapshot)
+            st.success("RAG index refreshed.")
+
+        docs_df = pd.DataFrame(store.get("documents", []))
+        if not docs_df.empty:
+            st.markdown("**Ingested Documents**")
+            st.dataframe(
+                docs_df[[col for col in ["id", "title", "source", "updated_at"] if col in docs_df.columns]],
+                use_container_width=True,
+            )
+
+        index_df = store.get("index", pd.DataFrame())
+        st.markdown("**Index Status**")
+        st.write(
+            f"Version: {store.get('version', 0)} | "
+            f"Chunks: {len(index_df) if isinstance(index_df, pd.DataFrame) else 0} | "
+            f"Last Reindex: {store.get('last_reindexed_at')}"
+        )
+
+    if not isinstance(store.get("index"), pd.DataFrame) or store.get("index").empty:
+        return _reindex_rag(snapshot)
+    return store["index"]
+
+
+def _orchestration_default_config() -> Dict[str, Any]:
+    return {
+        "investor_profile": "Growth + resilience",
+        "planning_horizon_years": 5,
+        "target_irr": 0.18,
+        "target_ebitda_margin": 0.25,
+        "min_governance_score": 80.0,
+        "response_style": "Strategic and concise",
+        "proactive_mode": True,
+    }
+
+
+def _ai_orchestration_store() -> Dict[str, Any]:
+    config = st.session_state.setdefault(
+        "ai_orchestration_config", _orchestration_default_config()
+    )
+    st.session_state.setdefault("ai_orchestration_chat_history", [])
+    st.session_state.setdefault("ai_orchestration_last_query", "")
+    return config
+
+
+def _flatten_numeric_summary(df: Optional[pd.DataFrame], label: str) -> Dict[str, float]:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+    output: Dict[str, float] = {}
+    for col in df.columns:
+        series = pd.to_numeric(df[col], errors="coerce")
+        valid = series.dropna()
+        if valid.empty:
+            continue
+        mean_value = valid.mean()
+        if pd.isna(mean_value):
+            continue
+        try:
+            output[f"{label}:{col}"] = float(mean_value)
+        except (TypeError, ValueError):
+            continue
+    return output
+
+
+def _build_orchestration_snapshot(results: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    assumptions = st.session_state.get("assumptions", {})
+    supplementary = st.session_state.get("supplementary", {})
+    analytics_framework = st.session_state.get("analytics_framework", {})
+
+    assumption_summaries: Dict[str, float] = {}
+    if isinstance(assumptions, dict):
+        for name, table in assumptions.items():
+            assumption_summaries.update(_flatten_numeric_summary(table, f"assumption.{name}"))
+
+    supplementary_summaries: Dict[str, float] = {}
+    if isinstance(supplementary, dict):
+        for name, table in supplementary.items():
+            supplementary_summaries.update(_flatten_numeric_summary(table, f"supplementary.{name}"))
+
+    kpi_summary: Dict[str, float] = {}
+    if results and isinstance(results.get("kpis"), pd.DataFrame):
+        kpis = results["kpis"]
+        kpi_summary = {
+            col: float(pd.to_numeric(kpis[col], errors="coerce").iloc[0])
+            for col in kpis.columns
+            if pd.to_numeric(kpis[col], errors="coerce").notna().any()
+        }
+
+    framework_enabled = [
+        key
+        for key, value in analytics_framework.items()
+        if isinstance(value, dict) and value.get("enabled")
+    ]
+
+    return {
+        "selected_scenario": (results or {}).get("selected_scenario", "Scenario"),
+        "kpis": kpi_summary,
+        "assumptions": assumption_summaries,
+        "supplementary": supplementary_summaries,
+        "framework_enabled": framework_enabled,
+    }
+
+
+def _snapshot_index(snapshot: Dict[str, Any]) -> pd.DataFrame:
+    records: list[Dict[str, Any]] = []
+    for section in ["kpis", "assumptions", "supplementary"]:
+        values = snapshot.get(section, {})
+        if isinstance(values, dict):
+            for key, value in values.items():
+                records.append(
+                    {
+                        "Section": section,
+                        "Key": key,
+                        "Value": value,
+                        "Text": f"{section}::{key}={value}",
+                    }
+                )
+
+    enabled = snapshot.get("framework_enabled", [])
+    for item in enabled:
+        records.append(
+            {
+                "Section": "framework",
+                "Key": item,
+                "Value": 1,
+                "Text": f"framework::{item}=enabled",
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
+def _retrieve_snapshot_context(index_df: pd.DataFrame, query: str, top_n: int = 6) -> pd.DataFrame:
+    if index_df.empty:
+        return index_df
+    tokens = {token for token in re.findall(r"[a-zA-Z0-9_]+", query.lower()) if token}
+    if not tokens:
+        return index_df.head(top_n)
+
+    scored = index_df.copy()
+    scored["score"] = scored["Text"].str.lower().apply(
+        lambda text: sum(1 for token in tokens if token in text)
+    )
+    scored = scored.sort_values(["score", "Section"], ascending=[False, True])
+    filtered = scored[scored["score"] > 0]
+    if filtered.empty:
+        return scored.head(top_n)
+    return filtered.head(top_n)
+
+
+def _infer_orchestration_intent(query: str) -> str:
+    text = (query or "").lower()
+    intent_map = {
+        "risk": ["risk", "downside", "stress", "resilience", "volatility", "uncertainty"],
+        "valuation": ["valuation", "irr", "npv", "return", "discount", "wacc", "enterprise value"],
+        "assumptions": ["assumption", "assumptions", "driver", "input", "price", "yield", "cost"],
+        "operations": ["operations", "capacity", "production", "feed", "capex", "opex", "efficiency"],
+        "governance": ["governance", "control", "compliance", "board", "audit"],
+        "planning": ["plan", "roadmap", "milestone", "timeline", "execution", "90-day"],
+    }
+    for intent, keywords in intent_map.items():
+        if any(keyword in text for keyword in keywords):
+            return intent
+    return "strategy"
+
+
+def _response_depth_from_query(query: str) -> str:
+    q = (query or "").strip()
+    lower = q.lower()
+    if len(q) > 140 or any(
+        token in lower for token in ["compare", "trade-off", "why", "how", "sensitivity"]
+    ):
+        return "deep"
+    if any(token in lower for token in ["quick", "brief", "summary", "tldr"]):
+        return "brief"
+    return "standard"
+
+
+def _classify_orchestration_task(query: str, intent: str) -> str:
+    text = (query or "").lower()
+    if any(token in text for token in ["compare", "versus", "vs ", "difference"]):
+        return "comparative_assessment"
+    if any(token in text for token in ["run", "execute", "perform", "do ", "action"]):
+        return "action_plan"
+    if intent == "valuation":
+        return "valuation_diagnostic"
+    if intent in {"risk", "governance"}:
+        return "risk_governance_check"
+    if intent in {"assumptions", "operations"}:
+        return "driver_diagnostic"
+    return "strategic_summary"
+
+
+def _confidence_from_evidence(
+    *,
+    available_kpis: int,
+    retrieved_hits: int,
+    missing_requirements: int,
+) -> float:
+    score = 0.35
+    score += min(0.35, available_kpis * 0.04)
+    score += min(0.2, retrieved_hits * 0.03)
+    score -= min(0.3, missing_requirements * 0.08)
+    return float(max(0.05, min(0.95, score)))
+
+
+def _run_orchestration_engine(
+    query: str,
+    config: Dict[str, Any],
+    snapshot: Dict[str, Any],
+    retrieved: pd.DataFrame,
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    kpis = snapshot.get("kpis", {})
+    irr = float(kpis.get("IRR", np.nan))
+    ebitda_margin = float(kpis.get("EBITDA Margin", np.nan))
+
+    target_irr = float(config.get("target_irr", 0.18))
+    target_ebitda = float(config.get("target_ebitda_margin", 0.25))
+
+    irr_gap = irr - target_irr if pd.notna(irr) else np.nan
+    margin_gap = ebitda_margin - target_ebitda if pd.notna(ebitda_margin) else np.nan
+
+    investor_score = 100.0
+    if pd.notna(irr_gap):
+        investor_score -= max(0.0, (target_irr - irr) * 220.0)
+    if pd.notna(margin_gap):
+        investor_score -= max(0.0, (target_ebitda - ebitda_margin) * 180.0)
+    investor_score = float(max(0.0, min(100.0, investor_score)))
+
+    governance_score = 100.0
+    if not snapshot.get("framework_enabled"):
+        governance_score -= 10.0
+    if retrieved.empty:
+        governance_score -= 15.0
+
+    benchmark_table = pd.DataFrame(
+        {
+            "Metric": ["IRR", "EBITDA Margin", "Investor Readiness", "Governance"],
+            "Actual": [irr, ebitda_margin, investor_score, governance_score],
+            "Target": [target_irr, target_ebitda, 85.0, config.get("min_governance_score", 80.0)],
+            "Gap": [
+                irr_gap if pd.notna(irr_gap) else np.nan,
+                margin_gap if pd.notna(margin_gap) else np.nan,
+                investor_score - 85.0,
+                governance_score - float(config.get("min_governance_score", 80.0)),
+            ],
+        }
+    )
+
+    recommendations: list[str] = []
+    if pd.notna(irr_gap) and irr_gap < 0:
+        recommendations.append(
+            "Improve return profile by prioritising higher-margin products and phasing capex."
+        )
+    if pd.notna(margin_gap) and margin_gap < 0:
+        recommendations.append(
+            "Tighten feed and variable-cost controls; run sensitivity scenarios on feed inflation."
+        )
+    if governance_score < float(config.get("min_governance_score", 80.0)):
+        recommendations.append(
+            "Strengthen governance with monthly KPI packs, data-quality checks, and approval workflows."
+        )
+    if not recommendations:
+        recommendations.append(
+            "Current plan is investor-ready; focus on scaling strategy and downside protection."
+        )
+
+    context_strings = retrieved.get("Text", pd.Series(dtype=str)).astype(str).tolist()
+    intent = _infer_orchestration_intent(query)
+    task_type = _classify_orchestration_task(query, intent)
+    depth = _response_depth_from_query(query)
+    response_style = str(config.get("response_style", "Strategic and concise"))
+    scenario_name = snapshot.get("selected_scenario", "Scenario")
+    recent_history = history[-3:] if history else []
+    prior_focus = recent_history[-1]["Query"] if recent_history else ""
+
+    irr_text = f"{irr:.2%}" if pd.notna(irr) else "not available"
+    margin_text = f"{ebitda_margin:.2%}" if pd.notna(ebitda_margin) else "not available"
+    context_text = " | ".join(context_strings[:3]) if context_strings else "No indexed context found."
+    lead_by_style = {
+        "Strategic and concise": "Strategic view:",
+        "Detailed and technical": "Technical assessment:",
+        "Investor memo": "Investor memo:",
+    }.get(response_style, "Strategic view:")
+    intent_guidance = {
+        "risk": "Downside resilience is sensitive to margin compression and governance coverage.",
+        "valuation": "Valuation leans on return quality versus target hurdle rates.",
+        "assumptions": "Key assumptions should be validated for pricing, yield, and cost inflation.",
+        "operations": "Operational efficiency and cost control are the primary execution levers.",
+        "governance": "Governance sufficiency depends on controls, cadence, and quality signals.",
+        "planning": "Execution quality depends on sequencing, ownership, and measurable milestones.",
+        "strategy": "Overall strategy should balance growth, resilience, and investor confidence.",
+    }
+    task_guidance = {
+        "comparative_assessment": "Workflow selected: comparative assessment using KPI gaps and available indexed records.",
+        "action_plan": "Workflow selected: actionable execution plan based on model constraints and risk posture.",
+        "valuation_diagnostic": "Workflow selected: valuation diagnostic with hurdle-rate and margin validation.",
+        "risk_governance_check": "Workflow selected: risk-governance check with control-threshold validation.",
+        "driver_diagnostic": "Workflow selected: driver diagnostic focused on assumptions and operating levers.",
+        "strategic_summary": "Workflow selected: strategic summary from current model state.",
+    }
+    limitations: list[str] = []
+    if pd.isna(irr):
+        limitations.append("IRR is unavailable in current model outputs.")
+    if pd.isna(ebitda_margin):
+        limitations.append("EBITDA margin is unavailable in current model outputs.")
+    if retrieved.empty:
+        limitations.append("No indexed retrieval evidence matched the query.")
+    if not snapshot.get("framework_enabled"):
+        limitations.append("No analytics framework modules are enabled for cross-checking.")
+
+    requirements_by_task = {
+        "comparative_assessment": ["IRR", "EBITDA Margin"],
+        "valuation_diagnostic": ["IRR"],
+        "risk_governance_check": ["EBITDA Margin"],
+        "driver_diagnostic": ["EBITDA Margin"],
+        "action_plan": [],
+        "strategic_summary": [],
+    }
+    missing_requirements = [
+        req
+        for req in requirements_by_task.get(task_type, [])
+        if (req == "IRR" and pd.isna(irr)) or (req == "EBITDA Margin" and pd.isna(ebitda_margin))
+    ]
+    if missing_requirements:
+        limitations.append(
+            f"Requested workflow has missing required metrics: {', '.join(missing_requirements)}."
+        )
+
+    assumptions_used = [
+        f"Target IRR={target_irr:.2%}",
+        f"Target EBITDA margin={target_ebitda:.2%}",
+        f"Minimum governance score={float(config.get('min_governance_score', 80.0)):.1f}",
+    ]
+    confidence = _confidence_from_evidence(
+        available_kpis=len(kpis),
+        retrieved_hits=len(context_strings),
+        missing_requirements=len(missing_requirements),
+    )
+    continuity_line = (
+        f"Building on your prior question ('{prior_focus}'), "
+        if prior_focus and prior_focus.strip().lower() != (query or "").strip().lower()
+        else ""
+    )
+    depth_line = {
+        "brief": "Net: maintain focus on the top one to two value levers this quarter.",
+        "standard": "Recommended focus: protect margin while improving return quality and governance consistency.",
+        "deep": "Priority sequence: 1) stabilize unit economics, 2) run downside stress pack, 3) tighten governance reporting against investor thresholds.",
+    }[depth]
+    if missing_requirements and task_type in {"comparative_assessment", "valuation_diagnostic"}:
+        grounded_answer = (
+            f"{lead_by_style} {continuity_line}I cannot fully execute the requested {task_type.replace('_', ' ')} "
+            f"because required evidence is missing ({', '.join(missing_requirements)}). "
+            f"Available evidence for scenario '{scenario_name}': IRR={irr_text}, EBITDA margin={margin_text}. "
+            f"Indexed context: {context_text} "
+            "Please provide the missing data or run the scenario again."
+        )
+    else:
+        grounded_answer = (
+            f"{lead_by_style} {continuity_line}For scenario '{scenario_name}', IRR is {irr_text} and EBITDA margin is {margin_text}. "
+            f"{task_guidance.get(task_type, task_guidance['strategic_summary'])} "
+            f"{intent_guidance.get(intent, intent_guidance['strategy'])} "
+            f"Indexed context: {context_text} "
+            f"{depth_line}"
+        )
+
+    business_plan = pd.DataFrame(
+        {
+            "Workstream": ["Profitability", "Resilience", "Investor Readiness", "Execution"],
+            "Priority": ["High", "High", "Medium", "Medium"],
+            "90-Day Action": [
+                "Re-price weak-margin products and optimize feed contracts.",
+                "Run downside stress pack (drought + price collapse + rates up).",
+                "Produce benchmark scorecard and governance dashboard.",
+                "Publish quarterly milestones with owners and KPIs.",
+            ],
+        }
+    )
+
+    explainability = pd.DataFrame(
+        {
+            "Driver": ["IRR Gap", "EBITDA Margin Gap", "Governance Buffer"],
+            "Contribution": [
+                float(irr_gap) if pd.notna(irr_gap) else 0.0,
+                float(margin_gap) if pd.notna(margin_gap) else 0.0,
+                float(governance_score - config.get("min_governance_score", 80.0)),
+            ],
+            "Interpretation": [
+                "Positive means IRR is above target.",
+                "Positive means operating margin is above target.",
+                "Positive means governance controls exceed threshold.",
+            ],
+        }
+    )
+
+    return {
+        "investor_readiness_score": investor_score,
+        "governance_score": governance_score,
+        "benchmark_table": benchmark_table,
+        "recommendations": recommendations,
+        "grounded_answer": grounded_answer,
+        "task_type": task_type,
+        "confidence": confidence,
+        "limitations": limitations,
+        "assumptions_used": assumptions_used,
+        "business_plan": business_plan,
+        "explainability": explainability,
+        "retrieved_context": retrieved,
+    }
+
+
+def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
+    st.subheader("AI Decision Making — Unified Orchestration Layer")
+    st.caption(
+        "A single context-aware intelligence engine that unifies benchmarking, governance, "
+        "RAG-style retrieval, Q&A, scenario reasoning, and planning."
+    )
+
+    config = _ai_orchestration_store()
+    shared_context = _sync_shared_model_context(results)
+    scenario_label = shared_context.get("active_result_scenario") or shared_context.get(
+        "selected_scenario_name", "Scenario"
+    )
+    st.caption(f"Using shared model context for scenario: **{scenario_label}**")
+    snapshot = _build_orchestration_snapshot(results)
+    with st.expander("Unified Orchestration (Config + Runtime + RAG)", expanded=True):
+        st.markdown("#### Unified Configuration Model")
+        c1, c2, c3 = st.columns(3)
+        config["investor_profile"] = c1.text_input(
+            "Investor Profile",
+            value=str(config.get("investor_profile", "Growth + resilience")),
+        )
+        config["planning_horizon_years"] = int(
+            c1.number_input(
+                "Planning Horizon (Years)",
+                min_value=1,
+                max_value=15,
+                value=int(config.get("planning_horizon_years", 5)),
+                step=1,
+            )
+        )
+        config["target_irr"] = float(
+            c2.number_input(
+                "Target IRR",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(config.get("target_irr", 0.18)),
+                step=0.01,
+                format="%.2f",
+            )
+        )
+        config["target_ebitda_margin"] = float(
+            c2.number_input(
+                "Target EBITDA Margin",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(config.get("target_ebitda_margin", 0.25)),
+                step=0.01,
+                format="%.2f",
+            )
+        )
+        config["min_governance_score"] = float(
+            c3.number_input(
+                "Minimum Governance Score",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(config.get("min_governance_score", 80.0)),
+                step=1.0,
+            )
+        )
+        config["response_style"] = c3.selectbox(
+            "Response Style",
+            options=["Strategic and concise", "Detailed and technical", "Investor memo"],
+            index=[
+                "Strategic and concise",
+                "Detailed and technical",
+                "Investor memo",
+            ].index(config.get("response_style", "Strategic and concise")),
+        )
+        config["proactive_mode"] = st.checkbox(
+            "Proactive Recommendation Mode",
+            value=bool(config.get("proactive_mode", True)),
+        )
+        st.session_state["ai_orchestration_config"] = config
+
+        st.markdown("#### LLM & ML Runtime Settings")
+        _render_ai_settings(st.session_state.setdefault("ai_payload", {}))
+
+        st.markdown("#### Retrieval-Augmented Generation (RAG)")
+        index_df = _render_rag_admin(snapshot, show_header=False)
+
+    messages = st.session_state.setdefault("ai_orchestration_chat_messages", [])
+    st.markdown("### Intelligent Orchestration Chat")
+    for msg in messages[-12:]:
+        with st.chat_message(msg.get("role", "assistant")):
+            st.markdown(msg.get("content", ""))
+
+    prompt = st.chat_input(
+        "Ask a strategic question (e.g., Compare downside resilience and investor readiness)."
+    )
+    history = st.session_state.setdefault("ai_orchestration_chat_history", [])
+    current_query = ""
+    if prompt:
+        st.session_state["ai_orchestration_last_query"] = prompt
+        current_query = prompt
+        retrieved = _retrieve_rag_context(prompt)
+        output = _run_orchestration_engine(prompt, config, snapshot, retrieved, history)
+        assistant_reply = (
+            f"{output['grounded_answer']}\n\n"
+            f"Top recommendations:\n- " + "\n- ".join(output["recommendations"])
+        )
+        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "assistant", "content": assistant_reply})
+        st.session_state["ai_orchestration_chat_messages"] = messages
+    else:
+        query = st.session_state.get("ai_orchestration_last_query", "Strategic overview")
+        current_query = query
+        retrieved = _retrieve_rag_context(query)
+        output = _run_orchestration_engine(query, config, snapshot, retrieved, history)
+
+    if current_query.strip():
+        history.append(
+            {
+                "Query": current_query.strip(),
+                "Response": output["grounded_answer"],
+                "Scenario": snapshot.get("selected_scenario", "Scenario"),
+            }
+        )
+        st.session_state["ai_orchestration_chat_history"] = history[-20:]
+    if history:
+        st.markdown("**Context Retention (Recent Q&A)**")
+        st.dataframe(pd.DataFrame(history[-10:]), use_container_width=True)
+
+    score_cols = st.columns(3)
+    score_cols[0].metric(
+        "Investor Readiness",
+        f"{output['investor_readiness_score']:.1f}/100",
+    )
+    score_cols[1].metric("Governance", f"{output['governance_score']:.1f}/100")
+    score_cols[2].metric(
+        "Indexed Knowledge Records",
+        len(index_df) if isinstance(index_df, pd.DataFrame) else 0,
+    )
+
+    st.markdown("### Unified Decision Support Output")
+    st.markdown("**Grounded Strategic Response**")
+    st.write(output["grounded_answer"])
+    st.caption(
+        f"Workflow: **{output.get('task_type', 'strategic_summary').replace('_', ' ')}** | "
+        f"Confidence: **{output.get('confidence', 0.0):.0%}**"
+    )
+    limitations = output.get("limitations", [])
+    if limitations:
+        st.warning("Limitations: " + " ".join(f"- {item}" for item in limitations))
+    assumptions_used = output.get("assumptions_used", [])
+    if assumptions_used:
+        st.info("Assumptions used: " + "; ".join(assumptions_used))
+
+    st.markdown("**Investor Benchmarking & Scorecard**")
+    st.dataframe(output["benchmark_table"], use_container_width=True)
+
+    st.markdown("**Governance + Explainability**")
+    g1, g2 = st.columns(2)
+    with g1:
+        st.dataframe(output["explainability"], use_container_width=True)
+    with g2:
+        st.markdown("**Proactive Recommendations**")
+        for rec in output["recommendations"]:
+            st.write(f"- {rec}")
+
+    st.markdown("**Business Planning Actions (Scenario-Aware)**")
+    st.dataframe(output["business_plan"], use_container_width=True)
+
+    st.markdown("**RAG Retrieval Context (Indexed Knowledge)**")
+    st.dataframe(output["retrieved_context"], use_container_width=True)
+
 
 def main() -> None:
     st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
@@ -3986,15 +6003,24 @@ def main() -> None:
             st.session_state.assumptions.setdefault(name, table.copy())
 
     production_horizon_defaults = st.session_state.assumptions.get("Production Horizon")
+    st.session_state.setdefault("schedule_period_type", "monthly")
+    st.session_state["schedule_period_type"] = _normalize_period_type(
+        st.session_state.get("schedule_period_type")
+    )
 
     if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
         core_default, detail_defaults = _default_schedule_components(
-            production_horizon=production_horizon_defaults
+            production_horizon=production_horizon_defaults,
+            period_type=st.session_state["schedule_period_type"],
         )
         if "core_schedule" not in st.session_state:
             st.session_state.core_schedule = core_default
         if "detail_schedules" not in st.session_state:
             st.session_state.detail_schedules = detail_defaults
+    else:
+        st.session_state["schedule_period_type"] = _infer_period_type_from_schedule(
+            st.session_state.get("core_schedule")
+        )
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
     if "all_scenario_results" not in st.session_state:
@@ -4007,13 +6033,7 @@ def main() -> None:
     _ensure_default_results_loaded()
 
     _ensure_active_scenario_selection()
-
-    scenario_selector = st.container()
-    with scenario_selector:
-        st.markdown("### Scenario Explorer")
-        _render_model_author_editor()
-        _render_scenario_selector()
-        _render_scenario_preset_editors()
+    _sync_shared_model_context(st.session_state.get("results"))
 
     excel_download_container = st.container()
 
@@ -4031,19 +6051,40 @@ def main() -> None:
 
     tabs = st.tabs(
         [
-            "Input Schedule",
             "Assumptions",
+            "Input Schedule",
             "Financials",
             "Dashboard",
             "Advanced Analytics",
-            "Supplementary Schedules",
+            "AI Decision Making",
         ]
     )
 
-    with tabs[0]:
+    with tabs[1]:
         st.subheader("Input Schedule")
-        st.markdown("### AI & Machine Learning")
-        _render_ai_settings(ai_payload)
+        _render_workflow_status_strip()
+        current_period_type = _normalize_period_type(
+            st.session_state.get("schedule_period_type")
+        )
+        period_choice = st.selectbox(
+            "Schedule period type",
+            options=["Monthly", "Quarterly"],
+            index=0 if current_period_type == "monthly" else 1,
+            key="schedule_period_type_selector",
+            help=(
+                "Applies to Core, COGS, Variable Expenses, Direct Wages, and Admin Wages schedules. "
+                "Capex remains year-based and aligned to the active production horizon."
+            ),
+        )
+        selected_period_type = _normalize_period_type(period_choice)
+        if selected_period_type != current_period_type:
+            _sync_schedule_period_type(selected_period_type)
+            st.success(f"Updated schedule period type to {_period_label(selected_period_type)}.")
+
+        st.markdown("### Scenario Explorer")
+        _render_model_author_editor()
+        _render_scenario_selector()
+        _render_scenario_preset_editors()
 
         schedule_tab_names = [
             "Core Schedule",
@@ -4465,6 +6506,11 @@ def main() -> None:
                     cogs_table = _ensure_cogs_schedule(
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
+                    )
+                    cogs_table = _sync_cogs_from_operating_assumptions(
+                        cogs_table,
+                        st.session_state.core_schedule,
+                        st.session_state.get("assumptions"),
                     )
                     st.session_state.detail_schedules[name] = cogs_table
 
@@ -5158,543 +7204,635 @@ def main() -> None:
 
     assumption_tables: Dict[str, pd.DataFrame] = {}
 
-    with tabs[1]:
+    with tabs[0]:
         st.subheader("Assumptions")
-        assumption_tabs = st.tabs(
-            [
-                "Scenario Controls",
-                "Production Horizon",
-                "Pricing",
-                "Operating Costs",
-                "Capital & Financing",
-                "Valuation Inputs",
-            ]
+        _render_workflow_status_strip()
+        _render_assumption_validation_summary(st.session_state.assumptions)
+        st.caption(
+            "All core model assumption categories are consolidated below on a single page."
         )
 
-        with assumption_tabs[0]:
-            st.markdown("#### Scenario Controls")
-            scenario_table = _ensure_scenario_controls_table(
-                st.session_state.assumptions.get("Scenario Controls")
-            )
-            st.session_state.assumptions["Scenario Controls"] = scenario_table
+        st.markdown("#### Scenario Controls")
+        scenario_table = _ensure_scenario_controls_table(
+            st.session_state.assumptions.get("Scenario Controls")
+        )
+        st.session_state.assumptions["Scenario Controls"] = scenario_table
 
-            def _save_scenario_controls(updated: pd.DataFrame) -> None:
-                ensured = _ensure_scenario_controls_table(updated)
-                st.session_state.assumptions["Scenario Controls"] = ensured
+        def _save_scenario_controls(updated: pd.DataFrame) -> None:
+            ensured = _ensure_scenario_controls_table(updated)
+            st.session_state.assumptions["Scenario Controls"] = ensured
 
-            _render_schedule_row_editor(
-                "assump::scenario_controls",
+        _render_schedule_row_editor(
+            "assump::scenario_controls",
+            st.session_state.assumptions["Scenario Controls"],
+            _save_scenario_controls,
+        )
+
+        control_values = _scenario_controls_value_map(
+            st.session_state.assumptions["Scenario Controls"]
+        )
+        milk_default = control_values.get("Milk price change (%)", 0.0)
+        feed_default = control_values.get("Feed cost change (%)", 0.0)
+
+        milk_options = list(range(-50, 51))
+        milk_selected_default = int(round(milk_default))
+        if milk_selected_default not in milk_options:
+            milk_selected_default = 0
+        milk_price = st.selectbox(
+            "Milk price change (%)",
+            options=milk_options,
+            index=milk_options.index(milk_selected_default),
+            key="milk_price_change_dropdown",
+        )
+        if float(milk_price) != float(milk_default):
+            updated_table = _update_scenario_control_value(
                 st.session_state.assumptions["Scenario Controls"],
-                _save_scenario_controls,
-            )
-
-            control_values = _scenario_controls_value_map(
-                st.session_state.assumptions["Scenario Controls"]
-            )
-            milk_default = control_values.get("Milk price change (%)", 0.0)
-            feed_default = control_values.get("Feed cost change (%)", 0.0)
-
-            milk_price = st.slider(
                 "Milk price change (%)",
-                min_value=-50,
-                max_value=50,
-                value=int(round(milk_default)),
-                step=1,
+                float(milk_price),
             )
-            if float(milk_price) != float(milk_default):
-                updated_table = _update_scenario_control_value(
-                    st.session_state.assumptions["Scenario Controls"],
-                    "Milk price change (%)",
-                    float(milk_price),
-                )
-                st.session_state.assumptions["Scenario Controls"] = updated_table
-                _clear_schedule_editor_state("assump::scenario_controls")
+            st.session_state.assumptions["Scenario Controls"] = updated_table
+            _clear_schedule_editor_state("assump::scenario_controls")
 
-            feed_cost = st.slider(
+        feed_options = list(range(-50, 51))
+        feed_selected_default = int(round(feed_default))
+        if feed_selected_default not in feed_options:
+            feed_selected_default = 0
+        feed_cost = st.selectbox(
+            "Feed cost change (%)",
+            options=feed_options,
+            index=feed_options.index(feed_selected_default),
+            key="feed_cost_change_dropdown",
+        )
+        if float(feed_cost) != float(feed_default):
+            updated_table = _update_scenario_control_value(
+                st.session_state.assumptions["Scenario Controls"],
                 "Feed cost change (%)",
-                min_value=-50,
-                max_value=50,
-                value=int(round(feed_default)),
-                step=1,
+                float(feed_cost),
             )
-            if float(feed_cost) != float(feed_default):
-                updated_table = _update_scenario_control_value(
-                    st.session_state.assumptions["Scenario Controls"],
-                    "Feed cost change (%)",
-                    float(feed_cost),
-                )
-                st.session_state.assumptions["Scenario Controls"] = updated_table
-                _clear_schedule_editor_state("assump::scenario_controls")
+            st.session_state.assumptions["Scenario Controls"] = updated_table
+            _clear_schedule_editor_state("assump::scenario_controls")
 
-            assumption_tables["Scenario Controls"] = st.session_state.assumptions[
-                "Scenario Controls"
-            ]
-            run_clicked = st.button("Run Scenarios", type="primary")
+        assumption_tables["Scenario Controls"] = st.session_state.assumptions[
+            "Scenario Controls"
+        ]
+        run_clicked = st.button("Run Scenarios", type="primary")
 
-        with assumption_tabs[1]:
-            st.markdown("#### Production Time Horizon")
-            production_table = _ensure_production_horizon_table(
-                st.session_state.assumptions.get("Production Horizon")
+        st.markdown("---")
+        st.markdown("#### Production Time Horizon")
+        production_table = _ensure_production_horizon_table(
+            st.session_state.assumptions.get("Production Horizon")
+        )
+        st.session_state.assumptions["Production Horizon"] = production_table
+
+        defaults = production_table.iloc[0]
+        start_default = int(defaults.get("Start Year", 2024))
+        end_default = int(defaults.get("End Year", start_default))
+
+        st.session_state.setdefault("production_start_year", start_default)
+        st.session_state.setdefault("production_end_year", end_default)
+
+        year_options = _production_year_options(start_default, end_default)
+        if st.session_state.production_start_year not in year_options:
+            st.session_state.production_start_year = start_default
+
+        start_col, end_col = st.columns(2)
+
+        start_value = start_col.selectbox(
+            "Start year",
+            options=year_options,
+            key="production_start_year",
+        )
+
+        valid_end_options = [year for year in year_options if year >= start_value]
+        if not valid_end_options:
+            valid_end_options = [start_value]
+
+        if st.session_state.production_end_year not in valid_end_options:
+            st.session_state.production_end_year = valid_end_options[0]
+
+        end_value = end_col.selectbox(
+            "End year",
+            options=valid_end_options,
+            key="production_end_year",
+        )
+
+        if end_value < start_value:
+            st.session_state.production_end_year = start_value
+            end_value = start_value
+
+        if start_value != start_default or end_value != end_default:
+            updated_table = pd.DataFrame({"Start Year": [start_value], "End Year": [end_value]})
+            st.session_state.assumptions["Production Horizon"] = updated_table
+            assumption_tables["Production Horizon"] = updated_table
+            _sync_production_horizon(start_value, end_value)
+            _ensure_default_results_loaded()
+            _ensure_active_scenario_selection()
+            _maybe_rerun()
+        else:
+            assumption_tables["Production Horizon"] = production_table
+
+        st.markdown("---")
+        st.markdown("#### Herd Plan (Heads)")
+        herd_plan = _ensure_herd_plan_table(
+            st.session_state.assumptions.get("Herd Plan", pd.DataFrame())
+        )
+        st.session_state.assumptions["Herd Plan"] = herd_plan
+
+        st.caption(
+            "Set herd size by year and optional growth %. Revenue and key variable costs are scaled from the baseline herd level."
+        )
+        st.session_state.setdefault("herd_yearly_increment_percent", 0.0)
+        herd_inc_col, herd_inc_btn_col = st.columns([2, 1])
+        herd_inc_col.number_input(
+            "Yearly Increment (%)",
+            min_value=-100.0,
+            max_value=300.0,
+            step=0.1,
+            key="herd_yearly_increment_percent",
+        )
+        if herd_inc_btn_col.button("Apply Increment Across Years", key="apply_herd_yearly_increment"):
+            herd_plan = _apply_herd_yearly_increment(
+                herd_plan,
+                st.session_state.get("herd_yearly_increment_percent", 0.0),
             )
-            st.session_state.assumptions["Production Horizon"] = production_table
+            st.session_state.assumptions["Herd Plan"] = herd_plan
+            _clear_schedule_editor_state("assump::herd_plan")
 
-            defaults = production_table.iloc[0]
-            start_default = int(defaults.get("Start Year", 2024))
-            end_default = int(defaults.get("End Year", start_default))
-
-            st.session_state.setdefault("production_start_year", start_default)
-            st.session_state.setdefault("production_end_year", end_default)
-
-            year_options = _production_year_options(start_default, end_default)
-            if st.session_state.production_start_year not in year_options:
-                st.session_state.production_start_year = start_default
-
-            start_col, end_col = st.columns(2)
-
-            start_value = start_col.selectbox(
-                "Start year",
-                options=year_options,
-                key="production_start_year",
+        herd_add_col, herd_remove_select_col, herd_remove_btn_col = st.columns([1, 2, 1])
+        if herd_add_col.button("Add Herd Year", key="herd_plan_add_row"):
+            herd_plan = pd.concat(
+                [
+                    herd_plan,
+                    pd.DataFrame(
+                        {
+                            "Year": [int(pd.to_numeric(herd_plan.get("Year"), errors="coerce").dropna().max() + 1)
+                                     if pd.to_numeric(herd_plan.get("Year"), errors="coerce").notna().any()
+                                     else pd.Timestamp.today().year],
+                            "Herd Size (heads)": [np.nan],
+                            "Herd Growth %": [np.nan],
+                        }
+                    ),
+                ],
+                ignore_index=True,
             )
+            st.session_state.assumptions["Herd Plan"] = herd_plan
+            _clear_schedule_editor_state("assump::herd_plan")
 
-            valid_end_options = [year for year in year_options if year >= start_value]
-            if not valid_end_options:
-                valid_end_options = [start_value]
+        herd_labels: list[str] = []
+        herd_index: Dict[str, int] = {}
+        for idx_row, row in herd_plan.iterrows():
+            year_label = row.get("Year")
+            label = str(int(year_label)) if pd.notna(year_label) else f"Row {idx_row + 1}"
+            herd_labels.append(label)
+            herd_index[label] = idx_row
+        herd_remove_select_col.selectbox(
+            "Remove year",
+            options=["-- Select Year --"] + herd_labels,
+            key="herd_plan_remove_choice",
+        )
+        if herd_remove_btn_col.button("Remove", key="herd_plan_remove_row"):
+            choice = st.session_state.get("herd_plan_remove_choice")
+            if choice in herd_index:
+                herd_plan = herd_plan.drop(index=herd_index[choice]).reset_index(drop=True)
+                herd_plan = _ensure_herd_plan_table(herd_plan)
+                st.session_state.assumptions["Herd Plan"] = herd_plan
+                st.session_state.herd_plan_remove_choice = "-- Select Year --"
+                _clear_schedule_editor_state("assump::herd_plan")
 
-            if st.session_state.production_end_year not in valid_end_options:
-                st.session_state.production_end_year = valid_end_options[0]
+        _render_schedule_row_editor(
+            "assump::herd_plan",
+            st.session_state.assumptions["Herd Plan"],
+            lambda updated: st.session_state.assumptions.__setitem__(
+                "Herd Plan", _ensure_herd_plan_table(updated)
+            ),
+        )
+        assumption_tables["Herd Plan"] = st.session_state.assumptions["Herd Plan"]
 
-            end_value = end_col.selectbox(
-                "End year",
-                options=valid_end_options,
-                key="production_end_year",
-            )
+        st.markdown("---")
+        st.markdown("#### Pricing Assumptions")
+        pricing_table = _ensure_pricing_table(
+            st.session_state.assumptions.get("Pricing", pd.DataFrame())
+        )
+        st.session_state.assumptions["Pricing"] = pricing_table
 
-            if end_value < start_value:
-                st.session_state.production_end_year = start_value
-                end_value = start_value
+        st.session_state.setdefault("pricing_remove_choice", "-- Select Row --")
+        st.session_state.setdefault("pricing_increment_target", "All products")
+        st.session_state.setdefault("pricing_increment_column", "Base Price")
+        st.session_state.setdefault("pricing_increment_pct", 0.0)
 
-            if start_value != start_default or end_value != end_default:
-                updated_table = pd.DataFrame(
-                    {"Start Year": [start_value], "End Year": [end_value]}
-                )
-                st.session_state.assumptions["Production Horizon"] = updated_table
-                assumption_tables["Production Horizon"] = updated_table
-                _sync_production_horizon(start_value, end_value)
-                _ensure_default_results_loaded()
-                _ensure_active_scenario_selection()
-                _maybe_rerun()
+        add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+        if add_col.button("Add Product", key="pricing_add_row"):
+            pricing_table = _add_pricing_row(pricing_table)
+            st.session_state.assumptions["Pricing"] = pricing_table
+            _clear_schedule_editor_state("assump::pricing")
+
+        option_labels: list[str] = []
+        option_index: Dict[str, int] = {}
+        for idx_row, row in pricing_table.iterrows():
+            label_year = row.get("Year")
+            label_product = row.get("Product") or "Product"
+            if pd.notna(label_year):
+                label = f"{int(label_year)} – {label_product}"
             else:
-                assumption_tables["Production Horizon"] = production_table
+                label = str(label_product)
+            option_labels.append(label)
+            option_index[label] = idx_row
 
-        with assumption_tabs[2]:
-            st.markdown("#### Pricing Assumptions")
-            pricing_table = _ensure_pricing_table(
-                st.session_state.assumptions.get("Pricing", pd.DataFrame())
+        remove_select_col.selectbox(
+            "Select row",
+            options=["-- Select Row --"] + option_labels,
+            key="pricing_remove_choice",
+        )
+
+        if remove_btn_col.button("Remove Row", key="pricing_remove_row"):
+            choice = st.session_state.get("pricing_remove_choice")
+            if choice in option_index:
+                pricing_table = _remove_pricing_row(
+                    pricing_table, option_index[choice]
+                )
+                st.session_state.assumptions["Pricing"] = pricing_table
+                st.session_state.pricing_remove_choice = "-- Select Row --"
+                _clear_schedule_editor_state("assump::pricing")
+
+        inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
+            [2, 1.5, 1, 1]
+        )
+
+        target_options = ["All products"] + sorted(
+            {
+                str(product)
+                for product in pricing_table.get("Product", pd.Series(dtype=str))
+                .dropna()
+                .tolist()
+                if str(product).strip()
+            }
+        )
+        inc_target_col.selectbox(
+            "Apply increment to",
+            options=target_options,
+            key="pricing_increment_target",
+        )
+
+        inc_column_col.selectbox(
+            "Column",
+            options=["Base Price", "Price Growth %"],
+            key="pricing_increment_column",
+        )
+
+        inc_pct_col.number_input(
+            "Yearly increment (%)",
+            min_value=-100.0,
+            max_value=100.0,
+            step=0.1,
+            key="pricing_increment_pct",
+        )
+
+        if inc_btn_col.button("Apply increment", key="pricing_apply_increment"):
+            pricing_table = _apply_pricing_yearly_increment(
+                pricing_table,
+                st.session_state.get("pricing_increment_column", "Base Price"),
+                st.session_state.get("pricing_increment_pct", 0.0),
+                st.session_state.get("pricing_increment_target"),
             )
             st.session_state.assumptions["Pricing"] = pricing_table
+            _clear_schedule_editor_state("assump::pricing")
 
-            st.session_state.setdefault("pricing_remove_choice", "-- Select Row --")
-            st.session_state.setdefault("pricing_increment_target", "All products")
-            st.session_state.setdefault("pricing_increment_column", "Base Price")
-            st.session_state.setdefault("pricing_increment_pct", 0.0)
+        def _save_pricing(updated: pd.DataFrame) -> None:
+            ensured = _ensure_pricing_table(updated)
+            st.session_state.assumptions["Pricing"] = ensured
 
-            add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+        _render_schedule_row_editor(
+            "assump::pricing",
+            st.session_state.assumptions["Pricing"],
+            _save_pricing,
+        )
 
-            if add_col.button("Add Product", key="pricing_add_row"):
-                pricing_table = _add_pricing_row(pricing_table)
+        st.session_state.setdefault("pricing_defaults_edit_mode", False)
+        toggle_label = (
+            "Hide default pricing assumptions"
+            if st.session_state.pricing_defaults_edit_mode
+            else "Edit default pricing assumptions"
+        )
+        if st.button(toggle_label, key="toggle_pricing_defaults"):
+            st.session_state.pricing_defaults_edit_mode = not st.session_state[
+                "pricing_defaults_edit_mode"
+            ]
+
+        if st.session_state.pricing_defaults_edit_mode:
+            st.markdown("##### Default Pricing Assumptions")
+            st.caption(
+                "Edit the baseline pricing table applied when resetting these assumptions."
+            )
+
+            pricing_columns = [
+                "Year",
+                "Product",
+                "Unit",
+                "Base Price",
+                "Price Growth %",
+            ]
+            default_frame = st.session_state.get("default_pricing_editor_seed")
+            if not isinstance(default_frame, pd.DataFrame):
+                default_frame = _template_to_dataframe(
+                    _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
+                )
+
+            template_editor = st.data_editor(
+                default_frame,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_pricing_editor",
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Base Price": st.column_config.NumberColumn(
+                        "Base Price", format="%.2f"
+                    ),
+                    "Price Growth %": st.column_config.NumberColumn(
+                        "Price Growth (%)", format="%.2f"
+                    ),
+                },
+            )
+
+            save_col, apply_col, restore_col, close_col = st.columns(4)
+
+            if save_col.button("Save Defaults", key="save_pricing_defaults"):
+                records = _dataframe_to_template(template_editor, pricing_columns)
+                _set_template("pricing_rows", records)
+                st.success("Pricing defaults updated.")
+
+            if apply_col.button("Apply to Assumptions", key="apply_pricing_defaults"):
+                records = _dataframe_to_template(template_editor, pricing_columns)
+                _set_template("pricing_rows", records)
+                pricing_table = _default_pricing_table()
                 st.session_state.assumptions["Pricing"] = pricing_table
+                st.session_state["default_pricing_editor_seed"] = template_editor
+                st.success(
+                    "Pricing assumptions refreshed from updated defaults."
+                )
                 _clear_schedule_editor_state("assump::pricing")
 
-            option_labels: list[str] = []
-            option_index: Dict[str, int] = {}
-            for idx_row, row in pricing_table.iterrows():
-                label_year = row.get("Year")
-                label_product = row.get("Product") or "Product"
-                if pd.notna(label_year):
-                    label = f"{int(label_year)} – {label_product}"
-                else:
-                    label = str(label_product)
-                option_labels.append(label)
-                option_index[label] = idx_row
-
-            remove_select_col.selectbox(
-                "Select row",
-                options=["-- Select Row --"] + option_labels,
-                key="pricing_remove_choice",
-            )
-
-            if remove_btn_col.button("Remove Row", key="pricing_remove_row"):
-                choice = st.session_state.get("pricing_remove_choice")
-                if choice in option_index:
-                    pricing_table = _remove_pricing_row(
-                        pricing_table, option_index[choice]
-                    )
-                    st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state.pricing_remove_choice = "-- Select Row --"
-                    _clear_schedule_editor_state("assump::pricing")
-
-            inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
-                [2, 1.5, 1, 1]
-            )
-
-            target_options = ["All products"] + sorted(
-                {
-                    str(product)
-                    for product in pricing_table.get("Product", pd.Series(dtype=str))
-                    .dropna()
-                    .tolist()
-                    if str(product).strip()
-                }
-            )
-            inc_target_col.selectbox(
-                "Apply increment to",
-                options=target_options,
-                key="pricing_increment_target",
-            )
-
-            inc_column_col.selectbox(
-                "Column",
-                options=["Base Price", "Price Growth %"],
-                key="pricing_increment_column",
-            )
-
-            inc_pct_col.number_input(
-                "Yearly increment (%)",
-                min_value=-100.0,
-                max_value=100.0,
-                step=0.1,
-                key="pricing_increment_pct",
-            )
-
-            if inc_btn_col.button("Apply increment", key="pricing_apply_increment"):
-                pricing_table = _apply_pricing_yearly_increment(
-                    pricing_table,
-                    st.session_state.get("pricing_increment_column", "Base Price"),
-                    st.session_state.get("pricing_increment_pct", 0.0),
-                    st.session_state.get("pricing_increment_target"),
-                )
+            if restore_col.button("Restore Baseline", key="reset_pricing_defaults"):
+                baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
+                _set_template("pricing_rows", baseline_template)
+                pricing_table = _default_pricing_table()
                 st.session_state.assumptions["Pricing"] = pricing_table
+                st.session_state["default_pricing_editor_seed"] = _template_to_dataframe(
+                    baseline_template, pricing_columns
+                )
+                st.success(
+                    "Pricing defaults restored and assumptions refreshed."
+                )
                 _clear_schedule_editor_state("assump::pricing")
 
-            def _save_pricing(updated: pd.DataFrame) -> None:
-                ensured = _ensure_pricing_table(updated)
-                st.session_state.assumptions["Pricing"] = ensured
+            if close_col.button("Close Editor", key="close_pricing_defaults"):
+                st.session_state.pricing_defaults_edit_mode = False
 
-            _render_schedule_row_editor(
-                "assump::pricing",
-                st.session_state.assumptions["Pricing"],
-                _save_pricing,
-            )
+        assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
-            st.session_state.setdefault("pricing_defaults_edit_mode", False)
-            toggle_label = (
-                "Hide default pricing assumptions"
-                if st.session_state.pricing_defaults_edit_mode
-                else "Edit default pricing assumptions"
-            )
-            if st.button(toggle_label, key="toggle_pricing_defaults"):
-                st.session_state.pricing_defaults_edit_mode = not st.session_state[
-                    "pricing_defaults_edit_mode"
-                ]
+        st.markdown("---")
+        st.markdown("#### Operating Cost Assumptions")
+        st.caption(
+            "Fields `variable_feed_cost_per_herd`, `variable_healthcare_cost_per_herd`, and "
+            "`fixed_utility_cost_per_herd` are treated as unit_cost_per_head_per_month values. "
+            "Monthly total cost = unit cost × herd heads × months."
+        )
+        operating_table = _ensure_operating_cost_table(
+            st.session_state.assumptions.get("Operating Costs")
+        )
+        st.session_state.assumptions["Operating Costs"] = operating_table
 
-            if st.session_state.pricing_defaults_edit_mode:
-                st.markdown("##### Default Pricing Assumptions")
-                st.caption(
-                    "Edit the baseline pricing table applied when resetting these assumptions."
+        st.session_state.setdefault("operating_remove_choice", "-- Select Item --")
+        st.session_state.setdefault("operating_increment_target", "All categories")
+        st.session_state.setdefault(
+            "operating_increment_column", "unit_cost_per_head_per_month"
+        )
+        st.session_state.setdefault("operating_increment_pct", 0.0)
+
+        add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+
+        if add_col.button("Add Item", key="operating_add_row"):
+            operating_table = _add_operating_cost_row(operating_table)
+            st.session_state.assumptions["Operating Costs"] = operating_table
+            _clear_schedule_editor_state("assump::operating_costs")
+
+        option_labels: list[str] = []
+        option_index: Dict[str, int] = {}
+        for idx_row, row in operating_table.iterrows():
+            category = str(row.get("Category", "")).strip() or f"Item {idx_row + 1}"
+            year_value = row.get("Year")
+            if pd.notna(year_value):
+                label = f"{category} ({int(year_value)})"
+            else:
+                label = category
+            option_labels.append(label)
+            option_index[label] = idx_row
+
+        remove_select_col.selectbox(
+            "Select item",
+            options=["-- Select Item --"] + option_labels,
+            key="operating_remove_choice",
+        )
+
+        if remove_btn_col.button("Remove Item", key="operating_remove_row"):
+            choice = st.session_state.get("operating_remove_choice")
+            if choice in option_index:
+                operating_table = _remove_operating_cost_row(
+                    operating_table, option_index[choice]
                 )
+                st.session_state.assumptions["Operating Costs"] = operating_table
+                st.session_state["operating_remove_choice"] = "-- Select Item --"
+                _clear_schedule_editor_state("assump::operating_costs")
 
-                pricing_columns = [
-                    "Year",
-                    "Product",
-                    "Unit",
-                    "Base Price",
-                    "Price Growth %",
-                ]
-                default_frame = st.session_state.get("default_pricing_editor")
-                if not isinstance(default_frame, pd.DataFrame):
-                    default_frame = _template_to_dataframe(
-                        _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
-                    )
+        inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
+            [2, 1.5, 1, 1]
+        )
 
-                template_editor = st.data_editor(
-                    default_frame,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="default_pricing_editor",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Base Price": st.column_config.NumberColumn(
-                            "Base Price", format="%.2f"
-                        ),
-                        "Price Growth %": st.column_config.NumberColumn(
-                            "Price Growth (%)", format="%.2f"
-                        ),
-                    },
-                )
+        target_options = ["All categories"] + sorted(
+            {
+                str(cat).strip()
+                for cat in operating_table.get("Category", pd.Series(dtype=str))
+                .dropna()
+                .tolist()
+                if str(cat).strip()
+            }
+        )
+        inc_target_col.selectbox(
+            "Apply increment to",
+            options=target_options,
+            key="operating_increment_target",
+        )
 
-                button_col, save_col, restore_col, apply_col = st.columns(4)
+        inc_column_col.selectbox(
+            "Column",
+            options=["unit_cost_per_head_per_month", "Inflation %"],
+            key="operating_increment_column",
+        )
 
-                if button_col.button("Close editor", key="close_pricing_defaults"):
-                    st.session_state.pricing_defaults_edit_mode = False
+        inc_pct_col.number_input(
+            "Yearly increment (%)",
+            min_value=-100.0,
+            max_value=100.0,
+            step=0.1,
+            key="operating_increment_pct",
+        )
 
-                if save_col.button("Save defaults", key="save_pricing_defaults"):
-                    records = _dataframe_to_template(template_editor, pricing_columns)
-                    _set_template("pricing_rows", records)
-                    st.success("Pricing defaults updated.")
-
-                if restore_col.button("Restore baseline", key="reset_pricing_defaults"):
-                    baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
-                    _set_template("pricing_rows", baseline_template)
-                    pricing_table = _default_pricing_table()
-                    st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state["default_pricing_editor"] = _template_to_dataframe(
-                        baseline_template, pricing_columns
-                    )
-                    st.success(
-                        "Pricing defaults restored and assumptions refreshed."
-                    )
-                    _clear_schedule_editor_state("assump::pricing")
-
-                if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
-                    records = _dataframe_to_template(template_editor, pricing_columns)
-                    _set_template("pricing_rows", records)
-                    pricing_table = _default_pricing_table()
-                    st.session_state.assumptions["Pricing"] = pricing_table
-                    st.session_state["default_pricing_editor"] = template_editor
-                    st.success(
-                        "Pricing assumptions refreshed from updated defaults."
-                    )
-                    _clear_schedule_editor_state("assump::pricing")
-
-            assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
-
-        with assumption_tabs[3]:
-            st.markdown("#### Operating Cost Assumptions")
-            operating_table = _ensure_operating_cost_table(
-                st.session_state.assumptions.get("Operating Costs")
+        if inc_btn_col.button("Apply increment", key="operating_apply_increment"):
+            operating_table = _apply_operating_cost_increment(
+                operating_table,
+                st.session_state.get("operating_increment_pct", 0.0),
+                st.session_state.get("operating_increment_target"),
+                st.session_state.get(
+                    "operating_increment_column", "unit_cost_per_head_per_month"
+                ),
             )
             st.session_state.assumptions["Operating Costs"] = operating_table
+            _clear_schedule_editor_state("assump::operating_costs")
 
-            st.session_state.setdefault("operating_remove_choice", "-- Select Item --")
-            st.session_state.setdefault("operating_increment_target", "All categories")
-            st.session_state.setdefault("operating_increment_column", "Monthly Cost")
-            st.session_state.setdefault("operating_increment_pct", 0.0)
+        def _save_operating(updated: pd.DataFrame) -> None:
+            ensured = _ensure_operating_cost_table(updated)
+            st.session_state.assumptions["Operating Costs"] = ensured
 
-            add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
+        _render_schedule_row_editor(
+            "assump::operating_costs",
+            st.session_state.assumptions["Operating Costs"],
+            _save_operating,
+        )
 
-            if add_col.button("Add Item", key="operating_add_row"):
-                operating_table = _add_operating_cost_row(operating_table)
+        st.session_state.setdefault("operating_defaults_edit_mode", False)
+        toggle_label = (
+            "Hide default operating cost assumptions"
+            if st.session_state.operating_defaults_edit_mode
+            else "Edit default operating cost assumptions"
+        )
+        if st.button(toggle_label, key="toggle_operating_defaults"):
+            st.session_state.operating_defaults_edit_mode = not st.session_state[
+                "operating_defaults_edit_mode"
+            ]
+
+        if st.session_state.operating_defaults_edit_mode:
+            st.markdown("##### Default Operating Cost Assumptions")
+            st.caption(
+                "Update the baseline operating cost table used when refreshing these assumptions."
+            )
+
+            operating_columns = [
+                "Year",
+                "Field",
+                "Category",
+                "unit_cost_per_head_per_month",
+                "Inflation %",
+            ]
+            default_frame = st.session_state.get("default_operating_editor_seed")
+            if not isinstance(default_frame, pd.DataFrame):
+                default_frame = _template_to_dataframe(
+                    _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
+                    operating_columns,
+                )
+
+            template_editor = st.data_editor(
+                default_frame,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="default_operating_editor",
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", step=1),
+                    "Field": st.column_config.TextColumn("Field"),
+                    "unit_cost_per_head_per_month": st.column_config.NumberColumn(
+                        "Unit Cost / Head / Month", format="%.4f"
+                    ),
+                    "Inflation %": st.column_config.NumberColumn(
+                        "Inflation (%)", format="%.2f"
+                    ),
+                },
+            )
+
+            save_col, apply_col, restore_col, close_col = st.columns(4)
+
+            if save_col.button("Save Defaults", key="save_operating_defaults"):
+                records = _dataframe_to_template(template_editor, operating_columns)
+                _set_template("operating_rows", records)
+                st.success("Operating cost defaults updated.")
+
+            if apply_col.button("Apply to Assumptions", key="apply_operating_defaults"):
+                records = _dataframe_to_template(template_editor, operating_columns)
+                _set_template("operating_rows", records)
+                operating_table = _default_operating_cost_table()
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                st.session_state["default_operating_editor_seed"] = template_editor
+                st.success(
+                    "Operating cost assumptions refreshed from updated defaults."
+                )
                 _clear_schedule_editor_state("assump::operating_costs")
 
-            option_labels: list[str] = []
-            option_index: Dict[str, int] = {}
-            for idx_row, row in operating_table.iterrows():
-                category = str(row.get("Category", "")).strip() or f"Item {idx_row + 1}"
-                year_value = row.get("Year")
-                if pd.notna(year_value):
-                    label = f"{category} ({int(year_value)})"
-                else:
-                    label = category
-                option_labels.append(label)
-                option_index[label] = idx_row
-
-            remove_select_col.selectbox(
-                "Select item",
-                options=["-- Select Item --"] + option_labels,
-                key="operating_remove_choice",
-            )
-
-            if remove_btn_col.button("Remove Item", key="operating_remove_row"):
-                choice = st.session_state.get("operating_remove_choice")
-                if choice in option_index:
-                    operating_table = _remove_operating_cost_row(
-                        operating_table, option_index[choice]
-                    )
-                    st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["operating_remove_choice"] = "-- Select Item --"
-                    _clear_schedule_editor_state("assump::operating_costs")
-
-            inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns(
-                [2, 1.5, 1, 1]
-            )
-
-            target_options = ["All categories"] + sorted(
-                {
-                    str(cat).strip()
-                    for cat in operating_table.get("Category", pd.Series(dtype=str))
-                    .dropna()
-                    .tolist()
-                    if str(cat).strip()
-                }
-            )
-            inc_target_col.selectbox(
-                "Apply increment to",
-                options=target_options,
-                key="operating_increment_target",
-            )
-
-            inc_column_col.selectbox(
-                "Column",
-                options=["Monthly Cost", "Inflation %"],
-                key="operating_increment_column",
-            )
-
-            inc_pct_col.number_input(
-                "Yearly increment (%)",
-                min_value=-100.0,
-                max_value=100.0,
-                step=0.1,
-                key="operating_increment_pct",
-            )
-
-            if inc_btn_col.button("Apply increment", key="operating_apply_increment"):
-                operating_table = _apply_operating_cost_increment(
-                    operating_table,
-                    st.session_state.get("operating_increment_pct", 0.0),
-                    st.session_state.get("operating_increment_target"),
-                    st.session_state.get("operating_increment_column", "Monthly Cost"),
-                )
+            if restore_col.button("Restore Baseline", key="reset_operating_defaults"):
+                baseline_template = _template_copy(DEFAULT_OPERATING_COST_ROWS)
+                _set_template("operating_rows", baseline_template)
+                operating_table = _default_operating_cost_table()
                 st.session_state.assumptions["Operating Costs"] = operating_table
+                st.session_state["default_operating_editor_seed"] = _template_to_dataframe(
+                    baseline_template, operating_columns
+                )
+                st.success(
+                    "Operating cost defaults restored and assumptions refreshed."
+                )
                 _clear_schedule_editor_state("assump::operating_costs")
 
-            def _save_operating(updated: pd.DataFrame) -> None:
-                ensured = _ensure_operating_cost_table(updated)
-                st.session_state.assumptions["Operating Costs"] = ensured
+            if close_col.button("Close Editor", key="close_operating_defaults"):
+                st.session_state.operating_defaults_edit_mode = False
 
-            _render_schedule_row_editor(
-                "assump::operating_costs",
-                st.session_state.assumptions["Operating Costs"],
-                _save_operating,
+        assumption_tables["Operating Costs"] = st.session_state.assumptions[
+            "Operating Costs"
+        ]
+    
+        st.markdown("---")
+        st.markdown("#### Capital & Financing Assumptions")
+        capital_table = _ensure_capital_financing_table(
+            st.session_state.assumptions.get("Capital & Financing")
+        )
+        st.session_state.assumptions["Capital & Financing"] = capital_table
+    
+        def _save_capital(updated: pd.DataFrame) -> None:
+            ensured = _ensure_capital_financing_table(updated)
+            st.session_state.assumptions["Capital & Financing"] = ensured
+    
+        _render_schedule_row_editor(
+            "assump::capital_financing",
+            st.session_state.assumptions["Capital & Financing"],
+            _save_capital,
+        )
+        assumption_tables["Capital & Financing"] = st.session_state.assumptions[
+            "Capital & Financing"
+        ]
+    
+        st.markdown("---")
+        st.markdown("#### Valuation Inputs")
+        include_valuation = st.checkbox("Include valuation inputs", value=True)
+        valuation_table = _ensure_valuation_inputs_table(
+            st.session_state.assumptions.get("Valuation Inputs")
+        )
+        st.session_state.assumptions["Valuation Inputs"] = valuation_table
+    
+        def _save_valuation(updated: pd.DataFrame) -> None:
+            ensured = _ensure_valuation_inputs_table(updated)
+            st.session_state.assumptions["Valuation Inputs"] = ensured
+    
+        _render_schedule_row_editor(
+            "assump::valuation_inputs",
+            st.session_state.assumptions["Valuation Inputs"],
+            _save_valuation,
+        )
+    
+        if include_valuation:
+            valuation_inputs = _valuation_table_to_inputs(
+                st.session_state.assumptions["Valuation Inputs"]
             )
-
-            st.session_state.setdefault("operating_defaults_edit_mode", False)
-            toggle_label = (
-                "Hide default operating cost assumptions"
-                if st.session_state.operating_defaults_edit_mode
-                else "Edit default operating cost assumptions"
-            )
-            if st.button(toggle_label, key="toggle_operating_defaults"):
-                st.session_state.operating_defaults_edit_mode = not st.session_state[
-                    "operating_defaults_edit_mode"
-                ]
-
-            if st.session_state.operating_defaults_edit_mode:
-                st.markdown("##### Default Operating Cost Assumptions")
-                st.caption(
-                    "Update the baseline operating cost table used when refreshing these assumptions."
-                )
-
-                operating_columns = ["Year", "Category", "Monthly Cost", "Inflation %"]
-                default_frame = st.session_state.get("default_operating_editor")
-                if not isinstance(default_frame, pd.DataFrame):
-                    default_frame = _template_to_dataframe(
-                        _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS),
-                        operating_columns,
-                    )
-
-                template_editor = st.data_editor(
-                    default_frame,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="default_operating_editor",
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", step=1),
-                        "Monthly Cost": st.column_config.NumberColumn(
-                            "Monthly Cost", format="%.2f"
-                        ),
-                        "Inflation %": st.column_config.NumberColumn(
-                            "Inflation (%)", format="%.2f"
-                        ),
-                    },
-                )
-
-                button_col, save_col, restore_col, apply_col = st.columns(4)
-
-                if button_col.button("Close editor", key="close_operating_defaults"):
-                    st.session_state.operating_defaults_edit_mode = False
-
-                if save_col.button("Save defaults", key="save_operating_defaults"):
-                    records = _dataframe_to_template(template_editor, operating_columns)
-                    _set_template("operating_rows", records)
-                    st.success("Operating cost defaults updated.")
-
-                if restore_col.button("Restore baseline", key="reset_operating_defaults"):
-                    baseline_template = _template_copy(DEFAULT_OPERATING_COST_ROWS)
-                    _set_template("operating_rows", baseline_template)
-                    operating_table = _default_operating_cost_table()
-                    st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["default_operating_editor"] = _template_to_dataframe(
-                        baseline_template, operating_columns
-                    )
-                    st.success(
-                        "Operating cost defaults restored and assumptions refreshed."
-                    )
-                    _clear_schedule_editor_state("assump::operating_costs")
-
-                if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
-                    records = _dataframe_to_template(template_editor, operating_columns)
-                    _set_template("operating_rows", records)
-                    operating_table = _default_operating_cost_table()
-                    st.session_state.assumptions["Operating Costs"] = operating_table
-                    st.session_state["default_operating_editor"] = template_editor
-                    st.success(
-                        "Operating cost assumptions refreshed from updated defaults."
-                    )
-                    _clear_schedule_editor_state("assump::operating_costs")
-
-            assumption_tables["Operating Costs"] = st.session_state.assumptions[
-                "Operating Costs"
-            ]
-
-        with assumption_tabs[4]:
-            st.markdown("#### Capital & Financing Assumptions")
-            capital_table = _ensure_capital_financing_table(
-                st.session_state.assumptions.get("Capital & Financing")
-            )
-            st.session_state.assumptions["Capital & Financing"] = capital_table
-
-            def _save_capital(updated: pd.DataFrame) -> None:
-                ensured = _ensure_capital_financing_table(updated)
-                st.session_state.assumptions["Capital & Financing"] = ensured
-
-            _render_schedule_row_editor(
-                "assump::capital_financing",
-                st.session_state.assumptions["Capital & Financing"],
-                _save_capital,
-            )
-            assumption_tables["Capital & Financing"] = st.session_state.assumptions[
-                "Capital & Financing"
-            ]
-
-        with assumption_tabs[5]:
-            include_valuation = st.checkbox("Include valuation inputs", value=True)
-            valuation_table = _ensure_valuation_inputs_table(
-                st.session_state.assumptions.get("Valuation Inputs")
-            )
-            st.session_state.assumptions["Valuation Inputs"] = valuation_table
-
-            def _save_valuation(updated: pd.DataFrame) -> None:
-                ensured = _ensure_valuation_inputs_table(updated)
-                st.session_state.assumptions["Valuation Inputs"] = ensured
-
-            _render_schedule_row_editor(
-                "assump::valuation_inputs",
-                st.session_state.assumptions["Valuation Inputs"],
-                _save_valuation,
-            )
-
-            if include_valuation:
-                valuation_inputs = _valuation_table_to_inputs(
-                    st.session_state.assumptions["Valuation Inputs"]
-                )
-            else:
-                valuation_inputs = {}
-
-            assumption_tables["Valuation Inputs"] = st.session_state.assumptions[
-                "Valuation Inputs"
-            ]
+        else:
+            valuation_inputs = {}
+    
+        assumption_tables["Valuation Inputs"] = st.session_state.assumptions[
+            "Valuation Inputs"
+        ]
 
     with tabs[2]:
         st.subheader("Financial Statements")
@@ -5704,12 +7842,12 @@ def main() -> None:
             results = st.session_state.results
             financial_tabs = st.tabs(
                 [
-                    "Statement of Financial Performance",
-                    "Statement of Financial Position",
-                    "Statement of Cash Flow",
-                ]
-            )
-
+                        "Statement of Financial Performance",
+                        "Statement of Financial Position",
+                        "Statement of Cash Flow",
+                    ]
+                )
+    
             scenario_label = results.get("selected_scenario", "Scenario")
 
             with financial_tabs[0]:
@@ -5843,6 +7981,14 @@ def main() -> None:
                     )
                     return
                 schedule_df = horizon_filtered
+        herd_plan = assumption_tables.get("Herd Plan")
+        if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+            schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
+        operating_costs = assumption_tables.get("Operating Costs")
+        if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
+            schedule_df = _apply_operating_cost_assumptions_to_schedule(
+                schedule_df, operating_costs
+            )
 
         combined_supplementary = dict(supplementary_tables)
         for name, table in assumption_tables.items():
@@ -5894,6 +8040,9 @@ def main() -> None:
             return
 
         st.success("Scenario suite complete")
+        st.session_state["model_last_run_at"] = pd.Timestamp.utcnow().strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
 
         st.session_state.all_scenario_results = scenario_results
 
@@ -5925,23 +8074,26 @@ def main() -> None:
         selected_scenario = results.get("selected_scenario", "Scenario")
         model.scenario_name = selected_scenario
 
+        valuation_issues = _valuation_diagnostic_messages(model)
+        if valuation_issues:
+            st.warning("Valuation diagnostics: " + " ".join(f"- {msg}" for msg in valuation_issues))
+
+        computed_npv = model.computed_npv() if hasattr(model, "computed_npv") else None
+        computed_irr = model.computed_irr() if hasattr(model, "computed_irr") else None
         valuation_metrics = {
             "WACC": model.wacc(),
-            "NPV": model.npv(),
+            "NPV": computed_npv if computed_npv is not None else model.npv(),
+            "IRR": computed_irr if computed_irr is not None else (model.irr() if hasattr(model, "irr") else None),
             "Terminal Value": model.terminal_value(),
         }
-        non_null_metrics = [val for val in valuation_metrics.values() if val is not None]
-        if non_null_metrics:
-            summary_cols = st.columns(len(non_null_metrics))
-            idx = 0
-            for label, value in valuation_metrics.items():
-                if value is None:
-                    continue
-                if label == "WACC":
-                    summary_cols[idx].metric(label, f"{value * 100:.2f}%")
-                else:
-                    summary_cols[idx].metric(label, f"{value:,.2f}")
-                idx += 1
+        summary_cols = st.columns(4)
+        for idx, (label, value) in enumerate(valuation_metrics.items()):
+            if value is None or pd.isna(value):
+                summary_cols[idx].metric(label, "N/A")
+            elif label in {"WACC", "IRR"}:
+                summary_cols[idx].metric(label, f"{value * 100:.2f}%")
+            else:
+                summary_cols[idx].metric(label, f"{value:,.2f}")
 
         excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
         excel_bytes = excel_map.get(selected_scenario)
@@ -5985,9 +8137,12 @@ def main() -> None:
         st.subheader("Dashboard")
         if results is None:
             st.info("Run the scenarios to populate the dashboard charts.")
+            st.markdown("---")
+            st.subheader("Supplementary Schedules")
+            st.info("Supplementary schedules will appear once a scenario has been run.")
         else:
             st.subheader("KPIs (Annual)")
-            st.dataframe(kpis.mul(100).round(2))
+            st.dataframe(_format_kpis_for_display(kpis))
 
             scenario = results["scenario"]
             break_even = results["break_even"]
@@ -6025,39 +8180,25 @@ def main() -> None:
                 mime="text/csv",
             )
 
+            st.markdown("---")
+            st.subheader("Supplementary Schedules")
+            supplementary_render = results.get("supplementary", {})
+            for name in [
+                "Capitalisation Table",
+                "Capex Schedule",
+                "Asset Schedules",
+                "Outputs",
+                "Benchmark KPIs",
+            ]:
+                _render_table(name, supplementary_render.get(name))
+
     with tabs[4]:
         st.subheader("Advanced Analytics")
         st.markdown(
-            "Complement Monte Carlo simulation with the following advanced analytics to"
-            " deepen scenario insights:"
+            "Use the framework below to configure inputs, assumptions, model drivers, "
+            "and scenarios for each analytics tool."
         )
-        st.markdown(
-            """
-- **Sensitivity analysis** to quantify how key drivers such as milk prices, feed costs, or herd productivity shift profitability.
-- **Scenario stress testing** that applies severe but plausible shocks (e.g., drought, disease outbreaks) to evaluate resilience.
-- **Trend and seasonality decomposition** on production and revenue series to isolate structural shifts from cyclical effects.
-- **Customer and product segmentation analysis** to spotlight high-margin channels and inform targeted growth initiatives.
-- **Monte Carlo simulation** to capture probabilistic distributions for revenues, costs, and valuation metrics.
-- **What-if analysis** to interactively adjust assumptions and observe real-time impacts on key outputs.
-- **Goal seek** routines to solve for the input levels required to hit specific profitability or liquidity targets.
-- **Tornado charts & spider diagrams** to visualise which assumptions have the greatest impact on outputs like NPV or IRR.
-- **Regression modeling** to predict revenues, costs, or asset performance based on historical data.
-- **Time series analysis (ARIMA, Prophet, LSTM)** for modelling cyclical or seasonal patterns in revenues, commodity prices, or expenses.
-- **Classification models** for credit risk, churn, or customer segmentation in finance-related business models.
-- **Linear and nonlinear optimization** to maximise profit or minimise cost given resource or capital constraints.
-- **Portfolio optimization** applying mean-variance or robust techniques to balance risk versus return across herds or product lines.
-- **Real options analysis** to incorporate managerial flexibility around deferring, expanding, or abandoning initiatives.
-- **Value at Risk (VaR) / Conditional VaR** to estimate potential losses under adverse conditions.
-- **Stress testing** that simulates extreme yet plausible shocks such as commodity price collapses or rapid interest-rate hikes.
-- **Copula models** to capture correlations between multiple risk factors (e.g., FX and interest rates).
-- **Macroeconomic linking** that integrates inflation, GDP growth, or exchange rates into financial projections.
-- **ESG & sustainability metrics** to model the financial implications of emissions, carbon pricing, or renewable adoption.
-- **Market intelligence integration** blending sentiment data or industry forecasts for dynamic demand projections.
-- **Probabilistic valuation** to generate distributions of NPVs or IRRs rather than single-point estimates.
-- **Comparative valuation with clustering** to benchmark projects or farms against statistically similar peers.
-- **Machine learning–based valuation** that trains models on historical market data to predict multiples or fair values.
-            """
-        )
+        _render_analytics_framework(results)
         if results is None:
             st.info("Run the scenarios to view advanced analytics.")
         else:
@@ -6237,20 +8378,7 @@ def main() -> None:
                 st.info(str(exc))
 
     with tabs[5]:
-        st.subheader("Supplementary Schedules")
-        if results is None:
-            st.info("Supplementary schedules will appear once a scenario has been run.")
-        else:
-            supplementary_render = results.get("supplementary", {})
-            for name in [
-                "Capitalisation Table",
-                "Capex Schedule",
-                "Asset Schedules",
-                "Outputs",
-                "Benchmark KPIs",
-            ]:
-                _render_table(name, supplementary_render.get(name))
-
+        _render_ai_orchestration_layer(results)
 
 if __name__ == "__main__":
     main()
