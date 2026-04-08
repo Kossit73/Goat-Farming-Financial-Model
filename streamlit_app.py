@@ -4261,6 +4261,9 @@ def _ensure_default_results_loaded() -> None:
 
     st.session_state.selected_scenario_name = preferred
     st.session_state.results = scenario_results[preferred]
+    st.session_state.setdefault(
+        "model_last_run_at", pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    )
 
 
 def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -4458,6 +4461,40 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
         return
     st.subheader(title)
     st.dataframe(table)
+
+
+def _render_workflow_status_strip() -> None:
+    cols = st.columns(3)
+    assumptions_ready = isinstance(st.session_state.get("assumptions"), dict)
+    schedule_ready = isinstance(st.session_state.get("core_schedule"), pd.DataFrame)
+    last_run = st.session_state.get("model_last_run_at")
+    cols[0].metric("Assumptions", "Ready" if assumptions_ready else "Pending")
+    cols[1].metric("Schedule", "Ready" if schedule_ready else "Pending")
+    cols[2].metric("Last Recalculated", str(last_run) if last_run else "Not run")
+
+
+def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) -> None:
+    issues: list[str] = []
+    operating = assumptions.get("Operating Costs", pd.DataFrame())
+    if isinstance(operating, pd.DataFrame) and not operating.empty and {"Year", "Field"}.issubset(operating.columns):
+        duplicate_mask = operating.duplicated(subset=["Year", "Field"], keep=False)
+        if duplicate_mask.any():
+            issues.append("Operating Costs has duplicate Year+Field rows.")
+    herd = assumptions.get("Herd Plan", pd.DataFrame())
+    if isinstance(herd, pd.DataFrame) and not herd.empty and "Year" in herd.columns:
+        duplicate_years = herd.duplicated(subset=["Year"], keep=False)
+        if duplicate_years.any():
+            issues.append("Herd Plan has duplicate years.")
+    pricing = assumptions.get("Pricing", pd.DataFrame())
+    if isinstance(pricing, pd.DataFrame) and not pricing.empty and {"Year", "Product", "Unit"}.issubset(pricing.columns):
+        dup = pricing.duplicated(subset=["Year", "Product", "Unit"], keep=False)
+        if dup.any():
+            issues.append("Pricing has duplicate Year+Product+Unit rows.")
+
+    if issues:
+        st.warning("Validation summary: " + " ".join(f"- {msg}" for msg in issues))
+    else:
+        st.success("Validation summary: no duplicate key rows detected.")
 
 
 ANALYTICS_FRAMEWORK_TOOLS: List[Dict[str, str]] = [
@@ -5854,6 +5891,7 @@ def main() -> None:
 
     with tabs[1]:
         st.subheader("Input Schedule")
+        _render_workflow_status_strip()
         st.markdown("### Scenario Explorer")
         _render_model_author_editor()
         _render_scenario_selector()
@@ -6974,6 +7012,8 @@ def main() -> None:
 
     with tabs[0]:
         st.subheader("Assumptions")
+        _render_workflow_status_strip()
+        _render_assumption_validation_summary(st.session_state.assumptions)
         st.caption(
             "All core model assumption categories are consolidated below on a single page."
         )
@@ -7320,17 +7360,25 @@ def main() -> None:
                 },
             )
 
-            button_col, save_col, restore_col, apply_col = st.columns(4)
+            save_col, apply_col, restore_col, close_col = st.columns(4)
 
-            if button_col.button("Close editor", key="close_pricing_defaults"):
-                st.session_state.pricing_defaults_edit_mode = False
-
-            if save_col.button("Save defaults", key="save_pricing_defaults"):
+            if save_col.button("Save Defaults", key="save_pricing_defaults"):
                 records = _dataframe_to_template(template_editor, pricing_columns)
                 _set_template("pricing_rows", records)
                 st.success("Pricing defaults updated.")
 
-            if restore_col.button("Restore baseline", key="reset_pricing_defaults"):
+            if apply_col.button("Apply to Assumptions", key="apply_pricing_defaults"):
+                records = _dataframe_to_template(template_editor, pricing_columns)
+                _set_template("pricing_rows", records)
+                pricing_table = _default_pricing_table()
+                st.session_state.assumptions["Pricing"] = pricing_table
+                st.session_state["default_pricing_editor_seed"] = template_editor
+                st.success(
+                    "Pricing assumptions refreshed from updated defaults."
+                )
+                _clear_schedule_editor_state("assump::pricing")
+
+            if restore_col.button("Restore Baseline", key="reset_pricing_defaults"):
                 baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
                 _set_template("pricing_rows", baseline_template)
                 pricing_table = _default_pricing_table()
@@ -7343,16 +7391,8 @@ def main() -> None:
                 )
                 _clear_schedule_editor_state("assump::pricing")
 
-            if apply_col.button("Apply to assumptions", key="apply_pricing_defaults"):
-                records = _dataframe_to_template(template_editor, pricing_columns)
-                _set_template("pricing_rows", records)
-                pricing_table = _default_pricing_table()
-                st.session_state.assumptions["Pricing"] = pricing_table
-                st.session_state["default_pricing_editor_seed"] = template_editor
-                st.success(
-                    "Pricing assumptions refreshed from updated defaults."
-                )
-                _clear_schedule_editor_state("assump::pricing")
+            if close_col.button("Close Editor", key="close_pricing_defaults"):
+                st.session_state.pricing_defaults_edit_mode = False
 
         assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
@@ -7513,17 +7553,25 @@ def main() -> None:
                 },
             )
 
-            button_col, save_col, restore_col, apply_col = st.columns(4)
+            save_col, apply_col, restore_col, close_col = st.columns(4)
 
-            if button_col.button("Close editor", key="close_operating_defaults"):
-                st.session_state.operating_defaults_edit_mode = False
-
-            if save_col.button("Save defaults", key="save_operating_defaults"):
+            if save_col.button("Save Defaults", key="save_operating_defaults"):
                 records = _dataframe_to_template(template_editor, operating_columns)
                 _set_template("operating_rows", records)
                 st.success("Operating cost defaults updated.")
 
-            if restore_col.button("Restore baseline", key="reset_operating_defaults"):
+            if apply_col.button("Apply to Assumptions", key="apply_operating_defaults"):
+                records = _dataframe_to_template(template_editor, operating_columns)
+                _set_template("operating_rows", records)
+                operating_table = _default_operating_cost_table()
+                st.session_state.assumptions["Operating Costs"] = operating_table
+                st.session_state["default_operating_editor_seed"] = template_editor
+                st.success(
+                    "Operating cost assumptions refreshed from updated defaults."
+                )
+                _clear_schedule_editor_state("assump::operating_costs")
+
+            if restore_col.button("Restore Baseline", key="reset_operating_defaults"):
                 baseline_template = _template_copy(DEFAULT_OPERATING_COST_ROWS)
                 _set_template("operating_rows", baseline_template)
                 operating_table = _default_operating_cost_table()
@@ -7536,16 +7584,8 @@ def main() -> None:
                 )
                 _clear_schedule_editor_state("assump::operating_costs")
 
-            if apply_col.button("Apply to assumptions", key="apply_operating_defaults"):
-                records = _dataframe_to_template(template_editor, operating_columns)
-                _set_template("operating_rows", records)
-                operating_table = _default_operating_cost_table()
-                st.session_state.assumptions["Operating Costs"] = operating_table
-                st.session_state["default_operating_editor_seed"] = template_editor
-                st.success(
-                    "Operating cost assumptions refreshed from updated defaults."
-                )
-                _clear_schedule_editor_state("assump::operating_costs")
+            if close_col.button("Close Editor", key="close_operating_defaults"):
+                st.session_state.operating_defaults_edit_mode = False
 
         assumption_tables["Operating Costs"] = st.session_state.assumptions[
             "Operating Costs"
@@ -7806,6 +7846,9 @@ def main() -> None:
             return
 
         st.success("Scenario suite complete")
+        st.session_state["model_last_run_at"] = pd.Timestamp.utcnow().strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
 
         st.session_state.all_scenario_results = scenario_results
 
