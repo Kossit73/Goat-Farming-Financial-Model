@@ -19,7 +19,7 @@ from pandas.api.types import (
     is_integer_dtype,
     is_numeric_dtype,
 )
-from pandas.tseries.offsets import MonthEnd
+from pandas.tseries.offsets import MonthEnd, QuarterEnd
 from streamlit.delta_generator import DeltaGenerator
 
 from goat_financial_model import GoatModel, InputSchedule
@@ -2541,7 +2541,8 @@ def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
                 )
 
     if not rows:
-        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
         rows.append({"Period": today, "Role": "Direct Wage", "Amount": np.nan})
 
     return pd.DataFrame(rows)
@@ -2580,7 +2581,8 @@ def _add_direct_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFram
         if not core_periods.empty:
             default_period = core_periods.iloc[-1]
     if default_period is None or pd.isna(default_period):
-        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        default_period = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
 
     new_row = {
         "Period": default_period,
@@ -2706,7 +2708,8 @@ def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
                 )
 
     if not rows:
-        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
         rows.append({"Period": today, "Function": "Admin Wage", "Amount": np.nan})
 
     return pd.DataFrame(rows)
@@ -2777,7 +2780,8 @@ def _add_admin_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame
         if not core_periods.empty:
             default_period = core_periods.iloc[-1]
     if default_period is None or pd.isna(default_period):
-        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        default_period = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
 
     new_row = {
         "Period": default_period,
@@ -2891,7 +2895,8 @@ def _default_variable_expense_table(core: pd.DataFrame) -> pd.DataFrame:
                 })
 
     if not rows:
-        today = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
         rows.append({"Period": today, "Item": "Variable Expense", "Amount": np.nan})
 
     return pd.DataFrame(rows)
@@ -2930,7 +2935,8 @@ def _add_variable_expense_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.Dat
         if not core_periods.empty:
             default_period = core_periods.iloc[-1]
     if default_period is None or pd.isna(default_period):
-        default_period = (pd.Timestamp.today() + MonthEnd(0)).strftime("%Y-%m-%d")
+        period_type = _infer_period_type_from_schedule(core)
+        default_period = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
 
     new_row = {
         "Period": default_period,
@@ -3069,6 +3075,7 @@ def _add_cogs_row(
 ) -> pd.DataFrame:
     work = _sync_cogs_table(table, core, default_pct=default_pct)
     periods = pd.to_datetime(work["Period"], errors="coerce")
+    period_type = _infer_period_type_from_schedule(core)
 
     if periods.notna().any():
         last_period = periods.max()
@@ -3077,12 +3084,12 @@ def _add_cogs_row(
         if core_periods.notna().any():
             last_period = core_periods.max()
         else:
-            last_period = pd.Timestamp.today() + MonthEnd(0)
+            last_period = _next_period_from_last(None, period_type)
 
-    next_period = (last_period + MonthEnd(1)) if last_period is not None else pd.Timestamp.today() + MonthEnd(0)
+    next_period = _next_period_from_last(last_period, period_type)
     existing_periods = set(work["Period"].astype(str))
     while next_period.strftime("%Y-%m-%d") in existing_periods:
-        next_period += MonthEnd(1)
+        next_period = _next_period_from_last(next_period, period_type)
 
     next_period_str = next_period.strftime("%Y-%m-%d")
 
@@ -3499,8 +3506,59 @@ def _remove_capex_row(table: Optional[pd.DataFrame], index: int) -> pd.DataFrame
     return _recalculate_capex_schedule(reduced)
 
 
-def _default_income_schedule(periods: int = 12, start: str = "2024-01-31") -> pd.DataFrame:
-    dates = pd.date_range(start, periods=periods, freq=MonthEnd(1))
+def _normalize_period_type(value: Optional[str]) -> str:
+    candidate = str(value or "").strip().lower()
+    return "quarterly" if candidate == "quarterly" else "monthly"
+
+
+def _period_end_offset(period_type: str) -> Union[MonthEnd, QuarterEnd]:
+    return QuarterEnd(1) if _normalize_period_type(period_type) == "quarterly" else MonthEnd(1)
+
+
+def _period_label(period_type: str) -> str:
+    return "Quarterly" if _normalize_period_type(period_type) == "quarterly" else "Monthly"
+
+
+def _period_index_for_horizon(start_year: int, end_year: int, period_type: str) -> pd.DatetimeIndex:
+    normalized = _normalize_period_type(period_type)
+    if normalized == "quarterly":
+        start_date = pd.Timestamp(start_year, 3, 31)
+        end_date = pd.Timestamp(end_year, 12, 31)
+        return pd.date_range(start=start_date, end=end_date, freq=QuarterEnd())
+
+    start_date = pd.Timestamp(start_year, 1, 1) + MonthEnd(0)
+    end_date = pd.Timestamp(end_year, 12, 1) + MonthEnd(0)
+    return pd.date_range(start=start_date, end=end_date, freq=MonthEnd())
+
+
+def _infer_period_type_from_schedule(core_schedule: Optional[pd.DataFrame]) -> str:
+    if not isinstance(core_schedule, pd.DataFrame) or core_schedule.empty:
+        return "monthly"
+    raw_periods = core_schedule.get("Period", pd.Series(dtype=str))
+    periods = pd.to_datetime(raw_periods, errors="coerce")
+    if not isinstance(periods, pd.Series):
+        periods = pd.Series(periods)
+    periods = periods.dropna()
+    if len(periods) < 2:
+        return "monthly"
+    month_diffs = periods.sort_values().diff().dt.days.dropna()
+    if month_diffs.empty:
+        return "monthly"
+    median_days = float(month_diffs.median())
+    return "quarterly" if median_days >= 75 else "monthly"
+
+
+def _next_period_from_last(last_period: Optional[pd.Timestamp], period_type: str) -> pd.Timestamp:
+    normalized = _normalize_period_type(period_type)
+    if last_period is None or pd.isna(last_period):
+        return pd.Timestamp.today() + (QuarterEnd(0) if normalized == "quarterly" else MonthEnd(0))
+    return last_period + _period_end_offset(normalized)
+
+
+def _default_income_schedule(
+    periods: int = 12, start: str = "2024-01-31", period_type: str = "monthly"
+) -> pd.DataFrame:
+    dates = pd.date_range(start, periods=periods, freq=_period_end_offset(period_type))
     revenue = np.linspace(45000, 70000, periods)
     cogs = revenue * 0.45
     variable = revenue * 0.12
@@ -3597,20 +3655,28 @@ def _default_schedule_components(
     periods: Optional[int] = None,
     start: Optional[str] = None,
     production_horizon: Optional[pd.DataFrame] = None,
+    period_type: str = "monthly",
 ) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     if production_horizon is None:
         production_horizon = _default_production_horizon_table()
 
     start_year, end_year = _derive_horizon_years(production_horizon)
+    normalized_period_type = _normalize_period_type(period_type)
 
     if periods is None:
-        periods = max(1, (end_year - start_year + 1) * 12)
+        per_year = 4 if normalized_period_type == "quarterly" else 12
+        periods = max(1, (end_year - start_year + 1) * per_year)
 
     if start is None:
-        start_date = pd.Timestamp(start_year, 1, 1) + pd.offsets.MonthEnd(0)
+        if normalized_period_type == "quarterly":
+            start_date = pd.Timestamp(start_year, 3, 31)
+        else:
+            start_date = pd.Timestamp(start_year, 1, 1) + MonthEnd(0)
         start = start_date.strftime("%Y-%m-%d")
 
-    base = _default_income_schedule(periods=periods, start=start)
+    base = _default_income_schedule(
+        periods=periods, start=start, period_type=normalized_period_type
+    )
 
     core_columns = [
         "Period",
@@ -3913,6 +3979,7 @@ def _rebase_schedule_to_horizon(
     detail_tables: Optional[Dict[str, pd.DataFrame]],
     start_year: int,
     end_year: int,
+    period_type: str = "monthly",
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """Return schedule tables that span the requested production horizon."""
 
@@ -3921,12 +3988,11 @@ def _rebase_schedule_to_horizon(
 
     horizon_table = pd.DataFrame({"Start Year": [start_year], "End Year": [end_year]})
     default_core, default_details = _default_schedule_components(
-        production_horizon=horizon_table
+        production_horizon=horizon_table,
+        period_type=period_type,
     )
 
-    start_date = (pd.Timestamp(start_year, 1, 1) + MonthEnd(0))
-    end_date = (pd.Timestamp(end_year, 12, 1) + MonthEnd(0))
-    period_index = pd.date_range(start=start_date, end=end_date, freq=MonthEnd())
+    period_index = _period_index_for_horizon(start_year, end_year, period_type)
 
     merged_core = _merge_schedule_table(core, default_core, period_index)
 
@@ -3957,9 +4023,10 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
 
     core_table = st.session_state.get("core_schedule")
     detail_tables = st.session_state.get("detail_schedules")
+    period_type = _normalize_period_type(st.session_state.get("schedule_period_type"))
 
     merged_core, merged_details = _rebase_schedule_to_horizon(
-        core_table, detail_tables, start_year, end_year
+        core_table, detail_tables, start_year, end_year, period_type=period_type
     )
 
     st.session_state.core_schedule = merged_core
@@ -3971,6 +4038,32 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
         _clear_schedule_editor_state(identifier)
 
     _sync_horizon_dependent_state(start_year, end_year)
+    _reset_cached_results()
+
+
+def _sync_schedule_period_type(period_type: str) -> None:
+    """Rebuild period-based schedules to monthly/quarterly while preserving data."""
+    production_table = _ensure_production_horizon_table(
+        st.session_state.assumptions.get("Production Horizon")
+    )
+    start_year, end_year = _derive_horizon_years(production_table)
+    st.session_state["schedule_period_type"] = _normalize_period_type(period_type)
+
+    core_table = st.session_state.get("core_schedule")
+    detail_tables = st.session_state.get("detail_schedules")
+    merged_core, merged_details = _rebase_schedule_to_horizon(
+        core_table,
+        detail_tables,
+        start_year,
+        end_year,
+        period_type=st.session_state["schedule_period_type"],
+    )
+
+    st.session_state.core_schedule = merged_core
+    st.session_state.detail_schedules = merged_details
+    _clear_schedule_editor_state("core_schedule")
+    for name in merged_details:
+        _clear_schedule_editor_state(f"detail::{_scenario_key_suffix(name)}")
     _reset_cached_results()
 
 
@@ -5879,15 +5972,24 @@ def main() -> None:
             st.session_state.assumptions.setdefault(name, table.copy())
 
     production_horizon_defaults = st.session_state.assumptions.get("Production Horizon")
+    st.session_state.setdefault("schedule_period_type", "monthly")
+    st.session_state["schedule_period_type"] = _normalize_period_type(
+        st.session_state.get("schedule_period_type")
+    )
 
     if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
         core_default, detail_defaults = _default_schedule_components(
-            production_horizon=production_horizon_defaults
+            production_horizon=production_horizon_defaults,
+            period_type=st.session_state["schedule_period_type"],
         )
         if "core_schedule" not in st.session_state:
             st.session_state.core_schedule = core_default
         if "detail_schedules" not in st.session_state:
             st.session_state.detail_schedules = detail_defaults
+    else:
+        st.session_state["schedule_period_type"] = _infer_period_type_from_schedule(
+            st.session_state.get("core_schedule")
+        )
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
     if "all_scenario_results" not in st.session_state:
@@ -5930,6 +6032,24 @@ def main() -> None:
     with tabs[1]:
         st.subheader("Input Schedule")
         _render_workflow_status_strip()
+        current_period_type = _normalize_period_type(
+            st.session_state.get("schedule_period_type")
+        )
+        period_choice = st.selectbox(
+            "Schedule period type",
+            options=["Monthly", "Quarterly"],
+            index=0 if current_period_type == "monthly" else 1,
+            key="schedule_period_type_selector",
+            help=(
+                "Applies to Core, COGS, Variable Expenses, Direct Wages, and Admin Wages schedules. "
+                "Capex remains year-based and aligned to the active production horizon."
+            ),
+        )
+        selected_period_type = _normalize_period_type(period_choice)
+        if selected_period_type != current_period_type:
+            _sync_schedule_period_type(selected_period_type)
+            st.success(f"Updated schedule period type to {_period_label(selected_period_type)}.")
+
         st.markdown("### Scenario Explorer")
         _render_model_author_editor()
         _render_scenario_selector()
