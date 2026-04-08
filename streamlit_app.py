@@ -1751,42 +1751,42 @@ DEFAULT_OPERATING_COST_ROWS = [
         "Year": 2024,
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
-        "Monthly Cost": 26.56,
+        "unit_cost_per_head_per_month": 26.56,
         "Inflation %": 4.0,
     },
     {
         "Year": 2025,
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
-        "Monthly Cost": 27.62,
+        "unit_cost_per_head_per_month": 27.62,
         "Inflation %": 4.0,
     },
     {
         "Year": 2024,
         "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "Monthly Cost": 5.63,
+        "unit_cost_per_head_per_month": 5.63,
         "Inflation %": 3.5,
     },
     {
         "Year": 2025,
         "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "Monthly Cost": 5.83,
+        "unit_cost_per_head_per_month": 5.83,
         "Inflation %": 3.5,
     },
     {
         "Year": 2024,
         "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "Monthly Cost": 3.75,
+        "unit_cost_per_head_per_month": 3.75,
         "Inflation %": 2.0,
     },
     {
         "Year": 2025,
         "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "Monthly Cost": 3.83,
+        "unit_cost_per_head_per_month": 3.83,
         "Inflation %": 2.0,
     },
 ]
@@ -2067,7 +2067,7 @@ def _default_operating_cost_table() -> pd.DataFrame:
     rows = _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS)
     table = _template_to_dataframe(
         rows,
-        ["Year", "Field", "Category", "Monthly Cost", "Inflation %"],
+        ["Year", "Field", "Category", "unit_cost_per_head_per_month", "Inflation %"],
     )
 
     if table.empty:
@@ -2076,7 +2076,7 @@ def _default_operating_cost_table() -> pd.DataFrame:
                 "Year": [pd.Timestamp.today().year],
                 "Field": ["variable_feed_cost_per_herd"],
                 "Category": ["Operating Item"],
-                "Monthly Cost": [np.nan],
+                "unit_cost_per_head_per_month": [np.nan],
                 "Inflation %": [np.nan],
             }
         )
@@ -2111,11 +2111,10 @@ def _ensure_operating_cost_table(
         elif field and (not category or category.lower() == "nan"):
             work.at[idx, "Category"] = OPERATING_COST_FIELD_TO_CATEGORY.get(field, "Operating Item")
     work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
-    alias_unit = pd.to_numeric(work.get("unit_cost_per_head_per_month"), errors="coerce")
-    monthly = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
-    monthly = monthly.where(monthly.notna(), alias_unit)
-    work["Monthly Cost"] = monthly
-    work["unit_cost_per_head_per_month"] = monthly
+    unit_cost = pd.to_numeric(work.get("unit_cost_per_head_per_month"), errors="coerce")
+    # Backward compatibility for historical tables still carrying "Monthly Cost".
+    monthly_legacy = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
+    work["unit_cost_per_head_per_month"] = unit_cost.where(unit_cost.notna(), monthly_legacy)
     work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
 
     work = work.dropna(how="all")
@@ -2139,7 +2138,6 @@ def _ensure_operating_cost_table(
         "Year",
         "Field",
         "Category",
-        "Monthly Cost",
         "unit_cost_per_head_per_month",
         "Inflation %",
     ]
@@ -2147,7 +2145,7 @@ def _ensure_operating_cost_table(
         if col not in work.columns:
             work[col] = np.nan
 
-    ordered = work[required_cols + [c for c in work.columns if c not in required_cols]]
+    ordered = work[required_cols + [c for c in work.columns if c not in required_cols and c != "Monthly Cost"]]
     return ordered.sort_values(["Field", "Year"], kind="stable").reset_index(drop=True)
 
 
@@ -2163,7 +2161,6 @@ def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
         "Year": default_year,
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
-        "Monthly Cost": np.nan,
         "unit_cost_per_head_per_month": np.nan,
         "Inflation %": np.nan,
     }
@@ -2183,7 +2180,7 @@ def _apply_operating_cost_increment(
     table: pd.DataFrame,
     increment_pct: float,
     target_category: Optional[str] = None,
-    column: str = "Monthly Cost",
+    column: str = "unit_cost_per_head_per_month",
 ) -> pd.DataFrame:
     if table is None or table.empty or increment_pct == 0:
         return table
@@ -2226,13 +2223,9 @@ def _apply_operating_cost_increment(
 
             work.at[idx, column] = last_value
 
-    if "Monthly Cost" in work.columns:
-        work["Monthly Cost"] = pd.to_numeric(work["Monthly Cost"], errors="coerce")
-        work["unit_cost_per_head_per_month"] = work["Monthly Cost"]
-    if column == "unit_cost_per_head_per_month":
-        work["Monthly Cost"] = pd.to_numeric(
-            work["unit_cost_per_head_per_month"], errors="coerce"
-        )
+    work["unit_cost_per_head_per_month"] = pd.to_numeric(
+        work["unit_cost_per_head_per_month"], errors="coerce"
+    )
 
     return work.sort_values(["Field", "Year"], kind="stable").reset_index(drop=True)
 
@@ -7410,7 +7403,9 @@ def main() -> None:
 
         st.session_state.setdefault("operating_remove_choice", "-- Select Item --")
         st.session_state.setdefault("operating_increment_target", "All categories")
-        st.session_state.setdefault("operating_increment_column", "Monthly Cost")
+        st.session_state.setdefault(
+            "operating_increment_column", "unit_cost_per_head_per_month"
+        )
         st.session_state.setdefault("operating_increment_pct", 0.0)
 
         add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
@@ -7469,7 +7464,7 @@ def main() -> None:
 
         inc_column_col.selectbox(
             "Column",
-            options=["Monthly Cost", "unit_cost_per_head_per_month", "Inflation %"],
+            options=["unit_cost_per_head_per_month", "Inflation %"],
             key="operating_increment_column",
         )
 
@@ -7486,7 +7481,9 @@ def main() -> None:
                 operating_table,
                 st.session_state.get("operating_increment_pct", 0.0),
                 st.session_state.get("operating_increment_target"),
-                st.session_state.get("operating_increment_column", "Monthly Cost"),
+                st.session_state.get(
+                    "operating_increment_column", "unit_cost_per_head_per_month"
+                ),
             )
             st.session_state.assumptions["Operating Costs"] = operating_table
             _clear_schedule_editor_state("assump::operating_costs")
@@ -7522,7 +7519,6 @@ def main() -> None:
                 "Year",
                 "Field",
                 "Category",
-                "Monthly Cost",
                 "unit_cost_per_head_per_month",
                 "Inflation %",
             ]
@@ -7541,11 +7537,8 @@ def main() -> None:
                 column_config={
                     "Year": st.column_config.NumberColumn("Year", step=1),
                     "Field": st.column_config.TextColumn("Field"),
-                    "Monthly Cost": st.column_config.NumberColumn(
-                        "Unit Cost / Head / Month", format="%.4f"
-                    ),
                     "unit_cost_per_head_per_month": st.column_config.NumberColumn(
-                        "Unit Cost / Head / Month (Alias)", format="%.4f"
+                        "Unit Cost / Head / Month", format="%.4f"
                     ),
                     "Inflation %": st.column_config.NumberColumn(
                         "Inflation (%)", format="%.2f"
