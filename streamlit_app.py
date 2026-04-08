@@ -2291,20 +2291,7 @@ def _apply_operating_cost_assumptions_to_schedule(
         else:
             work["Fixed Expenses"] = utility
 
-    if {"Revenue", "COGS"}.issubset(work.columns):
-        work["Gross Margin"] = pd.to_numeric(work["Revenue"], errors="coerce") - pd.to_numeric(
-            work["COGS"], errors="coerce"
-        )
-    if {"Gross Margin", "Variable Expenses", "Fixed Expenses", "Direct Wages", "Admin Wages"}.issubset(work.columns):
-        work["EBITDA"] = (
-            pd.to_numeric(work["Gross Margin"], errors="coerce")
-            - pd.to_numeric(work["Variable Expenses"], errors="coerce")
-            - pd.to_numeric(work["Fixed Expenses"], errors="coerce")
-            - pd.to_numeric(work["Direct Wages"], errors="coerce")
-            - pd.to_numeric(work["Admin Wages"], errors="coerce")
-        )
-
-    return work
+    return _synchronize_financial_algorithms(work)
 
 
 def _default_herd_plan_table() -> pd.DataFrame:
@@ -2407,10 +2394,7 @@ def _apply_herd_plan_to_schedule(schedule_df: pd.DataFrame, herd_plan: Optional[
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce") * multipliers
 
-    if {"Revenue", "COGS"}.issubset(work.columns):
-        work["Gross Margin"] = work["Revenue"] - work["COGS"]
-
-    return work
+    return _synchronize_financial_algorithms(work)
 
 
 def _revenue_map(core: pd.DataFrame) -> Dict[str, float]:
@@ -4302,6 +4286,68 @@ def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
     return values.sort_index()
 
 
+def _synchronize_financial_algorithms(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    numeric_cols = [
+        "Revenue",
+        "COGS",
+        "Gross Margin",
+        "Variable Expenses",
+        "Fixed Expenses",
+        "Direct Wages",
+        "Admin Wages",
+        "EBITDA",
+        "Depreciation & Amortization",
+        "EBIT",
+        "Interest Expense",
+        "NPBT",
+        "Tax Expense",
+        "NPAT",
+        "CFO",
+        "CFI",
+        "CFF",
+        "Net Cash Flow",
+        "Opening Cash Balance",
+        "Closing Cash Balance",
+        "Cash and Cash Equivalents",
+    ]
+    for col in numeric_cols:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    if {"Revenue", "COGS"}.issubset(work.columns):
+        work["Gross Margin"] = work["Revenue"] - work["COGS"]
+    if {"Gross Margin", "Variable Expenses", "Fixed Expenses", "Direct Wages", "Admin Wages"}.issubset(work.columns):
+        work["EBITDA"] = (
+            work["Gross Margin"]
+            - work["Variable Expenses"].fillna(0)
+            - work["Fixed Expenses"].fillna(0)
+            - work["Direct Wages"].fillna(0)
+            - work["Admin Wages"].fillna(0)
+        )
+    if {"EBITDA", "Depreciation & Amortization"}.issubset(work.columns):
+        work["EBIT"] = work["EBITDA"] - work["Depreciation & Amortization"].fillna(0)
+    if {"EBIT", "Interest Expense"}.issubset(work.columns):
+        work["NPBT"] = work["EBIT"] - work["Interest Expense"].fillna(0)
+    if {"NPBT", "Tax Expense"}.issubset(work.columns):
+        tax_ratio = pd.Series(0.28, index=work.index)
+        if work["NPBT"].notna().any():
+            implied = work["Tax Expense"] / work["NPBT"].replace(0, np.nan)
+            implied = implied.replace([np.inf, -np.inf], np.nan).dropna()
+            if not implied.empty:
+                tax_ratio[:] = float(np.clip(implied.median(), 0.0, 0.6))
+        work["Tax Expense"] = np.maximum(work["NPBT"], 0.0) * tax_ratio
+        work["NPAT"] = work["NPBT"] - work["Tax Expense"]
+    if {"CFO", "CFI", "CFF"}.issubset(work.columns):
+        work["Net Cash Flow"] = work[["CFO", "CFI", "CFF"]].sum(axis=1, min_count=1)
+    if {"Opening Cash Balance", "Net Cash Flow"}.issubset(work.columns):
+        opening = work["Opening Cash Balance"].ffill()
+        work["Closing Cash Balance"] = opening + work["Net Cash Flow"].fillna(0.0)
+        if "Cash and Cash Equivalents" in work.columns:
+            work["Cash and Cash Equivalents"] = work["Closing Cash Balance"]
+    return work
+
+
 def _assemble_schedule(
     core: pd.DataFrame, detail_tables: Dict[str, pd.DataFrame]
 ) -> pd.DataFrame:
@@ -4358,41 +4404,7 @@ def _assemble_schedule(
         if col not in combined.columns:
             combined[col] = np.nan
 
-    if {"Revenue", "COGS"}.issubset(combined.columns):
-        combined["Gross Margin"] = combined["Revenue"] - combined["COGS"]
-
-    if {
-        "Gross Margin",
-        "Variable Expenses",
-        "Fixed Expenses",
-        "Direct Wages",
-        "Admin Wages",
-    }.issubset(combined.columns):
-        combined["EBITDA"] = (
-            combined["Gross Margin"]
-            - combined["Variable Expenses"].fillna(0)
-            - combined["Fixed Expenses"].fillna(0)
-            - combined["Direct Wages"].fillna(0)
-            - combined["Admin Wages"].fillna(0)
-        )
-
-    if {"EBITDA", "Depreciation & Amortization"}.issubset(combined.columns):
-        combined["EBIT"] = combined["EBITDA"] - combined["Depreciation & Amortization"].fillna(0)
-
-    if "Interest Expense" not in combined.columns or combined["Interest Expense"].isna().all():
-        if {"EBIT", "NPBT"}.issubset(combined.columns):
-            combined["Interest Expense"] = (
-                combined["EBIT"] - combined["NPBT"]
-            )
-
-    if "Tax Expense" not in combined.columns or combined["Tax Expense"].isna().all():
-        if {"NPBT", "NPAT"}.issubset(combined.columns):
-            combined["Tax Expense"] = combined["NPBT"] - combined["NPAT"]
-
-    if {"CFO", "CFI", "CFF"}.issubset(combined.columns):
-        combined["Net Cash Flow"] = combined[["CFO", "CFI", "CFF"]].sum(
-            axis=1, min_count=1
-        )
+    combined = _synchronize_financial_algorithms(combined)
 
     ordered_columns = [
         "Revenue",
