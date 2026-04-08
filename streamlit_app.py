@@ -4307,7 +4307,22 @@ def _assemble_schedule(
 ) -> pd.DataFrame:
     combined = core.copy()
     for table in detail_tables.values():
-        combined = combined.join(table, how="outer")
+        if table is None or table.empty:
+            continue
+        detail = table.copy()
+        union_index = combined.index.union(detail.index)
+        combined = combined.reindex(union_index)
+        detail = detail.reindex(union_index)
+
+        overlap = [col for col in detail.columns if col in combined.columns]
+        new_cols = [col for col in detail.columns if col not in combined.columns]
+
+        for col in overlap:
+            combined[col] = pd.to_numeric(detail[col], errors="coerce").combine_first(
+                pd.to_numeric(combined[col], errors="coerce")
+            )
+        for col in new_cols:
+            combined[col] = detail[col]
 
     required_columns = [
         "Revenue",
