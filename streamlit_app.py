@@ -108,8 +108,9 @@ AI_PROVIDER_OPTIONS = ("OpenAI", "Azure OpenAI", "Anthropic")
 
 DEFAULT_VALUATION_INPUTS = {
     "WACC": 0.12,
-    "NPV": 750000.0,
-    "Terminal Value": 1500000.0,
+    "NPV": 0.0,
+    "IRR": 0.0,
+    "Terminal Value": 0.0,
 }
 
 ML_METHOD_LABELS = {
@@ -4073,11 +4074,78 @@ def _ensure_capital_financing_table(
     return work[ordered_cols + remainder].reset_index(drop=True)
 
 
+def _estimate_default_wacc_from_capital_table() -> float:
+    cap_table = _default_capital_financing_table()
+    amounts = pd.to_numeric(cap_table.get("Amount"), errors="coerce")
+    returns = pd.to_numeric(cap_table.get("Interest/Return %"), errors="coerce") / 100.0
+    valid = amounts.notna() & returns.notna() & (amounts > 0)
+    if not valid.any():
+        return float(DEFAULT_VALUATION_INPUTS.get("WACC", 0.12))
+    total = float(amounts[valid].sum())
+    if total <= 0:
+        return float(DEFAULT_VALUATION_INPUTS.get("WACC", 0.12))
+    weighted = float((amounts[valid] * returns[valid]).sum() / total)
+    return weighted if np.isfinite(weighted) and weighted > 0 else float(
+        DEFAULT_VALUATION_INPUTS.get("WACC", 0.12)
+    )
+
+
+def _computed_default_valuation_inputs() -> Dict[str, float]:
+    fallback = {k: float(v) for k, v in DEFAULT_VALUATION_INPUTS.items() if pd.notna(v)}
+    try:
+        core, detail_tables = _default_schedule_components()
+        core_prepared = _prepare_timeline_table(core)
+        prepared_details: Dict[str, pd.DataFrame] = {}
+        for name, table in detail_tables.items():
+            cleaned = _clean_editor_table(table)
+            if cleaned is None:
+                continue
+            prepared_details[name] = _prepare_timeline_table(cleaned)
+        schedule_df = _assemble_schedule(core_prepared, prepared_details)
+
+        ufcf_series = pd.to_numeric(schedule_df.get("Net Cash Flow"), errors="coerce")
+        if ufcf_series.isna().all():
+            ufcf_series = pd.to_numeric(schedule_df.get("CFO"), errors="coerce")
+        ufcf_df = pd.DataFrame(
+            {"Period": schedule_df.index, "UFCF": ufcf_series.to_numpy()}
+        )
+
+        wacc = _estimate_default_wacc_from_capital_table()
+        valid_ufcf = pd.to_numeric(ufcf_df["UFCF"], errors="coerce").dropna()
+        last_ufcf = float(valid_ufcf.iloc[-1]) if not valid_ufcf.empty else 0.0
+        growth_rate = 0.02
+        terminal_value = (
+            (last_ufcf * (1.0 + growth_rate)) / max(wacc - growth_rate, 1e-6)
+            if np.isfinite(last_ufcf)
+            else 0.0
+        )
+
+        valuation_inputs = {"WACC": float(wacc), "Terminal Value": float(terminal_value)}
+        schedule = InputSchedule(
+            data=schedule_df,
+            valuation_inputs=valuation_inputs,
+            supplementary_tables={"UFCF": ufcf_df},
+        )
+        model = schedule.to_model()
+        npv_value = model.computed_npv()
+        irr_value = model.computed_irr()
+        computed = {
+            "WACC": float(wacc),
+            "NPV": float(npv_value) if npv_value is not None else float(fallback.get("NPV", 0.0)),
+            "IRR": float(irr_value) if irr_value is not None else float(fallback.get("IRR", 0.0)),
+            "Terminal Value": float(terminal_value),
+        }
+        return computed
+    except Exception:
+        return fallback
+
+
 def _default_valuation_inputs_table() -> pd.DataFrame:
+    computed_defaults = _computed_default_valuation_inputs()
     return pd.DataFrame(
         {
-            "Metric": list(DEFAULT_VALUATION_INPUTS.keys()),
-            "Value": list(DEFAULT_VALUATION_INPUTS.values()),
+            "Metric": list(computed_defaults.keys()),
+            "Value": list(computed_defaults.values()),
         }
     )
 
