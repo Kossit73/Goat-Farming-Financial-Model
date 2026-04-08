@@ -1392,6 +1392,37 @@ def _dynamic_benchmark_kpis_table(kpi_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _format_kpis_for_display(kpi_df: pd.DataFrame) -> pd.DataFrame:
+    """Format KPI dataframe for UI display with selective percentage scaling."""
+    if kpi_df is None or kpi_df.empty:
+        return pd.DataFrame()
+
+    formatted = kpi_df.copy()
+    for column in formatted.columns:
+        values = pd.to_numeric(formatted[column], errors="coerce")
+        if not values.notna().any():
+            continue
+        is_percent_metric = "%" in str(column) or str(column).strip().upper() in {"IRR", "WACC"}
+        formatted[column] = (values * 100.0) if is_percent_metric else values
+    return formatted.round(2)
+
+
+def _valuation_diagnostic_messages(model: GoatModel) -> List[str]:
+    messages: List[str] = []
+    if model.wacc() is None:
+        messages.append("Valuation input missing: WACC.")
+    if model.terminal_value() is None:
+        messages.append("Valuation input missing: Terminal Value.")
+    try:
+        ufcf = model.ufcf()
+    except ValueError as exc:
+        messages.append(f"UFCF validation issue: {exc}")
+        return messages
+    if ufcf is None or ufcf.empty:
+        messages.append("UFCF series is missing or empty; computed NPV/IRR cannot be derived.")
+    return messages
+
+
 def _execute_scenario_suite(
     schedule_df: pd.DataFrame,
     valuation_inputs: Dict[str, float],
@@ -8043,6 +8074,10 @@ def main() -> None:
         selected_scenario = results.get("selected_scenario", "Scenario")
         model.scenario_name = selected_scenario
 
+        valuation_issues = _valuation_diagnostic_messages(model)
+        if valuation_issues:
+            st.warning("Valuation diagnostics: " + " ".join(f"- {msg}" for msg in valuation_issues))
+
         computed_npv = model.computed_npv() if hasattr(model, "computed_npv") else None
         computed_irr = model.computed_irr() if hasattr(model, "computed_irr") else None
         valuation_metrics = {
@@ -8051,18 +8086,14 @@ def main() -> None:
             "IRR": computed_irr if computed_irr is not None else (model.irr() if hasattr(model, "irr") else None),
             "Terminal Value": model.terminal_value(),
         }
-        non_null_metrics = [val for val in valuation_metrics.values() if val is not None]
-        if non_null_metrics:
-            summary_cols = st.columns(len(non_null_metrics))
-            idx = 0
-            for label, value in valuation_metrics.items():
-                if value is None:
-                    continue
-                if label in {"WACC", "IRR"}:
-                    summary_cols[idx].metric(label, f"{value * 100:.2f}%")
-                else:
-                    summary_cols[idx].metric(label, f"{value:,.2f}")
-                idx += 1
+        summary_cols = st.columns(4)
+        for idx, (label, value) in enumerate(valuation_metrics.items()):
+            if value is None or pd.isna(value):
+                summary_cols[idx].metric(label, "N/A")
+            elif label in {"WACC", "IRR"}:
+                summary_cols[idx].metric(label, f"{value * 100:.2f}%")
+            else:
+                summary_cols[idx].metric(label, f"{value:,.2f}")
 
         excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
         excel_bytes = excel_map.get(selected_scenario)
@@ -8111,7 +8142,7 @@ def main() -> None:
             st.info("Supplementary schedules will appear once a scenario has been run.")
         else:
             st.subheader("KPIs (Annual)")
-            st.dataframe(kpis.mul(100).round(2))
+            st.dataframe(_format_kpis_for_display(kpis))
 
             scenario = results["scenario"]
             break_even = results["break_even"]
