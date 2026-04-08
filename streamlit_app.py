@@ -2460,6 +2460,51 @@ def _ensure_cogs_schedule(
     return _sync_cogs_table(table, core, default_pct=default_pct)
 
 
+def _sync_cogs_from_operating_assumptions(
+    cogs_table: pd.DataFrame,
+    core_schedule: pd.DataFrame,
+    assumptions: Optional[Dict[str, pd.DataFrame]] = None,
+    default_pct: float = 45.0,
+) -> pd.DataFrame:
+    """Project COGS from Herd Plan + Operating Costs and sync COGS/% rows by period."""
+    if cogs_table is None or cogs_table.empty or core_schedule is None or core_schedule.empty:
+        return cogs_table
+
+    assumptions_map = assumptions or {}
+    herd_plan = assumptions_map.get("Herd Plan")
+    operating_costs = assumptions_map.get("Operating Costs")
+    if not isinstance(operating_costs, pd.DataFrame) or operating_costs.empty:
+        return _sync_cogs_table(cogs_table, core_schedule, default_pct=default_pct)
+
+    projected = core_schedule.copy()
+    if "Period" in projected.columns:
+        period_values = pd.to_datetime(projected["Period"], errors="coerce")
+        projected = projected.set_index(period_values)
+    projected.index = pd.to_datetime(projected.index, errors="coerce")
+    projected = projected.loc[projected.index.notna()].sort_index()
+    if projected.empty:
+        return _sync_cogs_table(cogs_table, core_schedule, default_pct=default_pct)
+
+    if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+        projected = _apply_herd_plan_to_schedule(projected, herd_plan)
+    projected = _apply_operating_cost_assumptions_to_schedule(projected, operating_costs)
+
+    mapped = cogs_table.copy()
+    mapped["Period"] = _normalize_period(mapped.get("Period", pd.Series(dtype=str)))
+    projected_map = {
+        idx.strftime("%Y-%m-%d"): float(value)
+        for idx, value in zip(
+            projected.index,
+            pd.to_numeric(projected.get("COGS"), errors="coerce"),
+        )
+        if pd.notna(idx) and pd.notna(value)
+    }
+    mapped["COGS"] = mapped["Period"].map(projected_map).combine_first(
+        pd.to_numeric(mapped.get("COGS"), errors="coerce")
+    )
+    return _sync_cogs_table(mapped, core_schedule, default_pct=default_pct)
+
+
 # ---------- Direct wages helpers ----------
 
 
@@ -6310,6 +6355,11 @@ def main() -> None:
                     cogs_table = _ensure_cogs_schedule(
                         st.session_state.detail_schedules.get(name, pd.DataFrame()),
                         st.session_state.core_schedule,
+                    )
+                    cogs_table = _sync_cogs_from_operating_assumptions(
+                        cogs_table,
+                        st.session_state.core_schedule,
+                        st.session_state.get("assumptions"),
                     )
                     st.session_state.detail_schedules[name] = cogs_table
 
