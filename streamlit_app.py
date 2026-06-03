@@ -13,6 +13,9 @@ from copy import deepcopy
 import numpy as np
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from pandas.api.types import (
     is_bool_dtype,
     is_datetime64_any_dtype,
@@ -134,6 +137,230 @@ DEFAULT_MODEL_AUTHOR = "Goat Farmers United"
 MODEL_AUTHOR_KEY = "model_author"
 MODEL_AUTHOR_WIDGET_KEY = "_model_author_widget"
 MODEL_AUTHOR_CACHE_KEY = "_model_author_cached"
+
+
+def _inject_app_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --goat-ink: #1f2937;
+            --goat-muted: #4b5563;
+            --goat-brand: #0f766e;
+            --goat-brand-soft: #e8f7f3;
+            --goat-panel: rgba(255, 255, 255, 0.88);
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(187, 247, 208, 0.28), transparent 34%),
+                radial-gradient(circle at top right, rgba(191, 219, 254, 0.22), transparent 28%),
+                linear-gradient(180deg, #f4fbf8 0%, #f5f7fb 58%, #eef6f4 100%);
+        }
+        .block-container {
+            padding-top: 1.35rem;
+            padding-bottom: 3rem;
+            max-width: 1440px;
+        }
+        .designer-hero {
+            margin-bottom: 1.2rem;
+            padding: 1.7rem 1.8rem;
+            border-radius: 28px;
+            border: 1px solid rgba(15, 118, 110, 0.12);
+            background:
+                linear-gradient(135deg, rgba(232, 247, 243, 0.95), rgba(255, 255, 255, 0.94)),
+                linear-gradient(135deg, rgba(15, 118, 110, 0.05), rgba(59, 130, 246, 0.07));
+            box-shadow: 0 24px 48px rgba(15, 23, 42, 0.08);
+        }
+        .designer-kicker {
+            margin: 0 0 0.45rem 0;
+            font-size: 0.78rem;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--goat-brand);
+            font-weight: 700;
+        }
+        .designer-title {
+            margin: 0;
+            font-size: clamp(2rem, 2.8vw, 3.1rem);
+            line-height: 1.04;
+            color: var(--goat-ink);
+            font-weight: 800;
+        }
+        .designer-copy {
+            max-width: 54rem;
+            margin: 0.7rem 0 0 0;
+            color: var(--goat-muted);
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+        .designer-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.55rem;
+            margin-top: 1rem;
+        }
+        .designer-badge {
+            padding: 0.42rem 0.78rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.92);
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            color: var(--goat-brand);
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+        div[data-baseweb="tab-list"] {
+            gap: 0.55rem;
+            margin-bottom: 1rem;
+        }
+        div[data-baseweb="tab-list"] button {
+            min-height: 3rem;
+            border-radius: 999px;
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            background: rgba(255, 255, 255, 0.72);
+            color: var(--goat-muted);
+            padding: 0.25rem 1rem;
+        }
+        div[data-baseweb="tab-list"] button[aria-selected="true"] {
+            background: linear-gradient(135deg, #0f766e, #2563eb);
+            color: white;
+            border-color: transparent;
+            box-shadow: 0 12px 24px rgba(37, 99, 235, 0.16);
+        }
+        div[data-testid="stMetric"],
+        div[data-testid="stDataFrame"],
+        div[data-testid="stExpander"] {
+            border-radius: 20px;
+        }
+        div[data-testid="stMetric"] {
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            background: var(--goat-panel);
+            padding: 0.6rem 0.7rem;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_model_hero() -> None:
+    badges = "".join(
+        f'<span class="designer-badge">{label}</span>'
+        for label in (
+            "Scenario dashboard",
+            "Professional workbook",
+            "Financial statements",
+            "AI decision support",
+        )
+    )
+    st.markdown(
+        f"""
+        <section class="designer-hero">
+            <p class="designer-kicker">Livestock finance planning</p>
+            <h1 class="designer-title">Goat Farm Financial Model</h1>
+            <p class="designer-copy">
+                Build a cleaner decision environment for herd growth, pricing, costs, financing, and
+                investor reporting with a structured dashboard and polished export pack.
+            </p>
+            <div class="designer-badges">{badges}</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _style_workbook_sheet(ws, *, accent: str, accent_soft: str, is_overview: bool = False) -> None:
+    ws.sheet_view.showGridLines = False
+    if is_overview:
+        ws.freeze_panes = "A6"
+    elif ws.max_row > 1:
+        ws.freeze_panes = "A2"
+        for cell in ws[1]:
+            cell.fill = PatternFill("solid", fgColor=accent)
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.auto_filter.ref = ws.dimensions
+        for row_idx in range(2, min(ws.max_row, 120) + 1):
+            if row_idx % 2 == 0:
+                for cell in ws[row_idx]:
+                    cell.fill = PatternFill("solid", fgColor=accent_soft)
+    for col_idx in range(1, ws.max_column + 1):
+        max_length = 0
+        for row_idx in range(1, min(ws.max_row, 80) + 1):
+            value = ws.cell(row=row_idx, column=col_idx).value
+            if value is None:
+                continue
+            max_length = max(max_length, len(str(value)))
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(max_length + 2, 14), 34)
+
+
+def _build_workbook_summary(results: Dict[str, Any], scenario_name: str) -> List[Tuple[str, object]]:
+    summary: List[Tuple[str, object]] = [("Scenario", scenario_name)]
+    kpis = results.get("kpis")
+    if isinstance(kpis, pd.DataFrame) and not kpis.empty:
+        for column in kpis.columns[:6]:
+            numeric = pd.to_numeric(kpis[column], errors="coerce")
+            if numeric.notna().any():
+                value = float(numeric.iloc[0])
+                if "margin" in str(column).lower() or "irr" in str(column).lower():
+                    summary.append((str(column), f"{value:.1%}"))
+                else:
+                    summary.append((str(column), f"{value:,.2f}"))
+    summary.append(("Prepared By", results.get("scenario_inputs", {}).get("Model author", DEFAULT_MODEL_AUTHOR)))
+    return summary[:8]
+
+
+def _style_professional_workbook(
+    workbook_bytes: bytes,
+    *,
+    scenario_name: str,
+    results: Dict[str, Any],
+) -> bytes:
+    workbook = load_workbook(BytesIO(workbook_bytes))
+    accent = "0F766E"
+    accent_soft = "E8F7F3"
+    if "Overview" in workbook.sheetnames:
+        del workbook["Overview"]
+    overview = workbook.create_sheet("Overview", 0)
+    overview["A1"] = "Goat Farm Financial Model"
+    overview["A1"].font = Font(size=20, bold=True, color="1F2937")
+    overview["A2"] = "Scenario-led workbook covering input schedules, annual KPIs, break-even, and full statements."
+    overview["A2"].font = Font(size=11, color="4B5563")
+    overview["A4"] = "Executive Snapshot"
+    overview["A4"].font = Font(size=12, bold=True, color=accent)
+    overview["A5"] = "Metric"
+    overview["B5"] = "Value"
+    for cell in overview[5]:
+        cell.fill = PatternFill("solid", fgColor=accent)
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for row_idx, (label, value) in enumerate(_build_workbook_summary(results, scenario_name), start=6):
+        overview.cell(row=row_idx, column=1, value=label)
+        overview.cell(row=row_idx, column=2, value=value)
+    overview["D4"] = "Workbook Notes"
+    overview["D4"].font = Font(size=12, bold=True, color=accent)
+    notes = [
+        "The overview isolates the selected scenario and its KPI profile.",
+        "Detailed statement tabs remain available for lender diligence and board review.",
+        "Scenario inputs and supplementary tables are preserved for auditability.",
+    ]
+    for row_idx, note in enumerate(notes, start=5):
+        overview.cell(row=row_idx, column=4, value=f"• {note}")
+    overview.column_dimensions["A"].width = 28
+    overview.column_dimensions["B"].width = 18
+    overview.column_dimensions["D"].width = 58
+
+    for sheet in workbook.worksheets:
+        _style_workbook_sheet(
+            sheet,
+            accent=accent,
+            accent_soft=accent_soft,
+            is_overview=sheet.title == "Overview",
+        )
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def _sanitize_model_author_value(value: Any) -> str:
@@ -1722,7 +1949,11 @@ def _generate_excel_bytes(
         write_sheet("Scenario Details", metadata_df)
 
     buffer.seek(0)
-    return buffer.getvalue()
+    return _style_professional_workbook(
+        buffer.getvalue(),
+        scenario_name=scenario_name,
+        results=results,
+    )
 
 
 DEFAULT_VARIABLE_ITEMS = [
@@ -5987,7 +6218,8 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
 
 
 def main() -> None:
-    st.title("🐐 Goat Farm Financial Model — Interactive Scenario Dashboard")
+    _inject_app_theme()
+    _render_model_hero()
 
     if "schedule" in st.session_state:
         st.session_state.pop("schedule")
