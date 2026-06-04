@@ -230,6 +230,54 @@ def test_default_direct_wage_schedule_rolls_up_itemised_positions():
     _reset_local_state()
 
 
+def test_admin_wage_template_normalization_recomputes_itemised_totals():
+    records = streamlit_app._normalize_admin_wage_template_records(
+        [
+            {
+                "Position": "Administration",
+                "Head Count": 2.0,
+                "Monthly Salary per Head": 900.0,
+                "Total Salary": 0.0,
+            }
+        ]
+    )
+
+    assert records == [
+        {
+            "Position": "Administration",
+            "Head Count": 2.0,
+            "Monthly Salary per Head": 900.0,
+            "Total Salary": 1800.0,
+        }
+    ]
+
+
+def test_default_admin_wage_schedule_rolls_up_itemised_positions():
+    _reset_local_state()
+
+    core = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-02-28"],
+            "Admin Wages": [3500.0, 3500.0],
+        }
+    )
+
+    table = streamlit_app._default_admin_wage_table(core)
+    summary = streamlit_app._aggregate_admin_wages(table, core)
+
+    assert {
+        "Period",
+        "Position",
+        "Head Count",
+        "Monthly Salary per Head",
+        "Total Salary",
+    }.issubset(table.columns)
+    assert table.loc[table["Period"] == "2026-01-31", "Total Salary"].sum() == 3500.0
+    assert summary["Admin Wages"].tolist() == [3500.0, 3500.0]
+
+    _reset_local_state()
+
+
 def test_standalone_app_bootstraps_and_runs_without_top_level_exceptions():
     repo_root = _STREAMLIT_APP_PATH.parent
     command = [

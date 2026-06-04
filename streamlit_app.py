@@ -2130,9 +2130,24 @@ DEFAULT_DIRECT_WAGE_ITEMS = [
 
 
 DEFAULT_ADMIN_WAGE_ITEMS = [
-    {"Function": "Administration", "Share %": 40.0},
-    {"Function": "Finance & Compliance", "Share %": 35.0},
-    {"Function": "Sales & Support", "Share %": 25.0},
+    {
+        "Position": "Administration",
+        "Head Count": 1.0,
+        "Monthly Salary per Head": 1400.0,
+        "Total Salary": 1400.0,
+    },
+    {
+        "Position": "Finance & Compliance",
+        "Head Count": 1.0,
+        "Monthly Salary per Head": 1200.0,
+        "Total Salary": 1200.0,
+    },
+    {
+        "Position": "Sales & Support",
+        "Head Count": 1.0,
+        "Monthly Salary per Head": 900.0,
+        "Total Salary": 900.0,
+    },
 ]
 
 
@@ -2414,20 +2429,78 @@ def _direct_wage_default_items() -> list[dict[str, Any]]:
     return roles
 
 
-def _admin_wage_default_items() -> list[tuple[str, Optional[float]]]:
-    functions: list[tuple[str, Optional[float]]] = []
+def _coerce_admin_wage_item(
+    row: Any, *, include_share: bool = True
+) -> dict[str, Any]:
+    position = (
+        str(row.get("Position") or row.get("Function") or row.get("Role") or "").strip()
+        or "Admin Wage"
+    )
+    headcount = pd.to_numeric(
+        pd.Series([row.get("Head Count")]), errors="coerce"
+    ).iloc[0]
+    monthly_salary = pd.to_numeric(
+        pd.Series([row.get("Monthly Salary per Head")]), errors="coerce"
+    ).iloc[0]
+    total_salary = pd.to_numeric(
+        pd.Series([row.get("Total Salary") or row.get("Amount")]), errors="coerce"
+    ).iloc[0]
+    share_value = pd.to_numeric(
+        pd.Series([row.get("Share %")]), errors="coerce"
+    ).iloc[0]
+    share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+
+    if pd.isna(headcount) and (
+        not pd.isna(monthly_salary) or not pd.isna(total_salary) or share is not None
+    ):
+        headcount = 1.0
+
+    if not pd.isna(headcount) and not pd.isna(monthly_salary):
+        total_salary = float(headcount) * float(monthly_salary)
+    elif not pd.isna(total_salary) and not pd.isna(headcount) and headcount > 0:
+        monthly_salary = float(total_salary) / float(headcount)
+
+    item = {
+        "Position": position,
+        "Head Count": None if pd.isna(headcount) else float(headcount),
+        "Monthly Salary per Head": (
+            None if pd.isna(monthly_salary) else float(monthly_salary)
+        ),
+        "Total Salary": None if pd.isna(total_salary) else float(total_salary),
+    }
+    if include_share:
+        item["Share"] = share
+    return item
+
+
+def _normalize_admin_wage_template_records(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for row in rows:
+        normalized = _coerce_admin_wage_item(row, include_share=False)
+        if any(value is not None for value in normalized.values()):
+            records.append(normalized)
+    return records
+
+
+def _admin_wage_default_items() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
     for row in _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS):
-        function = str(row.get("Function", "")).strip() or "Admin Wage"
-        share_value = pd.to_numeric(
-            pd.Series([row.get("Share %")]), errors="coerce"
-        ).iloc[0]
-        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
-        functions.append((function, share))
+        items.append(_coerce_admin_wage_item(row))
 
-    if not functions:
-        functions.append(("Admin Wage", None))
+    if not items:
+        items.append(
+            {
+                "Position": "Admin Wage",
+                "Head Count": 1.0,
+                "Monthly Salary per Head": None,
+                "Total Salary": None,
+                "Share": None,
+            }
+        )
 
-    return functions
+    return items
 
 
 def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -3239,40 +3312,67 @@ def _aggregate_direct_wages(
 
 def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
-    totals = pd.to_numeric(core.get("Admin Wages"), errors="coerce")
+    totals_raw = core.get("Admin Wages", pd.Series(dtype=float))
+    totals = pd.to_numeric(totals_raw, errors="coerce")
+    period_multiplier = _direct_wage_period_multiplier(core)
+
     if isinstance(totals, pd.Series):
-        total_values = totals.tolist()
-    elif totals is None:
-        total_values = []
+        total_series = totals.reset_index(drop=True)
     else:
-        try:
-            scalar_total = float(totals)
-            total_values = [scalar_total] * len(periods)
-        except (TypeError, ValueError):
-            total_values = []
+        total_series = pd.Series([totals])
+
+    total_series = total_series.reindex(range(len(periods)), fill_value=np.nan)
+    total_values = total_series.to_list()
 
     rows: list[dict[str, object]] = []
     if periods:
         for idx, period in enumerate(periods):
             total = total_values[idx] if idx < len(total_values) else np.nan
-            for function, share in _admin_wage_default_items():
-                amount = (
-                    total * share
-                    if share is not None and total is not None and not np.isnan(total)
-                    else np.nan
-                )
+            for item in _admin_wage_default_items():
+                headcount = pd.to_numeric(
+                    pd.Series([item.get("Head Count")]), errors="coerce"
+                ).iloc[0]
+                monthly_salary = pd.to_numeric(
+                    pd.Series([item.get("Monthly Salary per Head")]), errors="coerce"
+                ).iloc[0]
+                total_salary = pd.to_numeric(
+                    pd.Series([item.get("Total Salary")]), errors="coerce"
+                ).iloc[0]
+                share = item.get("Share")
+
+                if pd.isna(total_salary) and not pd.isna(monthly_salary) and not pd.isna(headcount):
+                    total_salary = float(headcount) * float(monthly_salary) * period_multiplier
+                elif pd.isna(monthly_salary) and not pd.isna(total_salary):
+                    divisor = float(headcount) if not pd.isna(headcount) and headcount > 0 else 1.0
+                    monthly_salary = float(total_salary) / (divisor * period_multiplier)
+
+                if share is not None and total is not None and not np.isnan(total):
+                    total_salary = float(total) * float(share)
+                    divisor = float(headcount) if not pd.isna(headcount) and headcount > 0 else 1.0
+                    monthly_salary = total_salary / (divisor * period_multiplier)
+
                 rows.append(
                     {
                         "Period": period,
-                        "Function": function,
-                        "Amount": amount,
+                        "Position": item.get("Position", "Admin Wage"),
+                        "Head Count": headcount,
+                        "Monthly Salary per Head": monthly_salary,
+                        "Total Salary": total_salary,
                     }
                 )
 
     if not rows:
         period_type = _infer_period_type_from_schedule(core)
         today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
-        rows.append({"Period": today, "Function": "Admin Wage", "Amount": np.nan})
+        rows.append(
+            {
+                "Period": today,
+                "Position": "Admin Wage",
+                "Head Count": 1.0,
+                "Monthly Salary per Head": np.nan,
+                "Total Salary": np.nan,
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -3284,7 +3384,7 @@ def _ensure_admin_wage_table(
         return _default_admin_wage_table(core)
 
     work = table.copy()
-    if "Admin Wages" in work.columns and "Amount" not in work.columns:
+    if "Admin Wages" in work.columns and "Amount" not in work.columns and "Total Salary" not in work.columns:
         periods = _normalize_period(work.get("Period", pd.Series(dtype=str)))
         totals = pd.to_numeric(work.get("Admin Wages"), errors="coerce")
         if isinstance(totals, pd.Series):
@@ -3299,36 +3399,94 @@ def _ensure_admin_wage_table(
         reconstructed: list[dict[str, object]] = []
         for idx, period in enumerate(periods):
             total = total_values[idx] if idx < len(total_values) else np.nan
-            for function, share in _admin_wage_default_items():
-                amount = (
-                    total * share
-                    if share is not None and total is not None and not np.isnan(total)
-                    else np.nan
-                )
+            for item in _admin_wage_default_items():
+                headcount = pd.to_numeric(
+                    pd.Series([item.get("Head Count")]), errors="coerce"
+                ).iloc[0]
+                monthly_salary = pd.to_numeric(
+                    pd.Series([item.get("Monthly Salary per Head")]), errors="coerce"
+                ).iloc[0]
+                total_salary = pd.to_numeric(
+                    pd.Series([item.get("Total Salary")]), errors="coerce"
+                ).iloc[0]
+                share = item.get("Share")
+
+                if share is not None and total is not None and not np.isnan(total):
+                    total_salary = float(total) * float(share)
+                    divisor = float(headcount) if not pd.isna(headcount) and headcount > 0 else 1.0
+                    monthly_salary = total_salary / (
+                        divisor * _direct_wage_period_multiplier(pd.DataFrame({"Period": periods}))
+                    )
                 reconstructed.append(
                     {
                         "Period": period,
-                        "Function": function,
-                        "Amount": amount,
+                        "Position": item.get("Position", "Admin Wage"),
+                        "Head Count": headcount,
+                        "Monthly Salary per Head": monthly_salary,
+                        "Total Salary": total_salary,
                     }
                 )
         work = pd.DataFrame(reconstructed)
 
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
-    if "Function" not in work.columns and "Role" in work.columns:
-        work["Function"] = work["Role"]
-    work["Function"] = work.get("Function", "").astype(str).str.strip()
-    work.loc[work["Function"] == "", "Function"] = "Admin Wage"
-    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+    if "Position" not in work.columns:
+        if "Function" in work.columns:
+            work["Position"] = work["Function"]
+        elif "Role" in work.columns:
+            work["Position"] = work["Role"]
+        else:
+            work["Position"] = ""
+    work["Position"] = work.get("Position", "").astype(str).str.strip()
+    work.loc[work["Position"] == "", "Position"] = "Admin Wage"
+
+    if "Head Count" not in work.columns:
+        work["Head Count"] = 1.0
+    work["Head Count"] = pd.to_numeric(work.get("Head Count"), errors="coerce")
+
+    if "Monthly Salary per Head" not in work.columns:
+        work["Monthly Salary per Head"] = np.nan
+    work["Monthly Salary per Head"] = pd.to_numeric(
+        work.get("Monthly Salary per Head"), errors="coerce"
+    )
+
+    if "Total Salary" not in work.columns:
+        work["Total Salary"] = work.get("Amount", np.nan)
+    work["Total Salary"] = pd.to_numeric(work.get("Total Salary"), errors="coerce")
+
+    period_multiplier = _direct_wage_period_multiplier(work)
+    divisor = work["Head Count"].where(work["Head Count"] > 0, 1.0)
+    missing_monthly = work["Monthly Salary per Head"].isna() & work["Total Salary"].notna()
+    work.loc[missing_monthly, "Monthly Salary per Head"] = (
+        work.loc[missing_monthly, "Total Salary"] / (divisor.loc[missing_monthly] * period_multiplier)
+    )
+    computable_total = work["Head Count"].notna() & work["Monthly Salary per Head"].notna()
+    work.loc[computable_total, "Total Salary"] = (
+        work.loc[computable_total, "Head Count"]
+        * work.loc[computable_total, "Monthly Salary per Head"]
+        * period_multiplier
+    )
 
     work = work.dropna(how="all")
-    work = work[(work["Function"].notna()) | (work["Amount"].notna())]
+    work = work[
+        (work["Position"].notna())
+        | (work["Head Count"].notna())
+        | (work["Monthly Salary per Head"].notna())
+        | (work["Total Salary"].notna())
+    ]
     work = work.dropna(subset=["Period"], how="all")
 
     if work.empty:
         return _default_admin_wage_table(core)
 
-    return work.reset_index(drop=True)
+    ordered_cols = [
+        "Period",
+        "Position",
+        "Head Count",
+        "Monthly Salary per Head",
+        "Total Salary",
+    ]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
 
 
 def _add_admin_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame:
@@ -3347,8 +3505,10 @@ def _add_admin_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame
 
     new_row = {
         "Period": default_period,
-        "Function": f"Admin Wage Item {len(work) + 1}",
-        "Amount": np.nan,
+        "Position": f"Admin Wage Position {len(work) + 1}",
+        "Head Count": 1.0,
+        "Monthly Salary per Head": np.nan,
+        "Total Salary": np.nan,
     }
     return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
 
@@ -3363,33 +3523,35 @@ def _remove_admin_wage_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
 
 
 def _apply_admin_wage_increment(
-    table: pd.DataFrame, increment_pct: float, target_function: Optional[str] = None
+    table: pd.DataFrame, increment_pct: float, target_position: Optional[str] = None
 ) -> pd.DataFrame:
     if table is None or table.empty or increment_pct == 0:
         return table
 
-    work = table.copy()
+    work = _ensure_admin_wage_table(table, pd.DataFrame({"Period": table.get("Period", pd.Series(dtype=str))}))
     work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
-    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
-    work["Function"] = work.get("Function", "").astype(str).str.strip()
+    work["Monthly Salary per Head"] = pd.to_numeric(
+        work.get("Monthly Salary per Head"), errors="coerce"
+    )
+    work["Position"] = work.get("Position", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
 
-    def _should_update(function: str) -> bool:
-        if not target_function or target_function == "All functions":
+    def _should_update(position: str) -> bool:
+        if not target_position or target_position == "All positions":
             return True
-        return function == target_function
+        return position == target_position
 
-    for function, group in work.groupby("Function", dropna=False):
-        function_key = function if isinstance(function, str) else ""
-        if not _should_update(function_key):
+    for position, group in work.groupby("Position", dropna=False):
+        position_key = position if isinstance(position, str) else ""
+        if not _should_update(position_key):
             continue
         group = group.sort_values("Period_dt", kind="stable")
         prev_amount = None
         prev_year = None
         for idx, row in group.iterrows():
             period_dt = row["Period_dt"]
-            amount = row["Amount"]
+            amount = row["Monthly Salary per Head"]
             if pd.isna(period_dt):
                 continue
             year = int(period_dt.year)
@@ -3406,11 +3568,12 @@ def _apply_admin_wage_increment(
                     prev_year = year
                 continue
             new_amount = prev_amount * (increment_factor ** year_gap)
-            work.at[idx, "Amount"] = new_amount
+            work.at[idx, "Monthly Salary per Head"] = new_amount
             prev_amount = new_amount
             prev_year = year
 
-    return work.drop(columns="Period_dt")
+    work = work.drop(columns="Period_dt")
+    return _ensure_admin_wage_table(work, pd.DataFrame({"Period": work.get("Period", pd.Series(dtype=str))}))
 
 
 def _aggregate_admin_wages(
@@ -3419,12 +3582,12 @@ def _aggregate_admin_wages(
     work = _ensure_admin_wage_table(table, core)
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
     summary = (
-        work.groupby("Period", as_index=False)["Amount"].sum(min_count=1)
+        work.groupby("Period", as_index=False)["Total Salary"].sum(min_count=1)
         if not work.empty
-        else pd.DataFrame(columns=["Period", "Amount"])
+        else pd.DataFrame(columns=["Period", "Total Salary"])
     )
     result = pd.DataFrame({"Period": periods})
-    summary_map = dict(zip(summary.get("Period", []), summary.get("Amount", [])))
+    summary_map = dict(zip(summary.get("Period", []), summary.get("Total Salary", [])))
     result["Admin Wages"] = result["Period"].map(summary_map)
     if result["Admin Wages"].notna().any():
         result["Admin Wages"] = result["Admin Wages"].astype(float)
@@ -7623,8 +7786,8 @@ def main() -> None:
                 elif name == "Admin Wages Schedule":
                     st.markdown("#### Admin Wages Schedule")
                     st.caption(
-                        "Detail administrative wage items, add or remove roles, and apply yearly increments to keep overhead "
-                        "assumptions in sync with your operating plan. Totals automatically roll into the income statement."
+                        "Capture administrative labour by position, headcount, and monthly salary per head. Position totals "
+                        "roll up automatically into the income statement."
                     )
 
                     admin_table = _ensure_admin_wage_table(
@@ -7634,7 +7797,7 @@ def main() -> None:
                     st.session_state.detail_schedules[name] = admin_table
 
                     st.session_state.setdefault("admin_wage_remove_choice", "-- Select Row --")
-                    st.session_state.setdefault("admin_wage_increment_target", "All functions")
+                    st.session_state.setdefault("admin_wage_increment_target", "All positions")
                     st.session_state.setdefault("admin_wage_increment_pct", 0.0)
 
                     add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
@@ -7650,7 +7813,7 @@ def main() -> None:
                     option_index: Dict[str, int] = {}
                     for idx_row, row in admin_table.iterrows():
                         label_period = row.get("Period") or "Unknown Period"
-                        label_role = row.get("Function") or "Function"
+                        label_role = row.get("Position") or row.get("Function") or "Position"
                         label = f"{label_period} – {label_role}"
                         option_labels.append(label)
                         option_index[label] = idx_row
@@ -7671,10 +7834,10 @@ def main() -> None:
                             _clear_schedule_editor_state("detail::admin_wages")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
-                    target_options = ["All functions"] + sorted(
+                    target_options = ["All positions"] + sorted(
                         {
                             str(function)
-                            for function in admin_table.get("Function", pd.Series(dtype=str))
+                            for function in admin_table.get("Position", pd.Series(dtype=str))
                             .dropna()
                             .unique()
                             .tolist()
@@ -7730,10 +7893,16 @@ def main() -> None:
                     if st.session_state.admin_defaults_edit_mode:
                         st.markdown("##### Default Admin Wage Template")
                         st.caption(
-                            "Maintain the default administrative wage allocation used when rebuilding schedules."
+                            "Adjust the baseline administrative positions, headcount, and monthly salary per head "
+                            "used when rebuilding schedules."
                         )
 
-                        admin_columns = ["Function", "Share %"]
+                        admin_columns = [
+                            "Position",
+                            "Head Count",
+                            "Monthly Salary per Head",
+                            "Total Salary",
+                        ]
                         default_frame = st.session_state.get("default_admin_wage_editor")
                         if not isinstance(default_frame, pd.DataFrame):
                             default_frame = _template_to_dataframe(
@@ -7747,9 +7916,15 @@ def main() -> None:
                             use_container_width=True,
                             key="default_admin_wage_editor",
                             column_config={
-                                "Share %": st.column_config.NumberColumn(
-                                    "Share (%)", format="%.2f", step=0.1
-                                )
+                                "Head Count": st.column_config.NumberColumn(
+                                    "Head Count", format="%.0f", step=1.0
+                                ),
+                                "Monthly Salary per Head": st.column_config.NumberColumn(
+                                    "Monthly Salary per Head", format="%.2f", step=100.0
+                                ),
+                                "Total Salary": st.column_config.NumberColumn(
+                                    "Total Salary", format="%.2f", step=100.0
+                                ),
                             },
                         )
 
@@ -7763,10 +7938,13 @@ def main() -> None:
                         if save_col.button(
                             "Save defaults", key="save_admin_wage_defaults"
                         ):
-                            records = _dataframe_to_template(
-                                template_editor, admin_columns
+                            records = _normalize_admin_wage_template_records(
+                                _dataframe_to_template(template_editor, admin_columns)
                             )
                             _set_template("admin_wage_items", records)
+                            st.session_state["default_admin_wage_editor"] = _template_to_dataframe(
+                                records, admin_columns
+                            )
                             st.success("Admin wage defaults updated.")
 
                         if restore_col.button(
@@ -7789,15 +7967,17 @@ def main() -> None:
                         if apply_col.button(
                             "Apply to schedule", key="apply_admin_wage_defaults"
                         ):
-                            records = _dataframe_to_template(
-                                template_editor, admin_columns
+                            records = _normalize_admin_wage_template_records(
+                                _dataframe_to_template(template_editor, admin_columns)
                             )
                             _set_template("admin_wage_items", records)
                             admin_table = _default_admin_wage_table(
                                 st.session_state.core_schedule
                             )
                             st.session_state.detail_schedules[name] = admin_table
-                            st.session_state["default_admin_wage_editor"] = template_editor
+                            st.session_state["default_admin_wage_editor"] = _template_to_dataframe(
+                                records, admin_columns
+                            )
                             st.success(
                                 "Admin wages schedule regenerated from defaults."
                             )
