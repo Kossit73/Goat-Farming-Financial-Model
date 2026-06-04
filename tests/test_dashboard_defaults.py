@@ -365,6 +365,82 @@ def test_admin_wage_master_inputs_feed_default_schedule_components():
     assert admin_table["Total Salary"].iloc[0] == 3600.0
 
 
+def test_default_pricing_table_uses_period_product_activation_structure():
+    pricing = streamlit_app._default_pricing_table()
+
+    assert {
+        "Period",
+        "Product",
+        "Active",
+        "Allocation %",
+        "Quantity per Period",
+        "Unit",
+        "Base Price",
+        "Price Growth %",
+        "Revenue",
+    }.issubset(pricing.columns)
+    assert "Milk" in pricing["Product"].unique().tolist()
+
+
+def test_pricing_assumptions_only_count_active_products_in_revenue():
+    schedule = pd.DataFrame(
+        {
+            "Revenue": [0.0, 0.0],
+            "COGS": [10.0, 10.0],
+            "Variable Expenses": [5.0, 5.0],
+            "Fixed Expenses": [2.0, 2.0],
+            "Direct Wages": [3.0, 3.0],
+            "Admin Wages": [1.0, 1.0],
+        },
+        index=pd.to_datetime(["2026-01-31", "2026-02-28"]),
+    )
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-01-31", "2026-02-28"],
+            "Product": ["Milk", "Meat", "Milk"],
+            "Active": [True, False, True],
+            "Allocation %": [100.0, 100.0, 50.0],
+            "Quantity per Period": [100.0, 40.0, 80.0],
+            "Unit": ["Litre", "Kg", "Litre"],
+            "Base Price": [2.0, 10.0, 2.0],
+            "Price Growth %": [0.0, 0.0, 0.0],
+        }
+    )
+
+    updated = streamlit_app._apply_pricing_assumptions_to_schedule(schedule, pricing)
+
+    assert updated["Revenue"].tolist() == [200.0, 80.0]
+    assert updated["Gross Margin"].tolist() == [190.0, 70.0]
+
+
+def test_sync_pricing_table_to_core_expands_products_to_new_periods():
+    core = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-02-28"],
+            "Revenue": [1000.0, 1200.0],
+        }
+    )
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-01-31"],
+            "Product": ["Milk"],
+            "Active": [True],
+            "Allocation %": [100.0],
+            "Quantity per Period": [400.0],
+            "Unit": ["Litre"],
+            "Base Price": [2.5],
+            "Price Growth %": [0.0],
+        }
+    )
+
+    synced = streamlit_app._sync_pricing_table_to_core(pricing, core)
+
+    period_product_pairs = set(zip(synced["Period"], synced["Product"]))
+    assert ("2026-01-31", "Milk") in period_product_pairs
+    assert ("2026-02-28", "Milk") in period_product_pairs
+    assert ("2026-01-31", "Meat") in period_product_pairs
+
+
 def test_standalone_app_bootstraps_and_runs_without_top_level_exceptions():
     repo_root = _STREAMLIT_APP_PATH.parent
     command = [

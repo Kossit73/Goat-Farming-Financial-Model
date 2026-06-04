@@ -2153,32 +2153,32 @@ DEFAULT_ADMIN_WAGE_ITEMS = [
 
 DEFAULT_PRICING_ROWS = [
     {
-        "Year": 2024,
         "Product": "Milk",
         "Unit": "Litre",
         "Base Price": 1.85,
         "Price Growth %": 3.0,
+        "Default Active": True,
     },
     {
-        "Year": 2025,
         "Product": "Cheese",
         "Unit": "Kg",
         "Base Price": 12.50,
         "Price Growth %": 2.5,
+        "Default Active": False,
     },
     {
-        "Year": 2024,
         "Product": "Pelt",
-        "Unit": "Kg",
+        "Unit": "Piece",
         "Base Price": 8.00,
         "Price Growth %": 2.0,
+        "Default Active": False,
     },
     {
-        "Year": 2024,
         "Product": "Meat",
         "Unit": "Kg",
         "Base Price": 10.50,
         "Price Growth %": 2.8,
+        "Default Active": False,
     },
 ]
 
@@ -2319,24 +2319,60 @@ def _dataframe_to_template(df: pd.DataFrame, columns: list[str]) -> list[dict[st
 
 
 def _default_pricing_table() -> pd.DataFrame:
-    rows = _get_template("pricing_rows", DEFAULT_PRICING_ROWS)
-    table = _template_to_dataframe(
-        rows,
-        ["Year", "Product", "Unit", "Base Price", "Price Growth %"],
-    )
+    return _default_pricing_table_from_core(_default_income_schedule(periods=12))
 
-    if table.empty:
+
+def _default_pricing_table_from_core(core: pd.DataFrame) -> pd.DataFrame:
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
+    revenue = pd.to_numeric(core.get("Revenue"), errors="coerce").tolist()
+    rows = _get_template("pricing_rows", DEFAULT_PRICING_ROWS)
+
+    default_rows: list[dict[str, object]] = []
+    for idx, period in enumerate(periods):
+        period_revenue = revenue[idx] if idx < len(revenue) else np.nan
+        for row in rows:
+            product = str(row.get("Product", "")).strip() or "Product"
+            unit = str(row.get("Unit", "")).strip() or "Unit"
+            base_price = pd.to_numeric(
+                pd.Series([row.get("Base Price")]), errors="coerce"
+            ).iloc[0]
+            is_active = bool(row.get("Default Active", False))
+            quantity = (
+                float(period_revenue) / float(base_price)
+                if is_active and pd.notna(period_revenue) and pd.notna(base_price) and float(base_price) > 0
+                else 0.0
+            )
+            default_rows.append(
+                {
+                    "Period": period,
+                    "Product": product,
+                    "Active": is_active,
+                    "Allocation %": 100.0 if is_active else 0.0,
+                    "Quantity per Period": quantity,
+                    "Unit": unit,
+                    "Base Price": base_price,
+                    "Price Growth %": pd.to_numeric(
+                        pd.Series([row.get("Price Growth %")]), errors="coerce"
+                    ).iloc[0],
+                }
+            )
+
+    if not default_rows:
         return pd.DataFrame(
             {
-                "Year": [pd.Timestamp.today().year],
-                "Product": ["Product"],
-                "Unit": ["Unit"],
+                "Period": ["2024-01-31"],
+                "Product": ["Milk"],
+                "Active": [True],
+                "Allocation %": [100.0],
+                "Quantity per Period": [0.0],
+                "Unit": ["Litre"],
                 "Base Price": [np.nan],
-                "Price Growth %": [np.nan],
+                "Price Growth %": [0.0],
+                "Revenue": [0.0],
             }
         )
 
-    return table.reset_index(drop=True)
+    return _ensure_pricing_table(pd.DataFrame(default_rows))
 
 
 def _variable_default_items() -> list[tuple[str, Optional[float]]]:
@@ -3012,26 +3048,20 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
 
     work = table.copy()
 
-    if "Year" not in work.columns:
-        work["Year"] = np.nan
-
-    work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
-    work["Product"] = work.get("Product", "").astype(str).str.strip()
-    work.loc[work["Product"] == "", "Product"] = "Product"
-    work["Unit"] = work.get("Unit", "").astype(str).str.strip()
-    work.loc[work["Unit"] == "", "Unit"] = "Unit"
-    work["Base Price"] = pd.to_numeric(work.get("Base Price"), errors="coerce")
-    work["Price Growth %"] = pd.to_numeric(
-        work.get("Price Growth %"), errors="coerce"
-    )
-
-    work = work.dropna(how="all")
-    if work.empty:
-        return _default_pricing_table()
+    if "Period" not in work.columns and "Year" in work.columns:
+        year_values = pd.to_numeric(work.get("Year"), errors="coerce")
+        work["Period"] = year_values.map(
+            lambda value: pd.Timestamp(int(value), 12, 31).strftime("%Y-%m-%d")
+            if pd.notna(value)
+            else None
+        )
 
     required_cols = [
-        "Year",
+        "Period",
         "Product",
+        "Active",
+        "Allocation %",
+        "Quantity per Period",
         "Unit",
         "Base Price",
         "Price Growth %",
@@ -3040,26 +3070,76 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
         if col not in work.columns:
             work[col] = np.nan
 
-    ordered = work[required_cols + [c for c in work.columns if c not in required_cols]]
-    return ordered.reset_index(drop=True)
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    work["Product"] = work.get("Product", "").astype(str).str.strip()
+    work.loc[work["Product"] == "", "Product"] = "Product"
+    work["Active"] = work.get("Active", False).fillna(False).astype(bool)
+    work["Allocation %"] = pd.to_numeric(work.get("Allocation %"), errors="coerce")
+    work["Quantity per Period"] = pd.to_numeric(
+        work.get("Quantity per Period"), errors="coerce"
+    )
+    work["Unit"] = work.get("Unit", "").astype(str).str.strip()
+    work["Base Price"] = pd.to_numeric(work.get("Base Price"), errors="coerce")
+    work["Price Growth %"] = pd.to_numeric(
+        work.get("Price Growth %"), errors="coerce"
+    ).fillna(0.0)
+
+    product_defaults = {
+        str(row.get("Product", "")).strip(): row
+        for row in _get_template("pricing_rows", DEFAULT_PRICING_ROWS)
+    }
+    for idx in work.index:
+        product = str(work.at[idx, "Product"]).strip()
+        default_row = product_defaults.get(product, {})
+        if not str(work.at[idx, "Unit"]).strip():
+            work.at[idx, "Unit"] = str(default_row.get("Unit", "Unit")).strip() or "Unit"
+        if pd.isna(work.at[idx, "Base Price"]):
+            default_price = pd.to_numeric(
+                pd.Series([default_row.get("Base Price")]), errors="coerce"
+            ).iloc[0]
+            work.at[idx, "Base Price"] = default_price
+        if pd.isna(work.at[idx, "Allocation %"]):
+            work.at[idx, "Allocation %"] = 100.0 if bool(work.at[idx, "Active"]) else 0.0
+
+    work = work.dropna(how="all")
+    work = work.dropna(subset=["Period"], how="all")
+    if work.empty:
+        return _default_pricing_table()
+
+    active_mask = work["Active"].fillna(False).astype(bool)
+    work.loc[~active_mask, "Allocation %"] = work.loc[~active_mask, "Allocation %"].fillna(0.0)
+    work["Revenue"] = np.where(
+        active_mask,
+        work["Quantity per Period"].fillna(0.0)
+        * work["Base Price"].fillna(0.0)
+        * (work["Allocation %"].fillna(0.0) / 100.0),
+        0.0,
+    )
+
+    ordered = required_cols + ["Revenue"]
+    remainder = [c for c in work.columns if c not in ordered and c != "Year"]
+    work = work[ordered + remainder]
+    return work.sort_values(["Period", "Product"], kind="stable").reset_index(drop=True)
 
 
 def _add_pricing_row(table: pd.DataFrame) -> pd.DataFrame:
     work = _ensure_pricing_table(table)
 
-    years = pd.to_numeric(work.get("Year"), errors="coerce")
-    if years.notna().any():
-        default_year = int(years.dropna().max())
-        default_year += 1
+    periods = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    if not periods.empty:
+        default_period = periods.iloc[-1]
     else:
-        default_year = pd.Timestamp.today().year
+        default_period = pd.Timestamp.today().strftime("%Y-%m-%d")
 
     new_row = {
-        "Year": default_year,
+        "Period": default_period,
         "Product": f"Product {len(work) + 1}",
+        "Active": False,
+        "Allocation %": 0.0,
+        "Quantity per Period": 0.0,
         "Unit": "Unit",
         "Base Price": np.nan,
-        "Price Growth %": np.nan,
+        "Price Growth %": 0.0,
     }
 
     return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
@@ -3088,7 +3168,7 @@ def _apply_pricing_yearly_increment(
     if column not in work.columns:
         return work
 
-    work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+    work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
     work["Product"] = work.get("Product", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
@@ -3099,26 +3179,116 @@ def _apply_pricing_yearly_increment(
         if target_product and target_product != "All products" and product_key != target_product:
             continue
 
-        group_sorted = group.sort_values("Year", kind="stable")
+        group_sorted = group.sort_values("Period_dt", kind="stable")
         last_value = None
+        last_year = None
         for idx, row in group_sorted.iterrows():
             current_value = pd.to_numeric(row.get(column), errors="coerce")
+            period_dt = row.get("Period_dt")
+            year = int(period_dt.year) if pd.notna(period_dt) else None
             if last_value is None:
                 if not np.isnan(current_value):
                     last_value = current_value
+                    last_year = year
                 continue
 
             if np.isnan(last_value):
                 continue
 
+            years_elapsed = 1
+            if year is not None and last_year is not None:
+                years_elapsed = max(0, year - last_year)
+
             if is_percent_column:
-                last_value = last_value + increment_pct
+                last_value = last_value + (increment_pct * years_elapsed)
             else:
-                last_value = last_value * increment_factor
+                last_value = last_value * (increment_factor ** years_elapsed)
 
             work.at[idx, column] = last_value
+            if year is not None:
+                last_year = year
 
-    return work
+    work = work.drop(columns="Period_dt")
+    return _ensure_pricing_table(work)
+
+
+def _apply_pricing_product_plan(
+    table: pd.DataFrame,
+    product: str,
+    *,
+    active: bool,
+    allocation_pct: float,
+    base_quantity: float,
+    yearly_growth_pct: float,
+) -> pd.DataFrame:
+    work = _ensure_pricing_table(table)
+    if work.empty:
+        return work
+
+    work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
+    product_mask = work["Product"].astype(str).str.strip() == str(product).strip()
+    if not product_mask.any():
+        return work.drop(columns="Period_dt")
+
+    product_rows = work.loc[product_mask].sort_values("Period_dt", kind="stable")
+    base_year = None
+    for idx, row in product_rows.iterrows():
+        period_dt = row.get("Period_dt")
+        if pd.isna(period_dt):
+            continue
+        year = int(period_dt.year)
+        if base_year is None:
+            base_year = year
+        year_offset = max(0, year - base_year)
+        quantity = float(base_quantity) * ((1 + yearly_growth_pct / 100.0) ** year_offset)
+        work.at[idx, "Active"] = bool(active)
+        work.at[idx, "Allocation %"] = float(allocation_pct) if active else 0.0
+        work.at[idx, "Quantity per Period"] = quantity if active else 0.0
+
+    work = work.drop(columns="Period_dt")
+    return _ensure_pricing_table(work)
+
+
+def _sync_pricing_table_to_core(
+    table: Optional[pd.DataFrame], core: pd.DataFrame
+) -> pd.DataFrame:
+    base = _default_pricing_table_from_core(core)
+    if table is None or table.empty:
+        return base
+
+    current = _ensure_pricing_table(table)
+    base_indexed = base.set_index(["Period", "Product"])
+    current_indexed = current.set_index(["Period", "Product"])
+    merged = base_indexed.combine_first(current_indexed)
+    merged.update(current_indexed)
+    return _ensure_pricing_table(merged.reset_index())
+
+
+def _pricing_revenue_by_period(table: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_pricing_table(table)
+    summary = work.groupby("Period", as_index=False)["Revenue"].sum(min_count=1)
+    return summary.rename(columns={"Revenue": "Revenue from Pricing"})
+
+
+def _apply_pricing_assumptions_to_schedule(
+    schedule_df: pd.DataFrame, pricing_table: Optional[pd.DataFrame]
+) -> pd.DataFrame:
+    if schedule_df.empty or pricing_table is None or pricing_table.empty:
+        return schedule_df
+
+    work = schedule_df.copy()
+    pricing = _ensure_pricing_table(pricing_table)
+    revenue_summary = _pricing_revenue_by_period(pricing)
+    revenue_map = dict(
+        zip(
+            revenue_summary.get("Period", []),
+            pd.to_numeric(revenue_summary.get("Revenue from Pricing"), errors="coerce"),
+        )
+    )
+
+    period_keys = [idx.strftime("%Y-%m-%d") for idx in work.index]
+    work["Revenue"] = pd.Series(period_keys, index=work.index).map(revenue_map).fillna(0.0)
+    return _synchronize_financial_algorithms(work)
 
 
 def _default_operating_cost_table() -> pd.DataFrame:
@@ -5333,10 +5503,10 @@ def _dedupe_horizon_assumption_rows(table_name: str, table: pd.DataFrame) -> pd.
         if "Category" in work.columns:
             work["Category"] = work["Category"].astype(str).str.strip()
             return work.drop_duplicates(subset=["Year", "Category"], keep="last").reset_index(drop=True)
-    if table_name == "Pricing" and {"Product", "Unit"}.issubset(work.columns):
+    if table_name == "Pricing" and {"Period", "Product"}.issubset(work.columns):
+        work["Period"] = _normalize_period(work["Period"])
         work["Product"] = work["Product"].astype(str).str.strip()
-        work["Unit"] = work["Unit"].astype(str).str.strip()
-        return work.drop_duplicates(subset=["Year", "Product", "Unit"], keep="last").reset_index(drop=True)
+        return work.drop_duplicates(subset=["Period", "Product"], keep="last").reset_index(drop=True)
     if table_name == "Herd Plan":
         return work.drop_duplicates(subset=["Year"], keep="last").reset_index(drop=True)
     return work
@@ -5351,7 +5521,14 @@ def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
     # Keep year-based assumption tables aligned to the active horizon.
     assumptions = st.session_state.get("assumptions", {})
     if isinstance(assumptions, dict):
-        for table_name in ["Pricing", "Operating Costs", "Herd Plan"]:
+        core_schedule = st.session_state.get("core_schedule", pd.DataFrame())
+        pricing_table = assumptions.get("Pricing")
+        if isinstance(pricing_table, pd.DataFrame):
+            assumptions["Pricing"] = _sync_pricing_table_to_core(
+                pricing_table, core_schedule
+            )
+
+        for table_name in ["Operating Costs", "Herd Plan"]:
             table = assumptions.get(table_name)
             if not isinstance(table, pd.DataFrame) or table.empty or "Year" not in table:
                 continue
@@ -5522,6 +5699,12 @@ def _build_schedule_dataframe(
             schedule_df = _apply_operating_cost_assumptions_to_schedule(
                 schedule_df, operating_costs
             )
+        pricing = assumptions.get("Pricing")
+        if isinstance(pricing, pd.DataFrame) and not pricing.empty:
+            pricing = _sync_pricing_table_to_core(pricing, core_clean)
+            schedule_df = _apply_pricing_assumptions_to_schedule(
+                schedule_df, pricing
+            )
 
     return schedule_df
 
@@ -5533,6 +5716,7 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
         assumptions = {
             "Production Horizon": _default_production_horizon_table(),
             "Herd Plan": _default_herd_plan_table(),
+            "Pricing": _default_pricing_table(),
             "Operating Costs": _default_operating_cost_table(),
             "Variable Expenses": _default_variable_expense_input_table(),
             "Direct Wages": _default_direct_wage_input_table(),
@@ -5938,10 +6122,10 @@ def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) 
         if duplicate_years.any():
             issues.append("Herd Plan has duplicate years.")
     pricing = assumptions.get("Pricing", pd.DataFrame())
-    if isinstance(pricing, pd.DataFrame) and not pricing.empty and {"Year", "Product", "Unit"}.issubset(pricing.columns):
-        dup = pricing.duplicated(subset=["Year", "Product", "Unit"], keep=False)
+    if isinstance(pricing, pd.DataFrame) and not pricing.empty and {"Period", "Product"}.issubset(pricing.columns):
+        dup = pricing.duplicated(subset=["Period", "Product"], keep=False)
         if dup.any():
-            issues.append("Pricing has duplicate Year+Product+Unit rows.")
+            issues.append("Pricing has duplicate Period+Product rows.")
 
     if issues:
         st.warning("Validation summary: " + " ".join(f"- {msg}" for msg in issues))
@@ -7336,6 +7520,11 @@ def main() -> None:
         st.session_state["schedule_period_type"] = _infer_period_type_from_schedule(
             st.session_state.get("core_schedule")
         )
+
+    st.session_state.assumptions["Pricing"] = _sync_pricing_table_to_core(
+        st.session_state.assumptions.get("Pricing", pd.DataFrame()),
+        st.session_state.core_schedule,
+    )
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
     if "all_scenario_results" not in st.session_state:
@@ -8505,10 +8694,121 @@ def main() -> None:
             "and gross margin structure used in the Input Schedule."
         )
         st.markdown("#### Pricing Assumptions")
-        pricing_table = _ensure_pricing_table(
-            st.session_state.assumptions.get("Pricing", pd.DataFrame())
+        pricing_table = _sync_pricing_table_to_core(
+            st.session_state.assumptions.get("Pricing", pd.DataFrame()),
+            st.session_state.core_schedule,
         )
         st.session_state.assumptions["Pricing"] = pricing_table
+        period_label = (
+            "quarter"
+            if st.session_state.get("schedule_period_type") == "quarterly"
+            else "month"
+        )
+        st.caption(
+            "Activate only the products you want in each period, set the planned quantity for that period, and use "
+            "allocation percentages where one production stream is shared across multiple outputs."
+        )
+
+        st.session_state.setdefault("pricing_plan_product", "Milk")
+        st.session_state.setdefault("pricing_plan_active", True)
+        st.session_state.setdefault("pricing_plan_allocation_pct", 100.0)
+        st.session_state.setdefault("pricing_plan_quantity", 0.0)
+        st.session_state.setdefault("pricing_plan_growth_pct", 0.0)
+
+        product_options = sorted(
+            {
+                str(product).strip()
+                for product in pricing_table.get("Product", pd.Series(dtype=str))
+                .dropna()
+                .tolist()
+                if str(product).strip()
+            }
+        )
+        plan_product_col, plan_active_col, plan_alloc_col, plan_qty_col, plan_growth_col, plan_btn_col = st.columns(
+            [1.2, 0.9, 1.1, 1.4, 1.1, 1]
+        )
+        plan_product_col.selectbox(
+            "Plan product",
+            options=product_options,
+            key="pricing_plan_product",
+        )
+        plan_active_col.checkbox("Active", key="pricing_plan_active")
+        plan_alloc_col.number_input(
+            "Allocation (%)",
+            min_value=0.0,
+            max_value=100.0,
+            step=1.0,
+            key="pricing_plan_allocation_pct",
+        )
+        plan_qty_col.number_input(
+            f"Base quantity / {period_label}",
+            min_value=0.0,
+            step=10.0,
+            key="pricing_plan_quantity",
+        )
+        plan_growth_col.number_input(
+            "Qty yearly growth (%)",
+            min_value=-100.0,
+            max_value=300.0,
+            step=0.1,
+            key="pricing_plan_growth_pct",
+        )
+        if plan_btn_col.button("Apply plan", key="pricing_apply_plan"):
+            pricing_table = _apply_pricing_product_plan(
+                pricing_table,
+                st.session_state.get("pricing_plan_product", "Milk"),
+                active=bool(st.session_state.get("pricing_plan_active", True)),
+                allocation_pct=float(
+                    st.session_state.get("pricing_plan_allocation_pct", 100.0)
+                ),
+                base_quantity=float(st.session_state.get("pricing_plan_quantity", 0.0)),
+                yearly_growth_pct=float(
+                    st.session_state.get("pricing_plan_growth_pct", 0.0)
+                ),
+            )
+            st.session_state.assumptions["Pricing"] = pricing_table
+
+        def _save_pricing_matrix(updated: pd.DataFrame) -> None:
+            ensured = _sync_pricing_table_to_core(
+                updated,
+                st.session_state.core_schedule,
+            )
+            st.session_state.assumptions["Pricing"] = ensured
+
+        pricing_matrix = st.data_editor(
+            st.session_state.assumptions["Pricing"],
+            use_container_width=True,
+            key="assump::pricing_matrix",
+            column_config={
+                "Period": st.column_config.TextColumn("Period"),
+                "Product": st.column_config.TextColumn("Product"),
+                "Active": st.column_config.CheckboxColumn("Active"),
+                "Allocation %": st.column_config.NumberColumn(
+                    "Allocation (%)", format="%.2f", step=1.0
+                ),
+                "Quantity per Period": st.column_config.NumberColumn(
+                    f"Quantity per {period_label}", format="%.2f", step=1.0
+                ),
+                "Unit": st.column_config.TextColumn("Unit"),
+                "Base Price": st.column_config.NumberColumn(
+                    "Base Price", format="%.2f", step=0.1
+                ),
+                "Price Growth %": st.column_config.NumberColumn(
+                    "Price Growth (%)", format="%.2f", step=0.1
+                ),
+                "Revenue": st.column_config.NumberColumn(
+                    "Revenue", format="%.2f"
+                ),
+            },
+            disabled=["Period", "Product", "Revenue"],
+        )
+        _save_pricing_matrix(pricing_matrix)
+
+        st.markdown("##### Revenue Driven by Active Products")
+        st.dataframe(
+            _pricing_revenue_by_period(st.session_state.assumptions["Pricing"]),
+            use_container_width=True,
+        )
 
         st.session_state.setdefault("pricing_remove_choice", "-- Select Row --")
         st.session_state.setdefault("pricing_increment_target", "All products")
@@ -8603,85 +8903,9 @@ def main() -> None:
             _save_pricing,
         )
 
-        st.session_state.setdefault("pricing_defaults_edit_mode", False)
-        toggle_label = (
-            "Hide default pricing assumptions"
-            if st.session_state.pricing_defaults_edit_mode
-            else "Edit default pricing assumptions"
+        st.info(
+            "Use the product planner and pricing matrix above as the source of truth for period-based product activation and revenue planning."
         )
-        if st.button(toggle_label, key="toggle_pricing_defaults"):
-            st.session_state.pricing_defaults_edit_mode = not st.session_state[
-                "pricing_defaults_edit_mode"
-            ]
-
-        if st.session_state.pricing_defaults_edit_mode:
-            st.markdown("##### Default Pricing Assumptions")
-            st.caption(
-                "Edit the baseline pricing table applied when resetting these assumptions."
-            )
-
-            pricing_columns = [
-                "Year",
-                "Product",
-                "Unit",
-                "Base Price",
-                "Price Growth %",
-            ]
-            default_frame = st.session_state.get("default_pricing_editor_seed")
-            if not isinstance(default_frame, pd.DataFrame):
-                default_frame = _template_to_dataframe(
-                    _get_template("pricing_rows", DEFAULT_PRICING_ROWS), pricing_columns
-                )
-
-            template_editor = st.data_editor(
-                default_frame,
-                num_rows="dynamic",
-                use_container_width=True,
-                key="default_pricing_editor",
-                column_config={
-                    "Year": st.column_config.NumberColumn("Year", step=1),
-                    "Base Price": st.column_config.NumberColumn(
-                        "Base Price", format="%.2f"
-                    ),
-                    "Price Growth %": st.column_config.NumberColumn(
-                        "Price Growth (%)", format="%.2f"
-                    ),
-                },
-            )
-
-            save_col, apply_col, restore_col, close_col = st.columns(4)
-
-            if save_col.button("Save Defaults", key="save_pricing_defaults"):
-                records = _dataframe_to_template(template_editor, pricing_columns)
-                _set_template("pricing_rows", records)
-                st.success("Pricing defaults updated.")
-
-            if apply_col.button("Apply to Assumptions", key="apply_pricing_defaults"):
-                records = _dataframe_to_template(template_editor, pricing_columns)
-                _set_template("pricing_rows", records)
-                pricing_table = _default_pricing_table()
-                st.session_state.assumptions["Pricing"] = pricing_table
-                st.session_state["default_pricing_editor_seed"] = template_editor
-                st.success(
-                    "Pricing assumptions refreshed from updated defaults."
-                )
-                _clear_schedule_editor_state("assump::pricing")
-
-            if restore_col.button("Restore Baseline", key="reset_pricing_defaults"):
-                baseline_template = _template_copy(DEFAULT_PRICING_ROWS)
-                _set_template("pricing_rows", baseline_template)
-                pricing_table = _default_pricing_table()
-                st.session_state.assumptions["Pricing"] = pricing_table
-                st.session_state["default_pricing_editor_seed"] = _template_to_dataframe(
-                    baseline_template, pricing_columns
-                )
-                st.success(
-                    "Pricing defaults restored and assumptions refreshed."
-                )
-                _clear_schedule_editor_state("assump::pricing")
-
-            if close_col.button("Close Editor", key="close_pricing_defaults"):
-                st.session_state.pricing_defaults_edit_mode = False
 
         assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
@@ -9196,7 +9420,11 @@ def main() -> None:
                 prepared = prepared[expected_cols]
             prepared_details[name] = prepared
 
-        schedule_df = _assemble_schedule(core_prepared, prepared_details)
+        schedule_df = _build_schedule_dataframe(
+            core_clean,
+            detail_tables_for_run,
+            assumption_tables,
+        )
 
         if schedule_df["Revenue"].isna().all():
             st.error("Core Schedule must include revenue values.")
@@ -9230,15 +9458,6 @@ def main() -> None:
                     )
                     return
                 schedule_df = horizon_filtered
-        herd_plan = assumption_tables.get("Herd Plan")
-        if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
-            schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
-        operating_costs = assumption_tables.get("Operating Costs")
-        if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
-            schedule_df = _apply_operating_cost_assumptions_to_schedule(
-                schedule_df, operating_costs
-            )
-
         combined_supplementary = dict(supplementary_tables)
         for name, table in assumption_tables.items():
             cleaned = _clean_editor_table(table)
