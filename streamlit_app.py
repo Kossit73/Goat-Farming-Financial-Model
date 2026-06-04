@@ -2114,8 +2114,18 @@ DEFAULT_VARIABLE_ITEMS = [
 
 
 DEFAULT_DIRECT_WAGE_ITEMS = [
-    {"Role": "Milking Crew", "Share %": 60.0},
-    {"Role": "Herd Management", "Share %": 40.0},
+    {
+        "Position": "Milking Crew",
+        "Head Count": 3.0,
+        "Monthly Salary per Head": 1800.0,
+        "Total Salary": 5400.0,
+    },
+    {
+        "Position": "Herd Supervisor",
+        "Head Count": 1.0,
+        "Monthly Salary per Head": 2600.0,
+        "Total Salary": 2600.0,
+    },
 ]
 
 
@@ -2330,18 +2340,76 @@ def _variable_default_items() -> list[tuple[str, Optional[float]]]:
     return items
 
 
-def _direct_wage_default_items() -> list[tuple[str, Optional[float]]]:
-    roles: list[tuple[str, Optional[float]]] = []
+def _direct_wage_period_multiplier(source: pd.DataFrame) -> float:
+    period_type = _infer_period_type_from_schedule(source)
+    return 3.0 if period_type == "quarterly" else 1.0
+
+
+def _coerce_direct_wage_item(
+    row: Any, *, include_share: bool = True
+) -> dict[str, Any]:
+    position = str(row.get("Position") or row.get("Role") or "").strip() or "Direct Wage"
+    headcount = pd.to_numeric(
+        pd.Series([row.get("Head Count")]), errors="coerce"
+    ).iloc[0]
+    monthly_salary = pd.to_numeric(
+        pd.Series([row.get("Monthly Salary per Head")]), errors="coerce"
+    ).iloc[0]
+    total_salary = pd.to_numeric(
+        pd.Series([row.get("Total Salary") or row.get("Amount")]), errors="coerce"
+    ).iloc[0]
+    share_value = pd.to_numeric(pd.Series([row.get("Share %")]), errors="coerce").iloc[0]
+    share = float(share_value) / 100.0 if not pd.isna(share_value) else None
+
+    if pd.isna(headcount) and (
+        not pd.isna(monthly_salary) or not pd.isna(total_salary) or share is not None
+    ):
+        headcount = 1.0
+
+    if not pd.isna(headcount) and not pd.isna(monthly_salary):
+        total_salary = float(headcount) * float(monthly_salary)
+    elif not pd.isna(total_salary) and not pd.isna(headcount) and headcount > 0:
+        monthly_salary = float(total_salary) / float(headcount)
+
+    item = {
+        "Position": position,
+        "Head Count": None if pd.isna(headcount) else float(headcount),
+        "Monthly Salary per Head": (
+            None if pd.isna(monthly_salary) else float(monthly_salary)
+        ),
+        "Total Salary": None if pd.isna(total_salary) else float(total_salary),
+    }
+    if include_share:
+        item["Share"] = share
+    return item
+
+
+def _normalize_direct_wage_template_records(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for row in rows:
+        normalized = _coerce_direct_wage_item(row, include_share=False)
+        if any(value is not None for value in normalized.values()):
+            records.append(normalized)
+    return records
+
+
+def _direct_wage_default_items() -> list[dict[str, Any]]:
+    roles: list[dict[str, Any]] = []
     for row in _get_template("direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS):
-        role = str(row.get("Role", "")).strip() or "Direct Wage"
-        share_value = pd.to_numeric(
-            pd.Series([row.get("Share %")]), errors="coerce"
-        ).iloc[0]
-        share = float(share_value) / 100.0 if not pd.isna(share_value) else None
-        roles.append((role, share))
+        roles.append(_coerce_direct_wage_item(row))
 
     if not roles:
-        roles.append(("Direct Wage", None))
+        roles.append(
+            {
+                "Position": "Direct Wage",
+                "Head Count": 1.0,
+                "Monthly Salary per Head": None,
+                "Total Salary": None,
+                "Share": None,
+            }
+        )
 
     return roles
 
@@ -2932,6 +3000,7 @@ def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
     totals_raw = core.get("Direct Wages", pd.Series(dtype=float))
     totals = pd.to_numeric(totals_raw, errors="coerce")
+    period_multiplier = _direct_wage_period_multiplier(core)
 
     if isinstance(totals, pd.Series):
         total_series = totals.reset_index(drop=True)
@@ -2946,24 +3015,51 @@ def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
     if periods:
         for idx, period in enumerate(periods):
             total = total_values[idx] if idx < len(total_values) else np.nan
-            for role, share in _direct_wage_default_items():
-                amount = (
-                    total * share
-                    if share is not None and total is not None and not np.isnan(total)
-                    else np.nan
-                )
+            for item in _direct_wage_default_items():
+                headcount = pd.to_numeric(
+                    pd.Series([item.get("Head Count")]), errors="coerce"
+                ).iloc[0]
+                monthly_salary = pd.to_numeric(
+                    pd.Series([item.get("Monthly Salary per Head")]), errors="coerce"
+                ).iloc[0]
+                total_salary = pd.to_numeric(
+                    pd.Series([item.get("Total Salary")]), errors="coerce"
+                ).iloc[0]
+                share = item.get("Share")
+
+                if pd.isna(total_salary) and not pd.isna(monthly_salary) and not pd.isna(headcount):
+                    total_salary = float(headcount) * float(monthly_salary) * period_multiplier
+                elif pd.isna(monthly_salary) and not pd.isna(total_salary):
+                    divisor = float(headcount) if not pd.isna(headcount) and headcount > 0 else 1.0
+                    monthly_salary = float(total_salary) / (divisor * period_multiplier)
+
+                if share is not None and total is not None and not np.isnan(total):
+                    total_salary = float(total) * float(share)
+                    divisor = float(headcount) if not pd.isna(headcount) and headcount > 0 else 1.0
+                    monthly_salary = total_salary / (divisor * period_multiplier)
+
                 rows.append(
                     {
                         "Period": period,
-                        "Role": role,
-                        "Amount": amount,
+                        "Position": item.get("Position", "Direct Wage"),
+                        "Head Count": headcount,
+                        "Monthly Salary per Head": monthly_salary,
+                        "Total Salary": total_salary,
                     }
                 )
 
     if not rows:
         period_type = _infer_period_type_from_schedule(core)
         today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
-        rows.append({"Period": today, "Role": "Direct Wage", "Amount": np.nan})
+        rows.append(
+            {
+                "Period": today,
+                "Position": "Direct Wage",
+                "Head Count": 1.0,
+                "Monthly Salary per Head": np.nan,
+                "Total Salary": np.nan,
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -2976,18 +3072,59 @@ def _ensure_direct_wage_table(
 
     work = table.copy()
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
-    work["Role"] = work.get("Role", "").astype(str).str.strip()
-    work.loc[work["Role"] == "", "Role"] = "Direct Wage"
-    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+    if "Position" not in work.columns:
+        work["Position"] = work.get("Role", "")
+    work["Position"] = work.get("Position", "").astype(str).str.strip()
+    work.loc[work["Position"] == "", "Position"] = "Direct Wage"
+
+    if "Head Count" not in work.columns:
+        work["Head Count"] = 1.0
+    work["Head Count"] = pd.to_numeric(work.get("Head Count"), errors="coerce")
+
+    if "Monthly Salary per Head" not in work.columns:
+        work["Monthly Salary per Head"] = np.nan
+    work["Monthly Salary per Head"] = pd.to_numeric(
+        work.get("Monthly Salary per Head"), errors="coerce"
+    )
+
+    if "Total Salary" not in work.columns:
+        work["Total Salary"] = work.get("Amount", np.nan)
+    work["Total Salary"] = pd.to_numeric(work.get("Total Salary"), errors="coerce")
+
+    period_multiplier = _direct_wage_period_multiplier(work)
+    divisor = work["Head Count"].where(work["Head Count"] > 0, 1.0)
+    missing_monthly = work["Monthly Salary per Head"].isna() & work["Total Salary"].notna()
+    work.loc[missing_monthly, "Monthly Salary per Head"] = (
+        work.loc[missing_monthly, "Total Salary"] / (divisor.loc[missing_monthly] * period_multiplier)
+    )
+    computable_total = work["Head Count"].notna() & work["Monthly Salary per Head"].notna()
+    work.loc[computable_total, "Total Salary"] = (
+        work.loc[computable_total, "Head Count"]
+        * work.loc[computable_total, "Monthly Salary per Head"]
+        * period_multiplier
+    )
 
     work = work.dropna(how="all")
-    work = work[(work["Role"].notna()) | (work["Amount"].notna())]
+    work = work[
+        (work["Position"].notna())
+        | (work["Head Count"].notna())
+        | (work["Monthly Salary per Head"].notna())
+        | (work["Total Salary"].notna())
+    ]
     work = work.dropna(subset=["Period"], how="all")
 
     if work.empty:
         return _default_direct_wage_table(core)
 
-    return work.reset_index(drop=True)
+    ordered_cols = [
+        "Period",
+        "Position",
+        "Head Count",
+        "Monthly Salary per Head",
+        "Total Salary",
+    ]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
 
 
 def _add_direct_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame:
@@ -3006,8 +3143,10 @@ def _add_direct_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFram
 
     new_row = {
         "Period": default_period,
-        "Role": f"Direct Wage Item {len(work) + 1}",
-        "Amount": np.nan,
+        "Position": f"Direct Wage Position {len(work) + 1}",
+        "Head Count": 1.0,
+        "Monthly Salary per Head": np.nan,
+        "Total Salary": np.nan,
     }
     return pd.concat([work, pd.DataFrame([new_row])], ignore_index=True)
 
@@ -3022,33 +3161,35 @@ def _remove_direct_wage_row(table: pd.DataFrame, index: int) -> pd.DataFrame:
 
 
 def _apply_direct_wage_increment(
-    table: pd.DataFrame, increment_pct: float, target_role: Optional[str] = None
+    table: pd.DataFrame, increment_pct: float, target_position: Optional[str] = None
 ) -> pd.DataFrame:
     if table is None or table.empty or increment_pct == 0:
         return table
 
-    work = table.copy()
+    work = _ensure_direct_wage_table(table, pd.DataFrame({"Period": table.get("Period", pd.Series(dtype=str))}))
     work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
-    work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
-    work["Role"] = work.get("Role", "").astype(str).str.strip()
+    work["Monthly Salary per Head"] = pd.to_numeric(
+        work.get("Monthly Salary per Head"), errors="coerce"
+    )
+    work["Position"] = work.get("Position", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
 
-    def _should_update(role: str) -> bool:
-        if not target_role or target_role == "All roles":
+    def _should_update(position: str) -> bool:
+        if not target_position or target_position == "All positions":
             return True
-        return role == target_role
+        return position == target_position
 
-    for role, group in work.groupby("Role", dropna=False):
-        role_key = role if isinstance(role, str) else ""
-        if not _should_update(role_key):
+    for position, group in work.groupby("Position", dropna=False):
+        position_key = position if isinstance(position, str) else ""
+        if not _should_update(position_key):
             continue
         group = group.sort_values("Period_dt", kind="stable")
         prev_amount = None
         prev_year = None
         for idx, row in group.iterrows():
             period_dt = row["Period_dt"]
-            amount = row["Amount"]
+            amount = row["Monthly Salary per Head"]
             if pd.isna(period_dt):
                 continue
             year = int(period_dt.year)
@@ -3065,11 +3206,12 @@ def _apply_direct_wage_increment(
                     prev_year = year
                 continue
             new_amount = prev_amount * (increment_factor ** year_gap)
-            work.at[idx, "Amount"] = new_amount
+            work.at[idx, "Monthly Salary per Head"] = new_amount
             prev_amount = new_amount
             prev_year = year
 
-    return work.drop(columns="Period_dt")
+    work = work.drop(columns="Period_dt")
+    return _ensure_direct_wage_table(work, pd.DataFrame({"Period": work.get("Period", pd.Series(dtype=str))}))
 
 
 def _aggregate_direct_wages(
@@ -3078,12 +3220,12 @@ def _aggregate_direct_wages(
     work = _ensure_direct_wage_table(table, core)
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
     summary = (
-        work.groupby("Period", as_index=False)["Amount"].sum(min_count=1)
+        work.groupby("Period", as_index=False)["Total Salary"].sum(min_count=1)
         if not work.empty
-        else pd.DataFrame(columns=["Period", "Amount"])
+        else pd.DataFrame(columns=["Period", "Total Salary"])
     )
     result = pd.DataFrame({"Period": periods})
-    summary_map = dict(zip(summary.get("Period", []), summary.get("Amount", [])))
+    summary_map = dict(zip(summary.get("Period", []), summary.get("Total Salary", [])))
     result["Direct Wages"] = result["Period"].map(summary_map)
     if result["Direct Wages"].notna().any():
         result["Direct Wages"] = result["Direct Wages"].astype(float)
@@ -7270,8 +7412,8 @@ def main() -> None:
                 elif name == "Direct Wages Schedule":
                     st.markdown("#### Direct Wages Schedule")
                     st.caption(
-                        "Capture individual direct labour cost items, manage rows, and escalate pay levels with yearly "
-                        "increments. Totals automatically feed into the model's EBITDA calculations."
+                        "Capture direct labour by position, headcount, and monthly salary per head. Position totals "
+                        "roll up automatically into the model's EBITDA calculations."
                     )
 
                     direct_table = _ensure_direct_wage_table(
@@ -7281,7 +7423,7 @@ def main() -> None:
                     st.session_state.detail_schedules[name] = direct_table
 
                     st.session_state.setdefault("direct_wage_remove_choice", "-- Select Row --")
-                    st.session_state.setdefault("direct_wage_increment_target", "All roles")
+                    st.session_state.setdefault("direct_wage_increment_target", "All positions")
                     st.session_state.setdefault("direct_wage_increment_pct", 0.0)
 
                     add_col, remove_select_col, remove_btn_col = st.columns([1, 2, 1])
@@ -7297,7 +7439,7 @@ def main() -> None:
                     option_index: Dict[str, int] = {}
                     for idx_row, row in direct_table.iterrows():
                         label_period = row.get("Period") or "Unknown Period"
-                        label_role = row.get("Role") or "Role"
+                        label_role = row.get("Position") or row.get("Role") or "Position"
                         label = f"{label_period} – {label_role}"
                         option_labels.append(label)
                         option_index[label] = idx_row
@@ -7318,10 +7460,10 @@ def main() -> None:
                             _clear_schedule_editor_state("detail::direct_wages")
 
                     inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
-                    target_options = ["All roles"] + sorted(
+                    target_options = ["All positions"] + sorted(
                         {
                             str(role)
-                            for role in direct_table.get("Role", pd.Series(dtype=str))
+                            for role in direct_table.get("Position", pd.Series(dtype=str))
                             .dropna()
                             .unique()
                             .tolist()
@@ -7377,10 +7519,16 @@ def main() -> None:
                     if st.session_state.direct_defaults_edit_mode:
                         st.markdown("##### Default Direct Wage Template")
                         st.caption(
-                            "Adjust the baseline allocation of direct labour that seeds future schedules."
+                            "Adjust the baseline direct labour positions, headcount, and monthly salary per head "
+                            "that seed future schedules."
                         )
 
-                        direct_columns = ["Role", "Share %"]
+                        direct_columns = [
+                            "Position",
+                            "Head Count",
+                            "Monthly Salary per Head",
+                            "Total Salary",
+                        ]
                         default_frame = st.session_state.get(
                             "default_direct_wage_editor"
                         )
@@ -7398,9 +7546,15 @@ def main() -> None:
                             use_container_width=True,
                             key="default_direct_wage_editor",
                             column_config={
-                                "Share %": st.column_config.NumberColumn(
-                                    "Share (%)", format="%.2f", step=0.1
-                                )
+                                "Head Count": st.column_config.NumberColumn(
+                                    "Head Count", format="%.0f", step=1.0
+                                ),
+                                "Monthly Salary per Head": st.column_config.NumberColumn(
+                                    "Monthly Salary per Head", format="%.2f", step=100.0
+                                ),
+                                "Total Salary": st.column_config.NumberColumn(
+                                    "Total Salary", format="%.2f", step=100.0
+                                ),
                             },
                         )
 
@@ -7414,10 +7568,13 @@ def main() -> None:
                         if save_col.button(
                             "Save defaults", key="save_direct_wage_defaults"
                         ):
-                            records = _dataframe_to_template(
-                                template_editor, direct_columns
+                            records = _normalize_direct_wage_template_records(
+                                _dataframe_to_template(template_editor, direct_columns)
                             )
                             _set_template("direct_wage_items", records)
+                            st.session_state["default_direct_wage_editor"] = _template_to_dataframe(
+                                records, direct_columns
+                            )
                             st.success("Direct wage defaults updated.")
 
                         if restore_col.button(
@@ -7440,15 +7597,17 @@ def main() -> None:
                         if apply_col.button(
                             "Apply to schedule", key="apply_direct_wage_defaults"
                         ):
-                            records = _dataframe_to_template(
-                                template_editor, direct_columns
+                            records = _normalize_direct_wage_template_records(
+                                _dataframe_to_template(template_editor, direct_columns)
                             )
                             _set_template("direct_wage_items", records)
                             direct_table = _default_direct_wage_table(
                                 st.session_state.core_schedule
                             )
                             st.session_state.detail_schedules[name] = direct_table
-                            st.session_state["default_direct_wage_editor"] = template_editor
+                            st.session_state["default_direct_wage_editor"] = _template_to_dataframe(
+                                records, direct_columns
+                            )
                             st.success(
                                 "Direct wages schedule regenerated from defaults."
                             )
