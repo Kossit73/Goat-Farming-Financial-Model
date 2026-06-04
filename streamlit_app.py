@@ -2503,6 +2503,509 @@ def _admin_wage_default_items() -> list[dict[str, Any]]:
     return items
 
 
+def _period_year_offsets(periods: Sequence[str]) -> list[int]:
+    period_series = pd.Series(list(periods), dtype="object")
+    period_dt = pd.to_datetime(period_series, errors="coerce")
+    valid = period_dt.dropna()
+    base_year = int(valid.iloc[0].year) if not valid.empty else pd.Timestamp.today().year
+    offsets: list[int] = []
+    for value in period_dt:
+        if pd.isna(value):
+            offsets.append(0)
+        else:
+            offsets.append(max(0, int(value.year) - base_year))
+    return offsets
+
+
+def _default_variable_expense_input_table() -> pd.DataFrame:
+    base_revenue = float(_default_income_schedule(periods=1)["Revenue"].iloc[0])
+    records: list[dict[str, object]] = []
+    for item, share in _variable_default_items():
+        amount = base_revenue * share if share is not None else np.nan
+        records.append(
+            {
+                "Item": item,
+                "Amount per Period": amount,
+                "Yearly Increase %": 0.0,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _ensure_variable_expense_input_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_variable_expense_input_table()
+    else:
+        work = table.copy()
+
+    required_cols = ["Item", "Amount per Period", "Yearly Increase %"]
+    for column in required_cols:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    work["Item"] = work.get("Item", "").astype(str).str.strip()
+    work.loc[work["Item"] == "", "Item"] = "Variable Expense"
+    work["Amount per Period"] = pd.to_numeric(
+        work.get("Amount per Period"), errors="coerce"
+    )
+    work["Yearly Increase %"] = pd.to_numeric(
+        work.get("Yearly Increase %"), errors="coerce"
+    ).fillna(0.0)
+
+    work = work.dropna(how="all")
+    work = work[
+        (work["Item"].notna())
+        | (work["Amount per Period"].notna())
+        | (work["Yearly Increase %"].notna())
+    ]
+    if work.empty:
+        return _default_variable_expense_input_table()
+
+    remainder = [col for col in work.columns if col not in required_cols]
+    return work[required_cols + remainder].reset_index(drop=True)
+
+
+def _default_direct_wage_input_table() -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for item in _direct_wage_default_items():
+        records.append(
+            {
+                "Position": item.get("Position", "Direct Wage"),
+                "Head Count": item.get("Head Count"),
+                "Monthly Salary per Head": item.get("Monthly Salary per Head"),
+                "Total Salary": item.get("Total Salary"),
+                "Yearly Increase %": 0.0,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _ensure_direct_wage_input_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_direct_wage_input_table()
+    else:
+        work = table.copy()
+
+    required_cols = [
+        "Position",
+        "Head Count",
+        "Monthly Salary per Head",
+        "Total Salary",
+        "Yearly Increase %",
+    ]
+    for column in required_cols:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    records: list[dict[str, object]] = []
+    for _, row in work.iterrows():
+        item = _coerce_direct_wage_item(row, include_share=False)
+        yearly_increase = pd.to_numeric(
+            pd.Series([row.get("Yearly Increase %")]), errors="coerce"
+        ).iloc[0]
+        item["Yearly Increase %"] = 0.0 if pd.isna(yearly_increase) else float(yearly_increase)
+        records.append(item)
+
+    ensured = pd.DataFrame(records)
+    if ensured.empty:
+        return _default_direct_wage_input_table()
+
+    remainder = [col for col in ensured.columns if col not in required_cols]
+    return ensured[required_cols + remainder].reset_index(drop=True)
+
+
+def _default_admin_wage_input_table() -> pd.DataFrame:
+    records: list[dict[str, object]] = []
+    for item in _admin_wage_default_items():
+        records.append(
+            {
+                "Position": item.get("Position", "Admin Wage"),
+                "Head Count": item.get("Head Count"),
+                "Monthly Salary per Head": item.get("Monthly Salary per Head"),
+                "Total Salary": item.get("Total Salary"),
+                "Yearly Increase %": 0.0,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _ensure_admin_wage_input_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_admin_wage_input_table()
+    else:
+        work = table.copy()
+
+    required_cols = [
+        "Position",
+        "Head Count",
+        "Monthly Salary per Head",
+        "Total Salary",
+        "Yearly Increase %",
+    ]
+    for column in required_cols:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    records: list[dict[str, object]] = []
+    for _, row in work.iterrows():
+        item = _coerce_admin_wage_item(row, include_share=False)
+        yearly_increase = pd.to_numeric(
+            pd.Series([row.get("Yearly Increase %")]), errors="coerce"
+        ).iloc[0]
+        item["Yearly Increase %"] = 0.0 if pd.isna(yearly_increase) else float(yearly_increase)
+        records.append(item)
+
+    ensured = pd.DataFrame(records)
+    if ensured.empty:
+        return _default_admin_wage_input_table()
+
+    remainder = [col for col in ensured.columns if col not in required_cols]
+    return ensured[required_cols + remainder].reset_index(drop=True)
+
+
+def _apply_assumption_yearly_increase(
+    table: pd.DataFrame, label_column: str, target_label: Optional[str], increment_pct: float
+) -> pd.DataFrame:
+    work = table.copy()
+    if label_column not in work.columns or "Yearly Increase %" not in work.columns:
+        return work
+    target = (target_label or "").strip()
+    if not target or target.startswith("All "):
+        work["Yearly Increase %"] = float(increment_pct)
+    else:
+        labels = work[label_column].astype(str).str.strip()
+        work.loc[labels == target, "Yearly Increase %"] = float(increment_pct)
+    return work
+
+
+def _propagate_variable_expense_inputs_to_schedule(
+    input_table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    assumptions = _ensure_variable_expense_input_table(input_table)
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
+    period_multiplier = _direct_wage_period_multiplier(core)
+    year_offsets = _period_year_offsets(periods)
+
+    rows: list[dict[str, object]] = []
+    for idx, period in enumerate(periods):
+        year_offset = year_offsets[idx] if idx < len(year_offsets) else 0
+        for _, row in assumptions.iterrows():
+            amount = pd.to_numeric(
+                pd.Series([row.get("Amount per Period")]), errors="coerce"
+            ).iloc[0]
+            increase = pd.to_numeric(
+                pd.Series([row.get("Yearly Increase %")]), errors="coerce"
+            ).iloc[0]
+            if pd.notna(amount):
+                factor = (1 + (float(increase) / 100.0)) ** year_offset if pd.notna(increase) else 1.0
+                amount = float(amount) * period_multiplier * factor
+            rows.append(
+                {
+                    "Period": period,
+                    "Item": row.get("Item", "Variable Expense"),
+                    "Amount": amount,
+                }
+            )
+    return _ensure_variable_expense_table(pd.DataFrame(rows), core)
+
+
+def _propagate_direct_wage_inputs_to_schedule(
+    input_table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    assumptions = _ensure_direct_wage_input_table(input_table)
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
+    period_multiplier = _direct_wage_period_multiplier(core)
+    year_offsets = _period_year_offsets(periods)
+
+    rows: list[dict[str, object]] = []
+    for idx, period in enumerate(periods):
+        year_offset = year_offsets[idx] if idx < len(year_offsets) else 0
+        for _, row in assumptions.iterrows():
+            headcount = pd.to_numeric(
+                pd.Series([row.get("Head Count")]), errors="coerce"
+            ).iloc[0]
+            monthly_salary = pd.to_numeric(
+                pd.Series([row.get("Monthly Salary per Head")]), errors="coerce"
+            ).iloc[0]
+            increase = pd.to_numeric(
+                pd.Series([row.get("Yearly Increase %")]), errors="coerce"
+            ).iloc[0]
+            if pd.notna(monthly_salary):
+                factor = (1 + (float(increase) / 100.0)) ** year_offset if pd.notna(increase) else 1.0
+                monthly_salary = float(monthly_salary) * factor
+            total_salary = (
+                float(headcount) * float(monthly_salary) * period_multiplier
+                if pd.notna(headcount) and pd.notna(monthly_salary)
+                else np.nan
+            )
+            rows.append(
+                {
+                    "Period": period,
+                    "Position": row.get("Position", "Direct Wage"),
+                    "Head Count": headcount,
+                    "Monthly Salary per Head": monthly_salary,
+                    "Total Salary": total_salary,
+                }
+            )
+    return _ensure_direct_wage_table(pd.DataFrame(rows), core)
+
+
+def _propagate_admin_wage_inputs_to_schedule(
+    input_table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    assumptions = _ensure_admin_wage_input_table(input_table)
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
+    period_multiplier = _direct_wage_period_multiplier(core)
+    year_offsets = _period_year_offsets(periods)
+
+    rows: list[dict[str, object]] = []
+    for idx, period in enumerate(periods):
+        year_offset = year_offsets[idx] if idx < len(year_offsets) else 0
+        for _, row in assumptions.iterrows():
+            headcount = pd.to_numeric(
+                pd.Series([row.get("Head Count")]), errors="coerce"
+            ).iloc[0]
+            monthly_salary = pd.to_numeric(
+                pd.Series([row.get("Monthly Salary per Head")]), errors="coerce"
+            ).iloc[0]
+            increase = pd.to_numeric(
+                pd.Series([row.get("Yearly Increase %")]), errors="coerce"
+            ).iloc[0]
+            if pd.notna(monthly_salary):
+                factor = (1 + (float(increase) / 100.0)) ** year_offset if pd.notna(increase) else 1.0
+                monthly_salary = float(monthly_salary) * factor
+            total_salary = (
+                float(headcount) * float(monthly_salary) * period_multiplier
+                if pd.notna(headcount) and pd.notna(monthly_salary)
+                else np.nan
+            )
+            rows.append(
+                {
+                    "Period": period,
+                    "Position": row.get("Position", "Admin Wage"),
+                    "Head Count": headcount,
+                    "Monthly Salary per Head": monthly_salary,
+                    "Total Salary": total_salary,
+                }
+            )
+    return _ensure_admin_wage_table(pd.DataFrame(rows), core)
+
+
+def _add_assumption_input_row(
+    table: pd.DataFrame,
+    row: dict[str, object],
+    ensure_fn: Callable[[Optional[pd.DataFrame]], pd.DataFrame],
+) -> pd.DataFrame:
+    work = ensure_fn(table)
+    return ensure_fn(pd.concat([work, pd.DataFrame([row])], ignore_index=True))
+
+
+def _remove_assumption_input_row(
+    table: pd.DataFrame,
+    index: int,
+    ensure_fn: Callable[[Optional[pd.DataFrame]], pd.DataFrame],
+) -> pd.DataFrame:
+    work = ensure_fn(table)
+    if 0 <= index < len(work):
+        work = work.drop(index=index).reset_index(drop=True)
+    return ensure_fn(work)
+
+
+def _assumption_input_row_labels(
+    table: pd.DataFrame, label_column: str
+) -> tuple[list[str], dict[str, int]]:
+    labels: list[str] = []
+    label_index: dict[str, int] = {}
+    for idx_row, row in table.iterrows():
+        label_value = str(row.get(label_column, "")).strip() or f"Row {idx_row + 1}"
+        label = f"{label_value} ({idx_row + 1})"
+        labels.append(label)
+        label_index[label] = idx_row
+    return labels, label_index
+
+
+def _assumption_input_catalog_options(
+    current_table: pd.DataFrame,
+    default_table: pd.DataFrame,
+    label_column: str,
+) -> list[str]:
+    options = {
+        str(value).strip()
+        for frame in [current_table, default_table]
+        for value in frame.get(label_column, pd.Series(dtype=str)).dropna().tolist()
+        if str(value).strip()
+    }
+    return sorted(options)
+
+
+def _apply_assumption_input_schedule(
+    assumption_key: str,
+    schedule_name: str,
+    ensure_fn: Callable[[Optional[pd.DataFrame]], pd.DataFrame],
+    propagate_fn: Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame],
+    editor_identifier: str,
+) -> None:
+    assumptions = st.session_state.get("assumptions", {})
+    if not isinstance(assumptions, dict):
+        return
+    master_table = ensure_fn(assumptions.get(assumption_key))
+    assumptions[assumption_key] = master_table
+    st.session_state.assumptions = assumptions
+
+    core_schedule = st.session_state.get("core_schedule")
+    if not isinstance(core_schedule, pd.DataFrame):
+        return
+
+    propagated = propagate_fn(master_table, core_schedule)
+    detail_schedules = st.session_state.get("detail_schedules", {})
+    if not isinstance(detail_schedules, dict):
+        detail_schedules = {}
+    detail_schedules[schedule_name] = propagated
+    st.session_state.detail_schedules = detail_schedules
+    _clear_schedule_editor_state(editor_identifier)
+    _reset_cached_results()
+
+
+def _render_assumption_master_table(
+    *,
+    assumption_key: str,
+    schedule_name: str,
+    label_column: str,
+    all_label: str,
+    create_label: str,
+    new_label_prompt: str,
+    caption: str,
+    propagation_note: str,
+    ensure_fn: Callable[[Optional[pd.DataFrame]], pd.DataFrame],
+    default_fn: Callable[[], pd.DataFrame],
+    propagate_fn: Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame],
+    add_row_factory: Callable[[str], dict[str, object]],
+    column_config: dict[str, Any],
+    editor_key: str,
+    editor_identifier: str,
+    add_choice_key: str,
+    add_name_key: str,
+    remove_choice_key: str,
+    increment_target_key: str,
+    increment_pct_key: str,
+    disabled_columns: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    table = ensure_fn(st.session_state.assumptions.get(assumption_key))
+    st.session_state.assumptions[assumption_key] = table
+
+    st.caption(caption)
+    st.caption(propagation_note)
+
+    add_options = [create_label] + _assumption_input_catalog_options(
+        table, ensure_fn(default_fn()), label_column
+    )
+    st.session_state.setdefault(add_choice_key, create_label)
+    st.session_state.setdefault(add_name_key, "")
+    st.session_state.setdefault(remove_choice_key, "-- Select Row --")
+    st.session_state.setdefault(increment_target_key, all_label)
+    st.session_state.setdefault(increment_pct_key, 0.0)
+
+    add_select_col, add_name_col, add_btn_col = st.columns([1.3, 1.7, 1])
+    add_select_col.selectbox(
+        "Select existing item",
+        options=add_options,
+        key=add_choice_key,
+    )
+    add_name_col.text_input(
+        new_label_prompt,
+        key=add_name_key,
+    )
+    if add_btn_col.button("Add Row", key=f"{editor_key}_add_row"):
+        selected_label = str(st.session_state.get(add_choice_key, create_label)).strip()
+        new_label = (
+            str(st.session_state.get(add_name_key, "")).strip()
+            if selected_label == create_label
+            else selected_label
+        )
+        if new_label:
+            table = _add_assumption_input_row(
+                table,
+                add_row_factory(new_label),
+                ensure_fn,
+            )
+            st.session_state.assumptions[assumption_key] = table
+
+    labels, label_index = _assumption_input_row_labels(table, label_column)
+    remove_select_col, remove_btn_col = st.columns([3, 1])
+    remove_select_col.selectbox(
+        "Remove row",
+        options=["-- Select Row --"] + labels,
+        key=remove_choice_key,
+    )
+    if remove_btn_col.button("Remove", key=f"{editor_key}_remove_row"):
+        choice = st.session_state.get(remove_choice_key)
+        if choice in label_index:
+            table = _remove_assumption_input_row(table, label_index[choice], ensure_fn)
+            st.session_state.assumptions[assumption_key] = table
+            st.session_state[remove_choice_key] = "-- Select Row --"
+
+    increment_targets = [all_label] + sorted(
+        {
+            str(value).strip()
+            for value in table.get(label_column, pd.Series(dtype=str)).dropna().tolist()
+            if str(value).strip()
+        }
+    )
+    inc_target_col, inc_pct_col, inc_btn_col = st.columns([2, 1, 1])
+    inc_target_col.selectbox(
+        "Apply yearly increase to",
+        options=increment_targets,
+        key=increment_target_key,
+    )
+    inc_pct_col.number_input(
+        "Yearly increase (%)",
+        min_value=-100.0,
+        max_value=100.0,
+        step=0.1,
+        key=increment_pct_key,
+    )
+    if inc_btn_col.button("Set increase", key=f"{editor_key}_apply_increase"):
+        table = _apply_assumption_yearly_increase(
+            table,
+            label_column,
+            st.session_state.get(increment_target_key),
+            float(st.session_state.get(increment_pct_key, 0.0)),
+        )
+        table = ensure_fn(table)
+        st.session_state.assumptions[assumption_key] = table
+
+    editor = st.data_editor(
+        st.session_state.assumptions[assumption_key],
+        num_rows="dynamic",
+        use_container_width=True,
+        key=editor_key,
+        column_config=column_config,
+        disabled=list(disabled_columns or []),
+    )
+    ensured = ensure_fn(editor)
+    st.session_state.assumptions[assumption_key] = ensured
+
+    if st.button("Apply to Schedule", key=f"{editor_key}_apply_schedule"):
+        _apply_assumption_input_schedule(
+            assumption_key,
+            schedule_name,
+            ensure_fn,
+            propagate_fn,
+            editor_identifier,
+        )
+        st.success(
+            f"{assumption_key} propagated across the full production horizon."
+        )
+
+    return st.session_state.assumptions[assumption_key]
+
+
 def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     if table is None or table.empty:
         return _default_pricing_table()
@@ -4381,6 +4884,7 @@ def _default_schedule_components(
     start: Optional[str] = None,
     production_horizon: Optional[pd.DataFrame] = None,
     period_type: str = "monthly",
+    assumptions: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     if production_horizon is None:
         production_horizon = _default_production_horizon_table()
@@ -4432,16 +4936,33 @@ def _default_schedule_components(
     core_columns = [col for col in core_columns if col in base.columns]
     core = base[core_columns].copy()
 
+    assumption_map = assumptions or {}
+    variable_inputs = _ensure_variable_expense_input_table(
+        assumption_map.get("Variable Expenses")
+    )
+    direct_inputs = _ensure_direct_wage_input_table(
+        assumption_map.get("Direct Wages")
+    )
+    admin_inputs = _ensure_admin_wage_input_table(
+        assumption_map.get("Admin Wages")
+    )
+
     detail_tables: Dict[str, pd.DataFrame] = {}
     for name, cols in DETAIL_SCHEDULE_COLUMNS.items():
         if name == "Variable Expenses Schedule":
-            detail_tables[name] = _default_variable_expense_table(base)
+            detail_tables[name] = _propagate_variable_expense_inputs_to_schedule(
+                variable_inputs, base
+            )
             continue
         if name == "Direct Wages Schedule":
-            detail_tables[name] = _default_direct_wage_table(base)
+            detail_tables[name] = _propagate_direct_wage_inputs_to_schedule(
+                direct_inputs, base
+            )
             continue
         if name == "Admin Wages Schedule":
-            detail_tables[name] = _default_admin_wage_table(base)
+            detail_tables[name] = _propagate_admin_wage_inputs_to_schedule(
+                admin_inputs, base
+            )
             continue
         detail_cols = ["Period"] + [col for col in cols if col in base.columns]
         detail_tables[name] = base[detail_cols].copy()
@@ -4705,6 +5226,7 @@ def _rebase_schedule_to_horizon(
     start_year: int,
     end_year: int,
     period_type: str = "monthly",
+    assumptions: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """Return schedule tables that span the requested production horizon."""
 
@@ -4715,6 +5237,7 @@ def _rebase_schedule_to_horizon(
     default_core, default_details = _default_schedule_components(
         production_horizon=horizon_table,
         period_type=period_type,
+        assumptions=assumptions,
     )
 
     period_index = _period_index_for_horizon(start_year, end_year, period_type)
@@ -4751,7 +5274,12 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
     period_type = _normalize_period_type(st.session_state.get("schedule_period_type"))
 
     merged_core, merged_details = _rebase_schedule_to_horizon(
-        core_table, detail_tables, start_year, end_year, period_type=period_type
+        core_table,
+        detail_tables,
+        start_year,
+        end_year,
+        period_type=period_type,
+        assumptions=st.session_state.get("assumptions"),
     )
 
     st.session_state.core_schedule = merged_core
@@ -4782,6 +5310,7 @@ def _sync_schedule_period_type(period_type: str) -> None:
         start_year,
         end_year,
         period_type=st.session_state["schedule_period_type"],
+        assumptions=st.session_state.get("assumptions"),
     )
 
     st.session_state.core_schedule = merged_core
@@ -5005,6 +5534,9 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
             "Production Horizon": _default_production_horizon_table(),
             "Herd Plan": _default_herd_plan_table(),
             "Operating Costs": _default_operating_cost_table(),
+            "Variable Expenses": _default_variable_expense_input_table(),
+            "Direct Wages": _default_direct_wage_input_table(),
+            "Admin Wages": _default_admin_wage_input_table(),
             "Capital & Financing": _default_capital_financing_table(),
             "Valuation Inputs": pd.DataFrame(
                 {
@@ -5014,7 +5546,8 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
             ),
         }
         core, detail_tables = _default_schedule_components(
-            production_horizon=assumptions.get("Production Horizon")
+            production_horizon=assumptions.get("Production Horizon"),
+            assumptions=assumptions,
         )
         schedule_df = _build_schedule_dataframe(core, detail_tables, assumptions)
 
@@ -5117,6 +5650,9 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
         "Herd Plan": _default_herd_plan_table(),
         "Pricing": _default_pricing_table(),
         "Operating Costs": _default_operating_cost_table(),
+        "Variable Expenses": _default_variable_expense_input_table(),
+        "Direct Wages": _default_direct_wage_input_table(),
+        "Admin Wages": _default_admin_wage_input_table(),
         "Capital & Financing": _default_capital_financing_table(),
         "Valuation Inputs": _default_valuation_inputs_table(),
     }
@@ -6790,6 +7326,7 @@ def main() -> None:
         core_default, detail_defaults = _default_schedule_components(
             production_horizon=production_horizon_defaults,
             period_type=st.session_state["schedule_period_type"],
+            assumptions=st.session_state.assumptions,
         )
         if "core_schedule" not in st.session_state:
             st.session_state.core_schedule = core_default
@@ -7494,97 +8031,11 @@ def main() -> None:
                     )
 
                     variable_table = st.session_state.detail_schedules[name]
-
-                    st.session_state.setdefault(
-                        "variable_defaults_edit_mode", False
+                    st.info(
+                        "Master variable-expense inputs now live on the Assumptions page. Use `Apply to Schedule` "
+                        "there to regenerate this schedule across the full production horizon, then refine period "
+                        "rows here only when needed."
                     )
-                    toggle_label = (
-                        "Hide default variable expense template"
-                        if st.session_state.variable_defaults_edit_mode
-                        else "Edit default variable expense template"
-                    )
-                    if st.button(toggle_label, key="toggle_variable_defaults"):
-                        st.session_state.variable_defaults_edit_mode = not st.session_state[
-                            "variable_defaults_edit_mode"
-                        ]
-
-                    if st.session_state.variable_defaults_edit_mode:
-                        st.markdown("##### Default Variable Expense Template")
-                        st.caption(
-                            "Update the baseline mix of variable expenses that populates new schedules."
-                        )
-
-                        variable_columns = ["Item", "Share %"]
-                        default_frame = st.session_state.get(
-                            "default_variable_items_editor"
-                        )
-                        if not isinstance(default_frame, pd.DataFrame):
-                            default_frame = _template_to_dataframe(
-                                _get_template("variable_items", DEFAULT_VARIABLE_ITEMS),
-                                variable_columns,
-                            )
-
-                        template_editor = st.data_editor(
-                            default_frame,
-                            num_rows="dynamic",
-                            use_container_width=True,
-                            key="default_variable_items_editor",
-                            column_config={
-                                "Share %": st.column_config.NumberColumn(
-                                    "Share (%)", format="%.2f", step=0.1
-                                )
-                            },
-                        )
-
-                        button_col, save_col, restore_col, apply_col = st.columns(4)
-
-                        if button_col.button(
-                            "Close editor", key="close_variable_defaults"
-                        ):
-                            st.session_state.variable_defaults_edit_mode = False
-
-                        if save_col.button(
-                            "Save defaults", key="save_variable_defaults"
-                        ):
-                            records = _dataframe_to_template(
-                                template_editor, variable_columns
-                            )
-                            _set_template("variable_items", records)
-                            st.success("Variable expense defaults updated.")
-
-                        if restore_col.button(
-                            "Restore baseline", key="reset_variable_defaults"
-                        ):
-                            baseline_template = _template_copy(DEFAULT_VARIABLE_ITEMS)
-                            _set_template("variable_items", baseline_template)
-                            variable_table = _default_variable_expense_table(
-                                st.session_state.core_schedule
-                            )
-                            st.session_state.detail_schedules[name] = variable_table
-                            st.session_state["default_variable_items_editor"] = _template_to_dataframe(
-                                baseline_template, variable_columns
-                            )
-                            st.success(
-                                "Variable expense defaults restored and schedule refreshed."
-                            )
-                            _clear_schedule_editor_state("detail::variable_expenses")
-
-                        if apply_col.button(
-                            "Apply to schedule", key="apply_variable_defaults"
-                        ):
-                            records = _dataframe_to_template(
-                                template_editor, variable_columns
-                            )
-                            _set_template("variable_items", records)
-                            variable_table = _default_variable_expense_table(
-                                st.session_state.core_schedule
-                            )
-                            st.session_state.detail_schedules[name] = variable_table
-                            st.session_state["default_variable_items_editor"] = template_editor
-                            st.success(
-                                "Variable expenses schedule regenerated from defaults."
-                            )
-                            _clear_schedule_editor_state("detail::variable_expenses")
 
                     aggregated_variable = _aggregate_variable_expenses(
                         variable_table, st.session_state.core_schedule
@@ -7688,114 +8139,11 @@ def main() -> None:
                     )
 
                     direct_table = st.session_state.detail_schedules[name]
-
-                    st.session_state.setdefault("direct_defaults_edit_mode", False)
-                    toggle_label = (
-                        "Hide default direct wage template"
-                        if st.session_state.direct_defaults_edit_mode
-                        else "Edit default direct wage template"
+                    st.info(
+                        "Master direct-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
+                        "to rebuild labour rows across the full horizon, then use this schedule for downstream "
+                        "refinements only."
                     )
-                    if st.button(toggle_label, key="toggle_direct_defaults"):
-                        st.session_state.direct_defaults_edit_mode = not st.session_state[
-                            "direct_defaults_edit_mode"
-                        ]
-
-                    if st.session_state.direct_defaults_edit_mode:
-                        st.markdown("##### Default Direct Wage Template")
-                        st.caption(
-                            "Adjust the baseline direct labour positions, headcount, and monthly salary per head "
-                            "that seed future schedules."
-                        )
-
-                        direct_columns = [
-                            "Position",
-                            "Head Count",
-                            "Monthly Salary per Head",
-                            "Total Salary",
-                        ]
-                        default_frame = st.session_state.get(
-                            "default_direct_wage_editor"
-                        )
-                        if not isinstance(default_frame, pd.DataFrame):
-                            default_frame = _template_to_dataframe(
-                                _get_template(
-                                    "direct_wage_items", DEFAULT_DIRECT_WAGE_ITEMS
-                                ),
-                                direct_columns,
-                            )
-
-                        template_editor = st.data_editor(
-                            default_frame,
-                            num_rows="dynamic",
-                            use_container_width=True,
-                            key="default_direct_wage_editor",
-                            column_config={
-                                "Head Count": st.column_config.NumberColumn(
-                                    "Head Count", format="%.0f", step=1.0
-                                ),
-                                "Monthly Salary per Head": st.column_config.NumberColumn(
-                                    "Monthly Salary per Head", format="%.2f", step=100.0
-                                ),
-                                "Total Salary": st.column_config.NumberColumn(
-                                    "Total Salary", format="%.2f", step=100.0
-                                ),
-                            },
-                        )
-
-                        button_col, save_col, restore_col, apply_col = st.columns(4)
-
-                        if button_col.button(
-                            "Close editor", key="close_direct_defaults"
-                        ):
-                            st.session_state.direct_defaults_edit_mode = False
-
-                        if save_col.button(
-                            "Save defaults", key="save_direct_wage_defaults"
-                        ):
-                            records = _normalize_direct_wage_template_records(
-                                _dataframe_to_template(template_editor, direct_columns)
-                            )
-                            _set_template("direct_wage_items", records)
-                            st.session_state["default_direct_wage_editor"] = _template_to_dataframe(
-                                records, direct_columns
-                            )
-                            st.success("Direct wage defaults updated.")
-
-                        if restore_col.button(
-                            "Restore baseline", key="reset_direct_wage_defaults"
-                        ):
-                            baseline_template = _template_copy(DEFAULT_DIRECT_WAGE_ITEMS)
-                            _set_template("direct_wage_items", baseline_template)
-                            direct_table = _default_direct_wage_table(
-                                st.session_state.core_schedule
-                            )
-                            st.session_state.detail_schedules[name] = direct_table
-                            st.session_state["default_direct_wage_editor"] = _template_to_dataframe(
-                                baseline_template, direct_columns
-                            )
-                            st.success(
-                                "Direct wage defaults restored and schedule refreshed."
-                            )
-                            _clear_schedule_editor_state("detail::direct_wages")
-
-                        if apply_col.button(
-                            "Apply to schedule", key="apply_direct_wage_defaults"
-                        ):
-                            records = _normalize_direct_wage_template_records(
-                                _dataframe_to_template(template_editor, direct_columns)
-                            )
-                            _set_template("direct_wage_items", records)
-                            direct_table = _default_direct_wage_table(
-                                st.session_state.core_schedule
-                            )
-                            st.session_state.detail_schedules[name] = direct_table
-                            st.session_state["default_direct_wage_editor"] = _template_to_dataframe(
-                                records, direct_columns
-                            )
-                            st.success(
-                                "Direct wages schedule regenerated from defaults."
-                            )
-                            _clear_schedule_editor_state("detail::direct_wages")
 
                     aggregated_direct = _aggregate_direct_wages(
                         direct_table, st.session_state.core_schedule
@@ -7899,110 +8247,11 @@ def main() -> None:
                     )
 
                     admin_table = st.session_state.detail_schedules[name]
-
-                    st.session_state.setdefault("admin_defaults_edit_mode", False)
-                    toggle_label = (
-                        "Hide default admin wage template"
-                        if st.session_state.admin_defaults_edit_mode
-                        else "Edit default admin wage template"
+                    st.info(
+                        "Master admin-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
+                        "to regenerate this schedule across the active production horizon, then fine-tune rows here "
+                        "if the live plan needs adjustments."
                     )
-                    if st.button(toggle_label, key="toggle_admin_defaults"):
-                        st.session_state.admin_defaults_edit_mode = not st.session_state[
-                            "admin_defaults_edit_mode"
-                        ]
-
-                    if st.session_state.admin_defaults_edit_mode:
-                        st.markdown("##### Default Admin Wage Template")
-                        st.caption(
-                            "Adjust the baseline administrative positions, headcount, and monthly salary per head "
-                            "used when rebuilding schedules."
-                        )
-
-                        admin_columns = [
-                            "Position",
-                            "Head Count",
-                            "Monthly Salary per Head",
-                            "Total Salary",
-                        ]
-                        default_frame = st.session_state.get("default_admin_wage_editor")
-                        if not isinstance(default_frame, pd.DataFrame):
-                            default_frame = _template_to_dataframe(
-                                _get_template("admin_wage_items", DEFAULT_ADMIN_WAGE_ITEMS),
-                                admin_columns,
-                            )
-
-                        template_editor = st.data_editor(
-                            default_frame,
-                            num_rows="dynamic",
-                            use_container_width=True,
-                            key="default_admin_wage_editor",
-                            column_config={
-                                "Head Count": st.column_config.NumberColumn(
-                                    "Head Count", format="%.0f", step=1.0
-                                ),
-                                "Monthly Salary per Head": st.column_config.NumberColumn(
-                                    "Monthly Salary per Head", format="%.2f", step=100.0
-                                ),
-                                "Total Salary": st.column_config.NumberColumn(
-                                    "Total Salary", format="%.2f", step=100.0
-                                ),
-                            },
-                        )
-
-                        button_col, save_col, restore_col, apply_col = st.columns(4)
-
-                        if button_col.button(
-                            "Close editor", key="close_admin_defaults"
-                        ):
-                            st.session_state.admin_defaults_edit_mode = False
-
-                        if save_col.button(
-                            "Save defaults", key="save_admin_wage_defaults"
-                        ):
-                            records = _normalize_admin_wage_template_records(
-                                _dataframe_to_template(template_editor, admin_columns)
-                            )
-                            _set_template("admin_wage_items", records)
-                            st.session_state["default_admin_wage_editor"] = _template_to_dataframe(
-                                records, admin_columns
-                            )
-                            st.success("Admin wage defaults updated.")
-
-                        if restore_col.button(
-                            "Restore baseline", key="reset_admin_wage_defaults"
-                        ):
-                            baseline_template = _template_copy(DEFAULT_ADMIN_WAGE_ITEMS)
-                            _set_template("admin_wage_items", baseline_template)
-                            admin_table = _default_admin_wage_table(
-                                st.session_state.core_schedule
-                            )
-                            st.session_state.detail_schedules[name] = admin_table
-                            st.session_state["default_admin_wage_editor"] = _template_to_dataframe(
-                                baseline_template, admin_columns
-                            )
-                            st.success(
-                                "Admin wage defaults restored and schedule refreshed."
-                            )
-                            _clear_schedule_editor_state("detail::admin_wages")
-
-                        if apply_col.button(
-                            "Apply to schedule", key="apply_admin_wage_defaults"
-                        ):
-                            records = _normalize_admin_wage_template_records(
-                                _dataframe_to_template(template_editor, admin_columns)
-                            )
-                            _set_template("admin_wage_items", records)
-                            admin_table = _default_admin_wage_table(
-                                st.session_state.core_schedule
-                            )
-                            st.session_state.detail_schedules[name] = admin_table
-                            st.session_state["default_admin_wage_editor"] = _template_to_dataframe(
-                                records, admin_columns
-                            )
-                            st.success(
-                                "Admin wages schedule regenerated from defaults."
-                            )
-                            _clear_schedule_editor_state("detail::admin_wages")
 
                     aggregated_admin = _aggregate_admin_wages(
                         admin_table, st.session_state.core_schedule
@@ -8634,6 +8883,153 @@ def main() -> None:
         assumption_tables["Operating Costs"] = st.session_state.assumptions[
             "Operating Costs"
         ]
+
+        st.markdown("#### Variable Expense Master Inputs")
+        variable_assumptions = _render_assumption_master_table(
+            assumption_key="Variable Expenses",
+            schedule_name="Variable Expenses Schedule",
+            label_column="Item",
+            all_label="All items",
+            create_label="Create new item",
+            new_label_prompt="New variable expense item",
+            caption=(
+                "Set the baseline monthly amount for each variable expense item here. These rows become the source "
+                "of truth for the Input Schedule variable-expense grid."
+            ),
+            propagation_note=(
+                "Yearly increase compounds from the base monthly amount. When the schedule grain is quarterly, "
+                "the applied schedule multiplies the monthly base by 3 for each quarter."
+            ),
+            ensure_fn=_ensure_variable_expense_input_table,
+            default_fn=_default_variable_expense_input_table,
+            propagate_fn=_propagate_variable_expense_inputs_to_schedule,
+            add_row_factory=lambda label: {
+                "Item": label,
+                "Amount per Period": np.nan,
+                "Yearly Increase %": 0.0,
+            },
+            column_config={
+                "Item": st.column_config.TextColumn("Item"),
+                "Amount per Period": st.column_config.NumberColumn(
+                    "Amount per Period", format="%.2f", step=100.0
+                ),
+                "Yearly Increase %": st.column_config.NumberColumn(
+                    "Yearly Increase (%)", format="%.2f", step=0.1
+                ),
+            },
+            editor_key="assump_variable_expense_master",
+            editor_identifier="detail::variable_expenses",
+            add_choice_key="assump_variable_add_choice",
+            add_name_key="assump_variable_new_name",
+            remove_choice_key="assump_variable_remove_choice",
+            increment_target_key="assump_variable_increment_target",
+            increment_pct_key="assump_variable_increment_pct",
+        )
+        assumption_tables["Variable Expenses"] = variable_assumptions
+
+        st.markdown("#### Direct Wage Master Inputs")
+        direct_assumptions = _render_assumption_master_table(
+            assumption_key="Direct Wages",
+            schedule_name="Direct Wages Schedule",
+            label_column="Position",
+            all_label="All positions",
+            create_label="Create new position",
+            new_label_prompt="New direct wage position",
+            caption=(
+                "Maintain itemised direct labour here by position, head count, and monthly salary per head. "
+                "This master table should be set before refining direct labour in the Input Schedule page."
+            ),
+            propagation_note=(
+                "Yearly increase applies to `Monthly Salary per Head`, then `Total Salary` is recomputed as "
+                "`Head Count × Monthly Salary per Head`. Quarterly schedules convert the monthly salary to quarter totals."
+            ),
+            ensure_fn=_ensure_direct_wage_input_table,
+            default_fn=_default_direct_wage_input_table,
+            propagate_fn=_propagate_direct_wage_inputs_to_schedule,
+            add_row_factory=lambda label: {
+                "Position": label,
+                "Head Count": 1.0,
+                "Monthly Salary per Head": np.nan,
+                "Total Salary": np.nan,
+                "Yearly Increase %": 0.0,
+            },
+            column_config={
+                "Position": st.column_config.TextColumn("Position"),
+                "Head Count": st.column_config.NumberColumn(
+                    "Head Count", format="%.0f", step=1.0
+                ),
+                "Monthly Salary per Head": st.column_config.NumberColumn(
+                    "Monthly Salary per Head", format="%.2f", step=100.0
+                ),
+                "Total Salary": st.column_config.NumberColumn(
+                    "Total Salary", format="%.2f"
+                ),
+                "Yearly Increase %": st.column_config.NumberColumn(
+                    "Yearly Increase (%)", format="%.2f", step=0.1
+                ),
+            },
+            editor_key="assump_direct_wage_master",
+            editor_identifier="detail::direct_wages",
+            add_choice_key="assump_direct_add_choice",
+            add_name_key="assump_direct_new_name",
+            remove_choice_key="assump_direct_remove_choice",
+            increment_target_key="assump_direct_increment_target",
+            increment_pct_key="assump_direct_increment_pct",
+            disabled_columns=["Total Salary"],
+        )
+        assumption_tables["Direct Wages"] = direct_assumptions
+
+        st.markdown("#### Admin Wage Master Inputs")
+        admin_assumptions = _render_assumption_master_table(
+            assumption_key="Admin Wages",
+            schedule_name="Admin Wages Schedule",
+            label_column="Position",
+            all_label="All positions",
+            create_label="Create new position",
+            new_label_prompt="New admin wage position",
+            caption=(
+                "Set the baseline administrative labour structure here so the Input Schedule inherits a coherent "
+                "salary plan across the full production horizon."
+            ),
+            propagation_note=(
+                "Yearly increase applies to `Monthly Salary per Head`, then `Total Salary` is recomputed as "
+                "`Head Count × Monthly Salary per Head`. Quarterly schedules convert the monthly salary to quarter totals."
+            ),
+            ensure_fn=_ensure_admin_wage_input_table,
+            default_fn=_default_admin_wage_input_table,
+            propagate_fn=_propagate_admin_wage_inputs_to_schedule,
+            add_row_factory=lambda label: {
+                "Position": label,
+                "Head Count": 1.0,
+                "Monthly Salary per Head": np.nan,
+                "Total Salary": np.nan,
+                "Yearly Increase %": 0.0,
+            },
+            column_config={
+                "Position": st.column_config.TextColumn("Position"),
+                "Head Count": st.column_config.NumberColumn(
+                    "Head Count", format="%.0f", step=1.0
+                ),
+                "Monthly Salary per Head": st.column_config.NumberColumn(
+                    "Monthly Salary per Head", format="%.2f", step=100.0
+                ),
+                "Total Salary": st.column_config.NumberColumn(
+                    "Total Salary", format="%.2f"
+                ),
+                "Yearly Increase %": st.column_config.NumberColumn(
+                    "Yearly Increase (%)", format="%.2f", step=0.1
+                ),
+            },
+            editor_key="assump_admin_wage_master",
+            editor_identifier="detail::admin_wages",
+            add_choice_key="assump_admin_add_choice",
+            add_name_key="assump_admin_new_name",
+            remove_choice_key="assump_admin_remove_choice",
+            increment_target_key="assump_admin_increment_target",
+            increment_pct_key="assump_admin_increment_pct",
+            disabled_columns=["Total Salary"],
+        )
+        assumption_tables["Admin Wages"] = admin_assumptions
     
         st.markdown("### 4. Capital, Funding & Valuation")
         st.caption(

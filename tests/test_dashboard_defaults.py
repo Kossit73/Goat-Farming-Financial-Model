@@ -278,6 +278,93 @@ def test_default_admin_wage_schedule_rolls_up_itemised_positions():
     _reset_local_state()
 
 
+def test_default_assumption_tables_include_master_schedule_inputs():
+    assumptions = streamlit_app._default_assumption_tables()
+
+    assert {"Variable Expenses", "Direct Wages", "Admin Wages"}.issubset(
+        assumptions.keys()
+    )
+    assert {
+        "Item",
+        "Amount per Period",
+        "Yearly Increase %",
+    }.issubset(assumptions["Variable Expenses"].columns)
+    assert {
+        "Position",
+        "Head Count",
+        "Monthly Salary per Head",
+        "Total Salary",
+        "Yearly Increase %",
+    }.issubset(assumptions["Direct Wages"].columns)
+    assert {
+        "Position",
+        "Head Count",
+        "Monthly Salary per Head",
+        "Total Salary",
+        "Yearly Increase %",
+    }.issubset(assumptions["Admin Wages"].columns)
+
+
+def test_variable_expense_master_inputs_propagate_quarterly_with_yearly_growth():
+    core = pd.DataFrame({"Period": ["2026-03-31", "2026-06-30", "2027-03-31"]})
+    assumptions = pd.DataFrame(
+        {
+            "Item": ["Vet Care"],
+            "Amount per Period": [100.0],
+            "Yearly Increase %": [10.0],
+        }
+    )
+
+    propagated = streamlit_app._propagate_variable_expense_inputs_to_schedule(
+        assumptions, core
+    )
+
+    assert propagated["Amount"].tolist() == [300.0, 300.0, 330.0]
+
+
+def test_direct_wage_master_inputs_propagate_quarterly_and_recompute_totals():
+    core = pd.DataFrame({"Period": ["2026-03-31", "2027-03-31"]})
+    assumptions = pd.DataFrame(
+        {
+            "Position": ["Supervisor"],
+            "Head Count": [2.0],
+            "Monthly Salary per Head": [500.0],
+            "Total Salary": [1000.0],
+            "Yearly Increase %": [5.0],
+        }
+    )
+
+    propagated = streamlit_app._propagate_direct_wage_inputs_to_schedule(
+        assumptions, core
+    )
+
+    assert propagated["Monthly Salary per Head"].tolist() == [500.0, 525.0]
+    assert propagated["Total Salary"].tolist() == [3000.0, 3150.0]
+
+
+def test_admin_wage_master_inputs_feed_default_schedule_components():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Admin Wages"] = pd.DataFrame(
+        {
+            "Position": ["Administration"],
+            "Head Count": [1.0],
+            "Monthly Salary per Head": [1200.0],
+            "Total Salary": [1200.0],
+            "Yearly Increase %": [0.0],
+        }
+    )
+
+    _, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=pd.DataFrame({"Start Year": [2026], "End Year": [2026]}),
+        period_type="quarterly",
+        assumptions=assumptions,
+    )
+
+    admin_table = detail_tables["Admin Wages Schedule"]
+    assert admin_table["Position"].unique().tolist() == ["Administration"]
+    assert admin_table["Total Salary"].iloc[0] == 3600.0
+
+
 def test_standalone_app_bootstraps_and_runs_without_top_level_exceptions():
     repo_root = _STREAMLIT_APP_PATH.parent
     command = [
