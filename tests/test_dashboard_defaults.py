@@ -1,5 +1,7 @@
 import importlib.util
 from pathlib import Path
+import subprocess
+import sys
 
 import pandas as pd
 
@@ -178,3 +180,29 @@ def test_ensure_operating_cost_table_forward_fills_years_without_fillna_method_k
 
     assert table["Year"].dtype.name == "Int64"
     assert table["Year"].tolist() == [2024, 2024, 2026]
+
+
+def test_standalone_app_bootstraps_and_runs_without_top_level_exceptions():
+    repo_root = _STREAMLIT_APP_PATH.parent
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from streamlit.testing.v1 import AppTest; "
+            "at = AppTest.from_file('streamlit_app.py'); "
+            "at.run(timeout=20); "
+            "print('exc_count', len(at.exception)); "
+            "print('tab_count', len(at.tabs)); "
+            "raise SystemExit(0 if len(at.exception) == 0 else 1)"
+        ),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "exc_count 0" in completed.stdout

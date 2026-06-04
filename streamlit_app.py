@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 from importlib.util import find_spec
 from io import BytesIO
+from pathlib import Path
 import re
+import sys
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from copy import deepcopy
@@ -24,6 +27,11 @@ from pandas.api.types import (
 )
 from pandas.tseries.offsets import MonthEnd, QuarterEnd
 from streamlit.delta_generator import DeltaGenerator
+
+_APP_ROOT = Path(__file__).resolve().parent
+_SRC_ROOT = _APP_ROOT / "src"
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
 
 from goat_financial_model import GoatModel, InputSchedule
 
@@ -5792,7 +5800,11 @@ def _retrieve_rag_context(query: str, top_n: int = 8) -> pd.DataFrame:
     return (filtered if not filtered.empty else scored).head(top_n)
 
 
-def _render_rag_admin(snapshot: Dict[str, Any], show_header: bool = True) -> pd.DataFrame:
+def _render_rag_admin(
+    snapshot: Dict[str, Any],
+    show_header: bool = True,
+    use_expander: bool = True,
+) -> pd.DataFrame:
     store = _rag_store()
     if show_header:
         st.markdown("### Retrieval-Augmented Generation (RAG) Hub")
@@ -5801,7 +5813,12 @@ def _render_rag_admin(snapshot: Dict[str, Any], show_header: bool = True) -> pd.
             "orchestration engine."
         )
 
-    with st.expander("RAG Ingestion & Indexing", expanded=False):
+    rag_container = (
+        st.expander("RAG Ingestion & Indexing", expanded=False)
+        if use_expander
+        else nullcontext()
+    )
+    with rag_container:
         title = st.text_input("Document title", key="rag_doc_title")
         content = st.text_area(
             "Document or data content",
@@ -6339,7 +6356,7 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         _render_ai_settings(st.session_state.setdefault("ai_payload", {}))
 
         st.markdown("#### Retrieval-Augmented Generation (RAG)")
-        index_df = _render_rag_admin(snapshot, show_header=False)
+        index_df = _render_rag_admin(snapshot, show_header=False, use_expander=False)
 
     messages = st.session_state.setdefault("ai_orchestration_chat_messages", [])
     st.markdown("### Intelligent Orchestration Chat")
@@ -6347,12 +6364,19 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         with st.chat_message(msg.get("role", "assistant")):
             st.markdown(msg.get("content", ""))
 
-    prompt = st.chat_input(
-        "Ask a strategic question (e.g., Compare downside resilience and investor readiness)."
-    )
+    with st.form("ai_orchestration_chat_form", clear_on_submit=True):
+        prompt = st.text_area(
+            "Ask a strategic question",
+            key="ai_orchestration_prompt",
+            placeholder="Compare downside resilience and investor readiness.",
+            height=100,
+        ).strip()
+        submit_prompt = st.form_submit_button("Generate response", type="primary")
+
     history = st.session_state.setdefault("ai_orchestration_chat_history", [])
     current_query = ""
-    if prompt:
+    should_record_history = False
+    if submit_prompt and prompt:
         st.session_state["ai_orchestration_last_query"] = prompt
         current_query = prompt
         retrieved = _retrieve_rag_context(prompt)
@@ -6364,13 +6388,20 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         messages.append({"role": "user", "content": prompt})
         messages.append({"role": "assistant", "content": assistant_reply})
         st.session_state["ai_orchestration_chat_messages"] = messages
+        should_record_history = True
+    elif submit_prompt:
+        st.warning("Enter a question before generating a response.")
+        query = st.session_state.get("ai_orchestration_last_query", "Strategic overview")
+        current_query = query
+        retrieved = _retrieve_rag_context(query)
+        output = _run_orchestration_engine(query, config, snapshot, retrieved, history)
     else:
         query = st.session_state.get("ai_orchestration_last_query", "Strategic overview")
         current_query = query
         retrieved = _retrieve_rag_context(query)
         output = _run_orchestration_engine(query, config, snapshot, retrieved, history)
 
-    if current_query.strip():
+    if should_record_history and current_query.strip():
         history.append(
             {
                 "Query": current_query.strip(),
