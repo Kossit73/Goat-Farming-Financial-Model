@@ -65,6 +65,8 @@ def _maybe_rerun() -> None:
 def _safe_session_state_get(key: str, default: Any = None) -> Any:
     """Return a session state value without raising outside a Streamlit run."""
 
+    if not _can_rerun():
+        return _LOCAL_SESSION_STATE.get(key, default)
     try:
         return st.session_state.get(key, default)
     except Exception:
@@ -77,6 +79,8 @@ def _safe_session_state_get(key: str, default: Any = None) -> Any:
 def _safe_session_state_setdefault(key: str, value: Any) -> Any:
     """Set a default session state value when a runtime context exists."""
 
+    if not _can_rerun():
+        return _LOCAL_SESSION_STATE.setdefault(key, value)
     try:
         return st.session_state.setdefault(key, value)
     except Exception:
@@ -92,6 +96,9 @@ def _safe_session_state_setdefault(key: str, value: Any) -> Any:
 def _safe_session_state_set(key: str, value: Any) -> None:
     """Assign a session state value when supported by the runtime."""
 
+    if not _can_rerun():
+        _LOCAL_SESSION_STATE[key] = value
+        return
     try:
         st.session_state[key] = value
     except Exception:
@@ -105,6 +112,8 @@ def _safe_session_state_set(key: str, value: Any) -> None:
 def _safe_session_state_contains(key: str) -> bool:
     """Return True when the session state currently tracks the key."""
 
+    if not _can_rerun():
+        return key in _LOCAL_SESSION_STATE
     try:
         return key in st.session_state
     except Exception:
@@ -117,6 +126,8 @@ def _safe_session_state_contains(key: str) -> bool:
 def _safe_session_state_pop(key: str, default: Any = None) -> Any:
     """Remove a session state key without raising when unavailable."""
 
+    if not _can_rerun():
+        return _LOCAL_SESSION_STATE.pop(key, default)
     try:
         return st.session_state.pop(key, default)
     except Exception:
@@ -128,11 +139,6 @@ def _safe_session_state_pop(key: str, default: Any = None) -> Any:
             return default
         except Exception:
             return _LOCAL_SESSION_STATE.pop(key, default)
-
-
-if not _can_rerun():
-    st.session_state = _LOCAL_SESSION_STATE
-
 
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 

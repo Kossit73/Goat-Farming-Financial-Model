@@ -11,6 +11,10 @@ streamlit_app = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(streamlit_app)
 
 
+def _reset_local_state() -> None:
+    streamlit_app._LOCAL_SESSION_STATE.clear()
+
+
 def test_default_schedule_spans_production_horizon():
     horizon = pd.DataFrame({"Start Year": [2025], "End Year": [2027]})
 
@@ -73,9 +77,7 @@ def test_build_scenario_suite_supports_custom_entries():
 
 
 def test_current_scenario_presets_respect_overrides():
-    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
-    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
-    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
+    _reset_local_state()
 
     override_table = pd.DataFrame(
         {
@@ -84,10 +86,10 @@ def test_current_scenario_presets_respect_overrides():
         }
     )
 
-    streamlit_app.st.session_state["scenario_preset_tables"] = {
+    streamlit_app._LOCAL_SESSION_STATE["scenario_preset_tables"] = {
         "Base Case Scenario": override_table
     }
-    streamlit_app.st.session_state["scenario_preset_descriptions"] = {
+    streamlit_app._LOCAL_SESSION_STATE["scenario_preset_descriptions"] = {
         "Base Case Scenario": "Custom base preset"
     }
 
@@ -98,15 +100,11 @@ def test_current_scenario_presets_respect_overrides():
     assert base_preset["adjustments"]["Feed cost change (%)"] == -1.25
     assert base_preset["description"] == "Custom base preset"
 
-    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
-    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
-    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
+    _reset_local_state()
 
 
 def test_scenario_preset_add_and_remove_variables():
-    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
-    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
-    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
+    _reset_local_state()
 
     base_table = streamlit_app._get_scenario_preset_table("Base Case Scenario")
     assert "Milk price change (%)" in base_table["Driver"].tolist()
@@ -131,9 +129,7 @@ def test_scenario_preset_add_and_remove_variables():
     assert "Milk price change (%)" not in base_adjustments
     assert base_adjustments["Herd productivity change (%)"] == 4.0
 
-    streamlit_app.st.session_state.pop("scenario_preset_tables", None)
-    streamlit_app.st.session_state.pop("scenario_preset_descriptions", None)
-    streamlit_app.st.session_state.pop("scenario_preset_removed_drivers", None)
+    _reset_local_state()
 
 
 def test_rebase_schedule_to_horizon_extends_periods():
