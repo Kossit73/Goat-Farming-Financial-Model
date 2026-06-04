@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 import pandas as pd
+import pytest
 
 
 _STREAMLIT_APP_PATH = Path(__file__).resolve().parents[1] / "streamlit_app.py"
@@ -281,7 +282,7 @@ def test_default_admin_wage_schedule_rolls_up_itemised_positions():
 def test_default_assumption_tables_include_master_schedule_inputs():
     assumptions = streamlit_app._default_assumption_tables()
 
-    assert {"Variable Expenses", "Direct Wages", "Admin Wages"}.issubset(
+    assert {"Variable Expenses", "Direct Wages", "Admin Wages", "Production Drivers"}.issubset(
         assumptions.keys()
     )
     assert {
@@ -303,6 +304,12 @@ def test_default_assumption_tables_include_master_schedule_inputs():
         "Total Salary",
         "Yearly Increase %",
     }.issubset(assumptions["Admin Wages"].columns)
+    assert {
+        "Product",
+        "Quantity Mode",
+        "Lactating Herd Share %",
+        "Slaughter Rate % of Herd per Period",
+    }.issubset(assumptions["Production Drivers"].columns)
 
 
 def test_variable_expense_master_inputs_propagate_quarterly_with_yearly_growth():
@@ -373,6 +380,8 @@ def test_default_pricing_table_uses_period_product_activation_structure():
         "Product",
         "Active",
         "Allocation %",
+        "Quantity Mode",
+        "Manual Quantity Override",
         "Quantity per Period",
         "Unit",
         "Base Price",
@@ -380,6 +389,123 @@ def test_default_pricing_table_uses_period_product_activation_structure():
         "Revenue",
     }.issubset(pricing.columns)
     assert "Milk" in pricing["Product"].unique().tolist()
+
+
+def test_production_drivers_derive_milk_and_cheese_quantities_from_herd():
+    schedule = pd.DataFrame(
+        {"Herd Size (heads)": [100.0]},
+        index=pd.to_datetime(["2026-01-31"]),
+    )
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-01-31"],
+            "Product": ["Milk", "Cheese"],
+            "Active": [True, True],
+            "Allocation %": [100.0, 100.0],
+            "Quantity Mode": ["Derived", "Derived"],
+            "Manual Quantity Override": [pd.NA, pd.NA],
+            "Quantity per Period": [0.0, 0.0],
+            "Unit": ["Litre", "Kg"],
+            "Base Price": [2.0, 12.0],
+            "Price Growth %": [0.0, 0.0],
+        }
+    )
+    drivers = pd.DataFrame(
+        {
+            "Product": ["Milk", "Cheese"],
+            "Unit": ["Litre", "Kg"],
+            "Quantity Mode": ["Derived", "Derived"],
+            "Lactating Herd Share %": [50.0, 50.0],
+            "Litres per Lactating Doe per Day": [2.0, 2.0],
+            "Milk Allocation to Cheese %": [0.0, 25.0],
+            "Cheese Yield Kg per Litre": [0.0, 0.2],
+            "Slaughter Rate % of Herd per Period": [0.0, 0.0],
+            "Meat Yield Kg per Goat": [0.0, 0.0],
+            "Pelt Units per Goat": [0.0, 0.0],
+            "Driver Growth %": [0.0, 0.0],
+        }
+    )
+
+    derived = streamlit_app._derive_pricing_quantities_from_production(
+        pricing, schedule, drivers
+    )
+
+    milk_qty = derived.loc[derived["Product"] == "Milk", "Quantity per Period"].iloc[0]
+    cheese_qty = derived.loc[derived["Product"] == "Cheese", "Quantity per Period"].iloc[0]
+
+    assert milk_qty == 2283.0
+    assert cheese_qty == pytest.approx(152.2, rel=1e-9)
+
+
+def test_production_drivers_derive_meat_and_pelt_from_slaughter():
+    schedule = pd.DataFrame(
+        {"Herd Size (heads)": [100.0]},
+        index=pd.to_datetime(["2026-03-31"]),
+    )
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-03-31", "2026-03-31"],
+            "Product": ["Meat", "Pelt"],
+            "Active": [True, True],
+            "Allocation %": [100.0, 100.0],
+            "Quantity Mode": ["Derived", "Derived"],
+            "Manual Quantity Override": [pd.NA, pd.NA],
+            "Quantity per Period": [0.0, 0.0],
+            "Unit": ["Kg", "Piece"],
+            "Base Price": [9.0, 4.0],
+            "Price Growth %": [0.0, 0.0],
+        }
+    )
+    drivers = pd.DataFrame(
+        {
+            "Product": ["Meat", "Pelt"],
+            "Unit": ["Kg", "Piece"],
+            "Quantity Mode": ["Derived", "Derived"],
+            "Lactating Herd Share %": [0.0, 0.0],
+            "Litres per Lactating Doe per Day": [0.0, 0.0],
+            "Milk Allocation to Cheese %": [0.0, 0.0],
+            "Cheese Yield Kg per Litre": [0.0, 0.0],
+            "Slaughter Rate % of Herd per Period": [5.0, 5.0],
+            "Meat Yield Kg per Goat": [20.0, 0.0],
+            "Pelt Units per Goat": [0.0, 1.0],
+            "Driver Growth %": [0.0, 0.0],
+        }
+    )
+
+    derived = streamlit_app._derive_pricing_quantities_from_production(
+        pricing, schedule, drivers
+    )
+
+    assert derived.loc[derived["Product"] == "Meat", "Quantity per Period"].iloc[0] == 100.0
+    assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == 5.0
+
+
+def test_manual_quantity_override_is_preserved_over_derived_drivers():
+    schedule = pd.DataFrame(
+        {"Herd Size (heads)": [100.0]},
+        index=pd.to_datetime(["2026-01-31"]),
+    )
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-01-31"],
+            "Product": ["Milk"],
+            "Active": [True],
+            "Allocation %": [100.0],
+            "Quantity Mode": ["Manual Override"],
+            "Manual Quantity Override": [999.0],
+            "Quantity per Period": [0.0],
+            "Unit": ["Litre"],
+            "Base Price": [2.0],
+            "Price Growth %": [0.0],
+        }
+    )
+    drivers = streamlit_app._default_production_driver_table()
+
+    derived = streamlit_app._derive_pricing_quantities_from_production(
+        pricing, schedule, drivers
+    )
+
+    assert derived["Quantity per Period"].iloc[0] == 999.0
 
 
 def test_pricing_assumptions_only_count_active_products_in_revenue():
@@ -400,6 +526,8 @@ def test_pricing_assumptions_only_count_active_products_in_revenue():
             "Product": ["Milk", "Meat", "Milk"],
             "Active": [True, False, True],
             "Allocation %": [100.0, 100.0, 50.0],
+            "Quantity Mode": ["Manual Override", "Manual Override", "Manual Override"],
+            "Manual Quantity Override": [100.0, 40.0, 80.0],
             "Quantity per Period": [100.0, 40.0, 80.0],
             "Unit": ["Litre", "Kg", "Litre"],
             "Base Price": [2.0, 10.0, 2.0],
@@ -426,6 +554,8 @@ def test_sync_pricing_table_to_core_expands_products_to_new_periods():
             "Product": ["Milk"],
             "Active": [True],
             "Allocation %": [100.0],
+            "Quantity Mode": ["Manual Override"],
+            "Manual Quantity Override": [400.0],
             "Quantity per Period": [400.0],
             "Unit": ["Litre"],
             "Base Price": [2.5],
@@ -439,6 +569,118 @@ def test_sync_pricing_table_to_core_expands_products_to_new_periods():
     assert ("2026-01-31", "Milk") in period_product_pairs
     assert ("2026-02-28", "Milk") in period_product_pairs
     assert ("2026-01-31", "Meat") in period_product_pairs
+
+
+def test_pricing_product_plan_can_target_a_period_range_only():
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-02-28", "2026-03-31"],
+            "Product": ["Milk", "Milk", "Milk"],
+            "Active": [False, False, False],
+            "Allocation %": [0.0, 0.0, 0.0],
+            "Quantity Mode": ["Derived", "Derived", "Derived"],
+            "Manual Quantity Override": [pd.NA, pd.NA, pd.NA],
+            "Quantity per Period": [0.0, 0.0, 0.0],
+            "Unit": ["Litre", "Litre", "Litre"],
+            "Base Price": [2.0, 2.0, 2.0],
+            "Price Growth %": [0.0, 0.0, 0.0],
+        }
+    )
+
+    updated = streamlit_app._apply_pricing_product_plan(
+        pricing,
+        "Milk",
+        active=True,
+        allocation_pct=100.0,
+        quantity_mode="Manual Override",
+        base_quantity=50.0,
+        yearly_growth_pct=0.0,
+        period_start="2026-02-28",
+        period_end="2026-03-31",
+    )
+
+    assert updated["Active"].tolist() == [False, True, True]
+    assert updated["Manual Quantity Override"].fillna(0.0).tolist() == [0.0, 50.0, 50.0]
+
+
+def test_pricing_validation_messages_flag_inactive_quantities_and_zero_prices():
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-01-31"],
+            "Product": ["Milk", "Cheese"],
+            "Active": [False, True],
+            "Allocation %": [100.0, 100.0],
+            "Quantity Mode": ["Manual Override", "Manual Override"],
+            "Manual Quantity Override": [25.0, 10.0],
+            "Quantity per Period": [25.0, 10.0],
+            "Unit": ["Litre", "Kg"],
+            "Base Price": [2.0, 0.0],
+            "Price Growth %": [0.0, 0.0],
+        }
+    )
+
+    issues = streamlit_app._pricing_validation_messages(
+        pricing,
+        streamlit_app._default_production_driver_table(),
+    )
+
+    assert any("Inactive products still carry quantities" in issue for issue in issues)
+    assert any("zero or missing prices" in issue for issue in issues)
+
+
+def test_commercial_shocks_apply_to_multiple_products():
+    schedule = pd.DataFrame(
+        {"Herd Size (heads)": [100.0]},
+        index=pd.to_datetime(["2026-03-31"]),
+    )
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-03-31", "2026-03-31"],
+            "Product": ["Meat", "Pelt"],
+            "Active": [True, True],
+            "Allocation %": [100.0, 100.0],
+            "Quantity Mode": ["Derived", "Derived"],
+            "Manual Quantity Override": [pd.NA, pd.NA],
+            "Quantity per Period": [0.0, 0.0],
+            "Unit": ["Kg", "Piece"],
+            "Base Price": [10.0, 4.0],
+            "Price Growth %": [0.0, 0.0],
+        }
+    )
+    drivers = pd.DataFrame(
+        {
+            "Product": ["Meat", "Pelt"],
+            "Unit": ["Kg", "Piece"],
+            "Quantity Mode": ["Derived", "Derived"],
+            "Lactating Herd Share %": [0.0, 0.0],
+            "Litres per Lactating Doe per Day": [0.0, 0.0],
+            "Milk Allocation to Cheese %": [0.0, 0.0],
+            "Cheese Yield Kg per Litre": [0.0, 0.0],
+            "Slaughter Rate % of Herd per Period": [5.0, 5.0],
+            "Meat Yield Kg per Goat": [20.0, 0.0],
+            "Pelt Units per Goat": [0.0, 1.0],
+            "Driver Growth %": [0.0, 0.0],
+        }
+    )
+
+    shocked = streamlit_app._apply_commercial_shocks_to_pricing(
+        pricing,
+        schedule,
+        drivers,
+        {
+            "Meat price change (%)": 10.0,
+            "Meat quantity change (%)": 20.0,
+            "Pelt price change (%)": -25.0,
+        },
+    )
+
+    meat_row = shocked.loc[shocked["Product"] == "Meat"].iloc[0]
+    pelt_row = shocked.loc[shocked["Product"] == "Pelt"].iloc[0]
+
+    assert meat_row["Quantity per Period"] == pytest.approx(120.0)
+    assert meat_row["Base Price"] == pytest.approx(11.0)
+    assert meat_row["Revenue"] == pytest.approx(1320.0)
+    assert pelt_row["Base Price"] == pytest.approx(3.0)
 
 
 def test_standalone_app_bootstraps_and_runs_without_top_level_exceptions():

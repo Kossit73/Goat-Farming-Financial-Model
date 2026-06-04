@@ -1238,27 +1238,61 @@ DETAIL_SCHEDULE_COLUMNS = {
 }
 
 
+PRODUCT_FAMILY_MAP: Dict[str, str] = {
+    "Milk": "Dairy",
+    "Cheese": "Dairy",
+    "Meat": "Livestock & Slaughter",
+    "Pelt": "Livestock & Slaughter",
+}
+
+
+DEFAULT_SCENARIO_ADJUSTMENTS: Dict[str, float] = {
+    "Milk price change (%)": 0.0,
+    "Cheese price change (%)": 0.0,
+    "Meat price change (%)": 0.0,
+    "Pelt price change (%)": 0.0,
+    "Milk quantity change (%)": 0.0,
+    "Cheese quantity change (%)": 0.0,
+    "Meat quantity change (%)": 0.0,
+    "Pelt quantity change (%)": 0.0,
+    "Feed cost change (%)": 0.0,
+}
+
+
 SCENARIO_PRESETS: Dict[str, Dict[str, Any]] = {
     "Base Case Scenario": {
-        "adjustments": {
-            "Milk price change (%)": 0.0,
-            "Feed cost change (%)": 0.0,
-        },
+        "adjustments": DEFAULT_SCENARIO_ADJUSTMENTS,
         "description": "Baseline view using the model inputs without additional shocks.",
     },
     "Best Case Scenario": {
         "adjustments": {
+            **DEFAULT_SCENARIO_ADJUSTMENTS,
             "Milk price change (%)": 12.0,
+            "Cheese price change (%)": 8.0,
+            "Meat price change (%)": 6.0,
+            "Pelt price change (%)": 4.0,
+            "Milk quantity change (%)": 5.0,
+            "Cheese quantity change (%)": 4.0,
+            "Meat quantity change (%)": 3.0,
+            "Pelt quantity change (%)": 3.0,
             "Feed cost change (%)": -8.0,
         },
-        "description": "Upside case with stronger milk pricing and more efficient feed spend.",
+        "description": "Upside case with stronger product pricing, modest output gains, and more efficient feed spend.",
     },
     "Worst Case Scenario": {
         "adjustments": {
+            **DEFAULT_SCENARIO_ADJUSTMENTS,
             "Milk price change (%)": -12.0,
+            "Cheese price change (%)": -9.0,
+            "Meat price change (%)": -7.0,
+            "Pelt price change (%)": -5.0,
+            "Milk quantity change (%)": -6.0,
+            "Cheese quantity change (%)": -5.0,
+            "Meat quantity change (%)": -4.0,
+            "Pelt quantity change (%)": -4.0,
             "Feed cost change (%)": 10.0,
         },
-        "description": "Downside case featuring pricing pressure and higher feed costs.",
+        "description": "Downside case featuring weaker product pricing, lower output, and higher feed costs.",
     },
 }
 
@@ -1799,31 +1833,53 @@ def _execute_scenario_suite(
         for name, table in (supplementary_tables or {}).items()
         if isinstance(table, pd.DataFrame)
     }
+    assumption_pricing = base_supplementary.get("Assumptions - Pricing", pd.DataFrame())
+    production_drivers = base_supplementary.get("Assumptions - Production Drivers", pd.DataFrame())
 
     results: Dict[str, Dict[str, Any]] = {}
     author_name = _current_model_author()
     for name, config in scenario_suite.items():
         adjustments = config.get("adjustments", {})
-        milk_pct = float(adjustments.get("Milk price change (%)", 0.0))
         feed_pct = float(adjustments.get("Feed cost change (%)", 0.0))
+        scenario_seed = schedule_df.copy()
+        scenario_pricing = pd.DataFrame()
+        if isinstance(assumption_pricing, pd.DataFrame) and not assumption_pricing.empty:
+            scenario_pricing = _apply_commercial_shocks_to_pricing(
+                assumption_pricing,
+                scenario_seed,
+                production_drivers,
+                adjustments,
+            )
+            scenario_seed = _apply_pricing_assumptions_to_schedule(
+                scenario_seed,
+                scenario_pricing,
+                production_drivers,
+            )
 
-        scenario_df = model.scenario(
-            milk_price_pct=milk_pct / 100.0,
+        scenario_schedule = InputSchedule(
+            data=scenario_seed,
+            valuation_inputs=valuation_inputs,
+            supplementary_tables=base_supplementary,
+        )
+        scenario_model = scenario_schedule.to_model()
+
+        scenario_df = scenario_model.scenario(
+            milk_price_pct=0.0,
             feed_cost_pct=feed_pct / 100.0,
         )
 
         scenario_supplementary = {
             key: value.copy() for key, value in base_supplementary.items()
         }
-        valuation_summary = model.valuation_summary(scenario_df)
-        scenario_kpis = model.kpis(scenario_df, annual=True)
-        working_capital_detail = model.working_capital_schedule(scenario_df, annual=False)
-        working_capital_annual = model.working_capital_schedule(scenario_df, annual=True)
-        debt_capacity_detail = model.debt_capacity_schedule(scenario_df, annual=False)
-        debt_capacity_annual = model.debt_capacity_schedule(scenario_df, annual=True)
-        ufcf_detail = model.ufcf_schedule(scenario_df, annual=False)
-        ufcf_annual = model.ufcf_schedule(scenario_df, annual=True)
-        outputs_table = _dynamic_outputs_table(model, scenario_df)
+        valuation_summary = scenario_model.valuation_summary(scenario_df)
+        scenario_kpis = scenario_model.kpis(scenario_df, annual=True)
+        working_capital_detail = scenario_model.working_capital_schedule(scenario_df, annual=False)
+        working_capital_annual = scenario_model.working_capital_schedule(scenario_df, annual=True)
+        debt_capacity_detail = scenario_model.debt_capacity_schedule(scenario_df, annual=False)
+        debt_capacity_annual = scenario_model.debt_capacity_schedule(scenario_df, annual=True)
+        ufcf_detail = scenario_model.ufcf_schedule(scenario_df, annual=False)
+        ufcf_annual = scenario_model.ufcf_schedule(scenario_df, annual=True)
+        outputs_table = _dynamic_outputs_table(scenario_model, scenario_df)
         if not outputs_table.empty:
             scenario_supplementary["Outputs"] = outputs_table
         benchmark_table = _dynamic_benchmark_kpis_table(scenario_kpis)
@@ -1835,20 +1891,28 @@ def _execute_scenario_suite(
             scenario_supplementary["Debt Capacity Schedule"] = debt_capacity_annual
         if not ufcf_annual.empty:
             scenario_supplementary["UFCF Schedule"] = ufcf_annual
+        if not scenario_pricing.empty:
+            scenario_supplementary["Commercial Revenue by Product"] = _pricing_family_summary(
+                scenario_pricing
+            )
+            scenario_supplementary["Commercial Quantity by Period"] = _pricing_quantity_by_period(
+                scenario_pricing
+            )
+            scenario_supplementary["Assumptions - Pricing"] = scenario_pricing
 
         scenario_inputs: Dict[str, Any] = {
-            "Milk price change (%)": milk_pct,
-            "Feed cost change (%)": feed_pct,
+            key: float(value)
+            for key, value in adjustments.items()
         }
         if author_name:
             scenario_inputs["Model author"] = author_name
 
         results[name] = {
-            "model": model,
+            "model": scenario_model,
             "base": base,
             "scenario": scenario_df,
             "kpis": scenario_kpis,
-            "break_even": model.break_even(scenario_df, annual=True),
+            "break_even": scenario_model.break_even(scenario_df, annual=True),
             "valuation": valuation_summary,
             "working_capital": working_capital_detail,
             "working_capital_annual": working_capital_annual,
@@ -1857,6 +1921,7 @@ def _execute_scenario_suite(
             "ufcf_schedule": ufcf_detail,
             "ufcf_schedule_annual": ufcf_annual,
             "supplementary": scenario_supplementary,
+            "pricing_assumptions": scenario_pricing,
             "selected_scenario": name,
             "scenario_inputs": scenario_inputs,
             "model_author": author_name,
@@ -2183,6 +2248,62 @@ DEFAULT_PRICING_ROWS = [
 ]
 
 
+DEFAULT_PRODUCTION_DRIVER_ROWS = [
+    {
+        "Product": "Milk",
+        "Unit": "Litre",
+        "Quantity Mode": "Derived",
+        "Lactating Herd Share %": 55.0,
+        "Litres per Lactating Doe per Day": 1.6,
+        "Milk Allocation to Cheese %": 0.0,
+        "Cheese Yield Kg per Litre": 0.0,
+        "Slaughter Rate % of Herd per Period": 0.0,
+        "Meat Yield Kg per Goat": 0.0,
+        "Pelt Units per Goat": 0.0,
+        "Driver Growth %": 0.0,
+    },
+    {
+        "Product": "Cheese",
+        "Unit": "Kg",
+        "Quantity Mode": "Derived",
+        "Lactating Herd Share %": 55.0,
+        "Litres per Lactating Doe per Day": 1.6,
+        "Milk Allocation to Cheese %": 20.0,
+        "Cheese Yield Kg per Litre": 0.12,
+        "Slaughter Rate % of Herd per Period": 0.0,
+        "Meat Yield Kg per Goat": 0.0,
+        "Pelt Units per Goat": 0.0,
+        "Driver Growth %": 0.0,
+    },
+    {
+        "Product": "Meat",
+        "Unit": "Kg",
+        "Quantity Mode": "Derived",
+        "Lactating Herd Share %": 0.0,
+        "Litres per Lactating Doe per Day": 0.0,
+        "Milk Allocation to Cheese %": 0.0,
+        "Cheese Yield Kg per Litre": 0.0,
+        "Slaughter Rate % of Herd per Period": 2.0,
+        "Meat Yield Kg per Goat": 18.0,
+        "Pelt Units per Goat": 0.0,
+        "Driver Growth %": 0.0,
+    },
+    {
+        "Product": "Pelt",
+        "Unit": "Piece",
+        "Quantity Mode": "Derived",
+        "Lactating Herd Share %": 0.0,
+        "Litres per Lactating Doe per Day": 0.0,
+        "Milk Allocation to Cheese %": 0.0,
+        "Cheese Yield Kg per Litre": 0.0,
+        "Slaughter Rate % of Herd per Period": 2.0,
+        "Meat Yield Kg per Goat": 0.0,
+        "Pelt Units per Goat": 1.0,
+        "Driver Growth %": 0.0,
+    },
+]
+
+
 DEFAULT_OPERATING_COST_ROWS = [
     {
         "Year": 2024,
@@ -2244,6 +2365,7 @@ def _default_input_template_config() -> Dict[str, list[dict[str, object]]]:
         "direct_wage_items": deepcopy(DEFAULT_DIRECT_WAGE_ITEMS),
         "admin_wage_items": deepcopy(DEFAULT_ADMIN_WAGE_ITEMS),
         "pricing_rows": deepcopy(DEFAULT_PRICING_ROWS),
+        "production_driver_rows": deepcopy(DEFAULT_PRODUCTION_DRIVER_ROWS),
         "operating_rows": deepcopy(DEFAULT_OPERATING_COST_ROWS),
     }
 
@@ -2322,6 +2444,99 @@ def _default_pricing_table() -> pd.DataFrame:
     return _default_pricing_table_from_core(_default_income_schedule(periods=12))
 
 
+def _default_production_driver_table() -> pd.DataFrame:
+    rows = _get_template("production_driver_rows", DEFAULT_PRODUCTION_DRIVER_ROWS)
+    columns = [
+        "Product",
+        "Unit",
+        "Quantity Mode",
+        "Lactating Herd Share %",
+        "Litres per Lactating Doe per Day",
+        "Milk Allocation to Cheese %",
+        "Cheese Yield Kg per Litre",
+        "Slaughter Rate % of Herd per Period",
+        "Meat Yield Kg per Goat",
+        "Pelt Units per Goat",
+        "Driver Growth %",
+    ]
+    table = _template_to_dataframe(rows, columns)
+    if table.empty:
+        return pd.DataFrame(columns=columns)
+    return _ensure_production_driver_table(table)
+
+
+def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _template_to_dataframe(
+            _get_template("production_driver_rows", DEFAULT_PRODUCTION_DRIVER_ROWS),
+            [
+                "Product",
+                "Unit",
+                "Quantity Mode",
+                "Lactating Herd Share %",
+                "Litres per Lactating Doe per Day",
+                "Milk Allocation to Cheese %",
+                "Cheese Yield Kg per Litre",
+                "Slaughter Rate % of Herd per Period",
+                "Meat Yield Kg per Goat",
+                "Pelt Units per Goat",
+                "Driver Growth %",
+            ],
+        )
+    else:
+        work = table.copy()
+
+    required_cols = [
+        "Product",
+        "Unit",
+        "Quantity Mode",
+        "Lactating Herd Share %",
+        "Litres per Lactating Doe per Day",
+        "Milk Allocation to Cheese %",
+        "Cheese Yield Kg per Litre",
+        "Slaughter Rate % of Herd per Period",
+        "Meat Yield Kg per Goat",
+        "Pelt Units per Goat",
+        "Driver Growth %",
+    ]
+    for column in required_cols:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    work["Product"] = work.get("Product", "").astype(str).str.strip()
+    work.loc[work["Product"] == "", "Product"] = "Product"
+    work["Unit"] = work.get("Unit", "").astype(str).str.strip()
+    work["Quantity Mode"] = work.get("Quantity Mode", "Derived").astype(str).str.strip()
+    work.loc[~work["Quantity Mode"].isin(["Derived", "Manual Override"]), "Quantity Mode"] = "Derived"
+
+    numeric_cols = [
+        "Lactating Herd Share %",
+        "Litres per Lactating Doe per Day",
+        "Milk Allocation to Cheese %",
+        "Cheese Yield Kg per Litre",
+        "Slaughter Rate % of Herd per Period",
+        "Meat Yield Kg per Goat",
+        "Pelt Units per Goat",
+        "Driver Growth %",
+    ]
+    for col in numeric_cols:
+        work[col] = pd.to_numeric(work.get(col), errors="coerce").fillna(0.0)
+
+    work = work.dropna(how="all")
+    if work.empty:
+        return _template_to_dataframe(DEFAULT_PRODUCTION_DRIVER_ROWS, required_cols)
+
+    defaults = {str(row["Product"]).strip(): row for _, row in pd.DataFrame(DEFAULT_PRODUCTION_DRIVER_ROWS).iterrows()}
+    for idx in work.index:
+        product = str(work.at[idx, "Product"]).strip()
+        default_row = defaults.get(product)
+        if default_row is not None and not str(work.at[idx, "Unit"]).strip():
+            work.at[idx, "Unit"] = str(default_row.get("Unit", "")).strip()
+
+    remainder = [col for col in work.columns if col not in required_cols]
+    return work[required_cols + remainder].reset_index(drop=True)
+
+
 def _default_pricing_table_from_core(core: pd.DataFrame) -> pd.DataFrame:
     periods = _normalize_period(core.get("Period", pd.Series(dtype=str))).tolist()
     revenue = pd.to_numeric(core.get("Revenue"), errors="coerce").tolist()
@@ -2348,6 +2563,8 @@ def _default_pricing_table_from_core(core: pd.DataFrame) -> pd.DataFrame:
                     "Product": product,
                     "Active": is_active,
                     "Allocation %": 100.0 if is_active else 0.0,
+                    "Quantity Mode": "Derived",
+                    "Manual Quantity Override": np.nan,
                     "Quantity per Period": quantity,
                     "Unit": unit,
                     "Base Price": base_price,
@@ -2364,6 +2581,8 @@ def _default_pricing_table_from_core(core: pd.DataFrame) -> pd.DataFrame:
                 "Product": ["Milk"],
                 "Active": [True],
                 "Allocation %": [100.0],
+                "Quantity Mode": ["Derived"],
+                "Manual Quantity Override": [np.nan],
                 "Quantity per Period": [0.0],
                 "Unit": ["Litre"],
                 "Base Price": [np.nan],
@@ -3061,6 +3280,8 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
         "Product",
         "Active",
         "Allocation %",
+        "Quantity Mode",
+        "Manual Quantity Override",
         "Quantity per Period",
         "Unit",
         "Base Price",
@@ -3075,6 +3296,11 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     work.loc[work["Product"] == "", "Product"] = "Product"
     work["Active"] = work.get("Active", False).fillna(False).astype(bool)
     work["Allocation %"] = pd.to_numeric(work.get("Allocation %"), errors="coerce")
+    work["Quantity Mode"] = work.get("Quantity Mode", "Derived").astype(str).str.strip()
+    work.loc[~work["Quantity Mode"].isin(["Derived", "Manual Override"]), "Quantity Mode"] = "Derived"
+    work["Manual Quantity Override"] = pd.to_numeric(
+        work.get("Manual Quantity Override"), errors="coerce"
+    )
     work["Quantity per Period"] = pd.to_numeric(
         work.get("Quantity per Period"), errors="coerce"
     )
@@ -3136,6 +3362,8 @@ def _add_pricing_row(table: pd.DataFrame) -> pd.DataFrame:
         "Product": f"Product {len(work) + 1}",
         "Active": False,
         "Allocation %": 0.0,
+        "Quantity Mode": "Manual Override",
+        "Manual Quantity Override": np.nan,
         "Quantity per Period": 0.0,
         "Unit": "Unit",
         "Base Price": np.nan,
@@ -3218,8 +3446,11 @@ def _apply_pricing_product_plan(
     *,
     active: bool,
     allocation_pct: float,
+    quantity_mode: str,
     base_quantity: float,
     yearly_growth_pct: float,
+    period_start: Optional[str] = None,
+    period_end: Optional[str] = None,
 ) -> pd.DataFrame:
     work = _ensure_pricing_table(table)
     if work.empty:
@@ -3227,6 +3458,15 @@ def _apply_pricing_product_plan(
 
     work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
     product_mask = work["Product"].astype(str).str.strip() == str(product).strip()
+    if not product_mask.any():
+        return work.drop(columns="Period_dt")
+
+    start_dt = pd.to_datetime(period_start, errors="coerce")
+    end_dt = pd.to_datetime(period_end, errors="coerce")
+    if pd.notna(start_dt):
+        product_mask &= work["Period_dt"] >= start_dt
+    if pd.notna(end_dt):
+        product_mask &= work["Period_dt"] <= end_dt
     if not product_mask.any():
         return work.drop(columns="Period_dt")
 
@@ -3243,10 +3483,148 @@ def _apply_pricing_product_plan(
         quantity = float(base_quantity) * ((1 + yearly_growth_pct / 100.0) ** year_offset)
         work.at[idx, "Active"] = bool(active)
         work.at[idx, "Allocation %"] = float(allocation_pct) if active else 0.0
-        work.at[idx, "Quantity per Period"] = quantity if active else 0.0
+        work.at[idx, "Quantity Mode"] = (
+            quantity_mode if quantity_mode in {"Derived", "Manual Override"} else "Derived"
+        )
+        if work.at[idx, "Quantity Mode"] == "Manual Override":
+            work.at[idx, "Manual Quantity Override"] = quantity if active else 0.0
+            work.at[idx, "Quantity per Period"] = quantity if active else 0.0
+        else:
+            work.at[idx, "Manual Quantity Override"] = np.nan
+            work.at[idx, "Quantity per Period"] = 0.0
 
     work = work.drop(columns="Period_dt")
     return _ensure_pricing_table(work)
+
+
+def _product_family_label(product: Any) -> str:
+    product_key = str(product).strip()
+    return PRODUCT_FAMILY_MAP.get(product_key, "Other")
+
+
+def _pricing_family_summary(table: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_pricing_table(table)
+    if work.empty:
+        return pd.DataFrame(columns=["Product Family", "Product", "Active Periods", "Total Quantity", "Total Revenue"])
+
+    active = work.loc[work["Active"].fillna(False).astype(bool)].copy()
+    if active.empty:
+        return pd.DataFrame(columns=["Product Family", "Product", "Active Periods", "Total Quantity", "Total Revenue"])
+
+    active["Product Family"] = active["Product"].map(_product_family_label)
+    summary = (
+        active.groupby(["Product Family", "Product"], as_index=False)
+        .agg(
+            **{
+                "Active Periods": ("Period", "nunique"),
+                "Total Quantity": ("Quantity per Period", "sum"),
+                "Total Revenue": ("Revenue", "sum"),
+            }
+        )
+        .sort_values(["Product Family", "Product"], kind="stable")
+    )
+    return summary.reset_index(drop=True)
+
+
+def _pricing_quantity_by_period(table: pd.DataFrame) -> pd.DataFrame:
+    work = _ensure_pricing_table(table)
+    if work.empty:
+        return pd.DataFrame(columns=["Period"])
+    active = work.loc[work["Active"].fillna(False).astype(bool)].copy()
+    if active.empty:
+        return pd.DataFrame(columns=["Period"])
+    summary = (
+        active.pivot_table(
+            index="Period",
+            columns="Product",
+            values="Quantity per Period",
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+        .sort_index()
+        .reset_index()
+    )
+    summary.columns.name = None
+    return summary
+
+
+def _pricing_validation_messages(
+    pricing_table: pd.DataFrame,
+    production_drivers: Optional[pd.DataFrame],
+) -> list[str]:
+    pricing = _ensure_pricing_table(pricing_table)
+    drivers = _ensure_production_driver_table(production_drivers)
+    messages: list[str] = []
+    if pricing.empty:
+        return messages
+
+    inactive_qty = pricing.loc[
+        ~pricing["Active"].fillna(False).astype(bool)
+        & pd.to_numeric(pricing["Quantity per Period"], errors="coerce").fillna(0.0).gt(0.0)
+    ]
+    if not inactive_qty.empty:
+        labels = inactive_qty[["Period", "Product"]].astype(str).agg(" / ".join, axis=1).tolist()
+        messages.append(
+            "Inactive products still carry quantities for: " + ", ".join(labels[:4]) + ("..." if len(labels) > 4 else "")
+        )
+
+    zero_price = pricing.loc[
+        pricing["Active"].fillna(False).astype(bool)
+        & pd.to_numeric(pricing["Base Price"], errors="coerce").fillna(0.0).le(0.0)
+    ]
+    if not zero_price.empty:
+        labels = zero_price["Product"].astype(str).drop_duplicates().tolist()
+        messages.append("Active products with zero or missing prices: " + ", ".join(labels))
+
+    zero_qty = pricing.loc[
+        pricing["Active"].fillna(False).astype(bool)
+        & pd.to_numeric(pricing["Quantity per Period"], errors="coerce").fillna(0.0).le(0.0)
+    ]
+    if not zero_qty.empty:
+        labels = zero_qty[["Period", "Product"]].astype(str).agg(" / ".join, axis=1).tolist()
+        messages.append(
+            "Active products with zero derived quantity: " + ", ".join(labels[:4]) + ("..." if len(labels) > 4 else "")
+        )
+
+    dairy = pricing.loc[
+        pricing["Active"].fillna(False).astype(bool)
+        & pricing["Product"].astype(str).map(_product_family_label).eq("Dairy")
+    ].copy()
+    if not dairy.empty:
+        dairy_totals = dairy.groupby("Period")["Allocation %"].sum(min_count=1)
+        over_allocated = dairy_totals[dairy_totals > 100.0 + 1e-9]
+        if not over_allocated.empty:
+            period_labels = over_allocated.index.astype(str).tolist()
+            messages.append(
+                "Dairy allocation exceeds 100% for: " + ", ".join(period_labels[:4]) + ("..." if len(period_labels) > 4 else "")
+            )
+
+    driver_lookup = {
+        str(row.get("Product", "")).strip(): dict(row)
+        for _, row in drivers.iterrows()
+        if str(row.get("Product", "")).strip()
+    }
+    cheese_alloc = pd.to_numeric(
+        pd.Series([driver_lookup.get("Cheese", {}).get("Milk Allocation to Cheese %")]),
+        errors="coerce",
+    ).iloc[0]
+    if pd.notna(cheese_alloc) and (cheese_alloc < 0 or cheese_alloc > 100):
+        messages.append("Cheese driver `Milk Allocation to Cheese %` must stay between 0% and 100%.")
+
+    meat_rate = pd.to_numeric(
+        pd.Series([driver_lookup.get("Meat", {}).get("Slaughter Rate % of Herd per Period")]),
+        errors="coerce",
+    ).iloc[0]
+    pelt_rate = pd.to_numeric(
+        pd.Series([driver_lookup.get("Pelt", {}).get("Slaughter Rate % of Herd per Period")]),
+        errors="coerce",
+    ).iloc[0]
+    meat_active = pricing.loc[pricing["Product"].astype(str).str.strip() == "Meat", "Active"].fillna(False).any()
+    pelt_active = pricing.loc[pricing["Product"].astype(str).str.strip() == "Pelt", "Active"].fillna(False).any()
+    if meat_active and pelt_active and pd.notna(meat_rate) and pd.notna(pelt_rate) and not np.isclose(meat_rate, pelt_rate):
+        messages.append("Meat and Pelt use different slaughter rates. Align them if both products share the same slaughter stream.")
+
+    return messages
 
 
 def _sync_pricing_table_to_core(
@@ -3270,14 +3648,176 @@ def _pricing_revenue_by_period(table: pd.DataFrame) -> pd.DataFrame:
     return summary.rename(columns={"Revenue": "Revenue from Pricing"})
 
 
+def _production_driver_lookup(table: Optional[pd.DataFrame]) -> Dict[str, dict[str, Any]]:
+    drivers = _ensure_production_driver_table(table)
+    return {
+        str(row.get("Product", "")).strip(): dict(row)
+        for _, row in drivers.iterrows()
+        if str(row.get("Product", "")).strip()
+    }
+
+
+def _period_days_from_index(index: pd.DatetimeIndex) -> pd.Series:
+    if index.empty:
+        return pd.Series(dtype=float)
+    deltas = index.to_series().diff().dt.days.astype(float)
+    valid_days = deltas.iloc[1:][np.isfinite(deltas.iloc[1:])]
+    default_days = float(np.median(valid_days)) if not valid_days.empty else 30.44
+    if not np.isfinite(default_days) or default_days <= 0:
+        default_days = 30.44
+    return deltas.fillna(default_days).clip(lower=1.0)
+
+
+def _derive_pricing_quantities_from_production(
+    pricing_table: pd.DataFrame,
+    schedule_df: pd.DataFrame,
+    production_drivers: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    pricing = _ensure_pricing_table(pricing_table)
+    if pricing.empty or schedule_df.empty:
+        return pricing
+
+    driver_lookup = _production_driver_lookup(production_drivers)
+    if not driver_lookup:
+        return pricing
+
+    work = pricing.copy()
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    work["Period_dt"] = pd.to_datetime(work["Period"], errors="coerce")
+    schedule_index = pd.to_datetime(schedule_df.index, errors="coerce")
+    period_days_map = dict(
+        zip(
+            schedule_index.strftime("%Y-%m-%d"),
+            _period_days_from_index(schedule_index).tolist(),
+        )
+    )
+    herd_series = schedule_df.get("Herd Size (heads)")
+    if herd_series is None:
+        herd_series = pd.Series(np.nan, index=schedule_df.index, dtype=float)
+    else:
+        herd_series = pd.to_numeric(herd_series, errors="coerce")
+    herd_map = {
+        idx.strftime("%Y-%m-%d"): float(value)
+        for idx, value in zip(
+            schedule_index,
+            herd_series,
+        )
+        if pd.notna(idx) and pd.notna(value)
+    }
+    base_year = int(schedule_index.min().year) if len(schedule_index) else pd.Timestamp.today().year
+
+    for period, period_group in work.groupby("Period", sort=False):
+        herd_size = herd_map.get(period, 0.0)
+        period_days = period_days_map.get(period, 30.44)
+        period_dt = pd.to_datetime(period, errors="coerce")
+        year_offset = max(0, int(period_dt.year) - base_year) if pd.notna(period_dt) else 0
+
+        milk_driver = driver_lookup.get("Milk", {})
+        cheese_driver = driver_lookup.get("Cheese", {})
+        milk_growth = 1 + (
+            float(pd.to_numeric(pd.Series([milk_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
+            / 100.0
+        )
+        cheese_growth = 1 + (
+            float(pd.to_numeric(pd.Series([cheese_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
+            / 100.0
+        )
+
+        lactating_share = float(
+            pd.to_numeric(pd.Series([milk_driver.get("Lactating Herd Share %")]), errors="coerce").iloc[0] or 0.0
+        ) / 100.0
+        litres_per_day = float(
+            pd.to_numeric(pd.Series([milk_driver.get("Litres per Lactating Doe per Day")]), errors="coerce").iloc[0] or 0.0
+        )
+        base_milk_output = herd_size * lactating_share * litres_per_day * period_days * (milk_growth ** year_offset)
+
+        cheese_allocation = float(
+            pd.to_numeric(pd.Series([cheese_driver.get("Milk Allocation to Cheese %")]), errors="coerce").iloc[0] or 0.0
+        ) / 100.0
+        cheese_yield = float(
+            pd.to_numeric(pd.Series([cheese_driver.get("Cheese Yield Kg per Litre")]), errors="coerce").iloc[0] or 0.0
+        ) * (cheese_growth ** year_offset)
+
+        cheese_active = bool(
+            period_group.loc[period_group["Product"].astype(str).str.strip() == "Cheese", "Active"].fillna(False).any()
+        )
+        milk_available_for_sale = base_milk_output * (1.0 - cheese_allocation if cheese_active else 1.0)
+        cheese_milk_input = base_milk_output * cheese_allocation if cheese_active else 0.0
+
+        for idx, row in period_group.iterrows():
+            product = str(row.get("Product", "")).strip()
+            quantity_mode = str(row.get("Quantity Mode", "Derived")).strip()
+            if quantity_mode == "Manual Override":
+                manual_qty = pd.to_numeric(
+                    pd.Series([row.get("Manual Quantity Override")]), errors="coerce"
+                ).iloc[0]
+                work.at[idx, "Quantity per Period"] = 0.0 if pd.isna(manual_qty) else float(manual_qty)
+                continue
+
+            active = bool(row.get("Active", False))
+            if not active:
+                work.at[idx, "Quantity per Period"] = 0.0
+                continue
+
+            if product == "Milk":
+                work.at[idx, "Quantity per Period"] = max(0.0, milk_available_for_sale)
+                continue
+            if product == "Cheese":
+                work.at[idx, "Quantity per Period"] = max(0.0, cheese_milk_input * cheese_yield)
+                continue
+
+            driver = driver_lookup.get(product, {})
+            growth = 1 + (
+                float(pd.to_numeric(pd.Series([driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
+                / 100.0
+            )
+            slaughter_rate = float(
+                pd.to_numeric(pd.Series([driver.get("Slaughter Rate % of Herd per Period")]), errors="coerce").iloc[0] or 0.0
+            ) / 100.0
+            slaughtered_goats = herd_size * slaughter_rate * (growth ** year_offset)
+
+            if product == "Meat":
+                meat_yield = float(
+                    pd.to_numeric(pd.Series([driver.get("Meat Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0
+                )
+                work.at[idx, "Quantity per Period"] = max(0.0, slaughtered_goats * meat_yield)
+            elif product == "Pelt":
+                pelt_units = float(
+                    pd.to_numeric(pd.Series([driver.get("Pelt Units per Goat")]), errors="coerce").iloc[0] or 0.0
+                )
+                work.at[idx, "Quantity per Period"] = max(0.0, slaughtered_goats * pelt_units)
+
+    return _ensure_pricing_table(work.drop(columns="Period_dt"))
+
+
+def _pricing_schedule_context(
+    core_table: pd.DataFrame,
+    herd_plan: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    core_clean = _clean_editor_table(core_table)
+    if core_clean is None:
+        return pd.DataFrame()
+    prepared = _prepare_timeline_table(core_clean)
+    context = prepared.copy()
+    if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+        context = _apply_herd_plan_to_schedule(context, herd_plan)
+    return context
+
+
 def _apply_pricing_assumptions_to_schedule(
-    schedule_df: pd.DataFrame, pricing_table: Optional[pd.DataFrame]
+    schedule_df: pd.DataFrame,
+    pricing_table: Optional[pd.DataFrame],
+    production_drivers: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if schedule_df.empty or pricing_table is None or pricing_table.empty:
         return schedule_df
 
     work = schedule_df.copy()
-    pricing = _ensure_pricing_table(pricing_table)
+    pricing = _derive_pricing_quantities_from_production(
+        _ensure_pricing_table(pricing_table),
+        work,
+        production_drivers,
+    )
     revenue_summary = _pricing_revenue_by_period(pricing)
     revenue_map = dict(
         zip(
@@ -3289,6 +3829,50 @@ def _apply_pricing_assumptions_to_schedule(
     period_keys = [idx.strftime("%Y-%m-%d") for idx in work.index]
     work["Revenue"] = pd.Series(period_keys, index=work.index).map(revenue_map).fillna(0.0)
     return _synchronize_financial_algorithms(work)
+
+
+def _apply_commercial_shocks_to_pricing(
+    pricing_table: pd.DataFrame,
+    schedule_df: pd.DataFrame,
+    production_drivers: Optional[pd.DataFrame],
+    adjustments: Dict[str, Any],
+) -> pd.DataFrame:
+    pricing = _derive_pricing_quantities_from_production(
+        _ensure_pricing_table(pricing_table),
+        schedule_df,
+        production_drivers,
+    )
+    if pricing.empty:
+        return pricing
+
+    work = pricing.copy()
+    active_mask = work["Active"].fillna(False).astype(bool)
+    products = ["Milk", "Cheese", "Meat", "Pelt"]
+    for product in products:
+        product_mask = work["Product"].astype(str).str.strip() == product
+        price_shock = float(adjustments.get(f"{product} price change (%)", 0.0) or 0.0)
+        qty_shock = float(adjustments.get(f"{product} quantity change (%)", 0.0) or 0.0)
+        if price_shock:
+            work.loc[product_mask, "Base Price"] = (
+                pd.to_numeric(work.loc[product_mask, "Base Price"], errors="coerce").fillna(0.0)
+                * (1 + price_shock / 100.0)
+            )
+        if qty_shock:
+            work.loc[product_mask & active_mask, "Quantity per Period"] = (
+                pd.to_numeric(
+                    work.loc[product_mask & active_mask, "Quantity per Period"], errors="coerce"
+                ).fillna(0.0)
+                * (1 + qty_shock / 100.0)
+            )
+
+    work["Revenue"] = np.where(
+        active_mask,
+        pd.to_numeric(work["Quantity per Period"], errors="coerce").fillna(0.0)
+        * pd.to_numeric(work["Base Price"], errors="coerce").fillna(0.0)
+        * (pd.to_numeric(work["Allocation %"], errors="coerce").fillna(0.0) / 100.0),
+        0.0,
+    )
+    return _ensure_pricing_table(work)
 
 
 def _default_operating_cost_table() -> pd.DataFrame:
@@ -5187,11 +5771,8 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
 def _default_scenario_controls_table() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "Driver": [
-                "Milk price change (%)",
-                "Feed cost change (%)",
-            ],
-            "Change %": [0.0, 0.0],
+            "Driver": list(DEFAULT_SCENARIO_ADJUSTMENTS.keys()),
+            "Change %": list(DEFAULT_SCENARIO_ADJUSTMENTS.values()),
         }
     )
 
@@ -5524,8 +6105,13 @@ def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
         core_schedule = st.session_state.get("core_schedule", pd.DataFrame())
         pricing_table = assumptions.get("Pricing")
         if isinstance(pricing_table, pd.DataFrame):
-            assumptions["Pricing"] = _sync_pricing_table_to_core(
+            synced_pricing = _sync_pricing_table_to_core(
                 pricing_table, core_schedule
+            )
+            assumptions["Pricing"] = _derive_pricing_quantities_from_production(
+                synced_pricing,
+                _pricing_schedule_context(core_schedule, assumptions.get("Herd Plan")),
+                assumptions.get("Production Drivers"),
             )
 
         for table_name in ["Operating Costs", "Herd Plan"]:
@@ -5702,8 +6288,11 @@ def _build_schedule_dataframe(
         pricing = assumptions.get("Pricing")
         if isinstance(pricing, pd.DataFrame) and not pricing.empty:
             pricing = _sync_pricing_table_to_core(pricing, core_clean)
+            production_drivers = assumptions.get("Production Drivers")
             schedule_df = _apply_pricing_assumptions_to_schedule(
-                schedule_df, pricing
+                schedule_df,
+                pricing,
+                production_drivers if isinstance(production_drivers, pd.DataFrame) else None,
             )
 
     return schedule_df
@@ -5717,6 +6306,7 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
             "Production Horizon": _default_production_horizon_table(),
             "Herd Plan": _default_herd_plan_table(),
             "Pricing": _default_pricing_table(),
+            "Production Drivers": _default_production_driver_table(),
             "Operating Costs": _default_operating_cost_table(),
             "Variable Expenses": _default_variable_expense_input_table(),
             "Direct Wages": _default_direct_wage_input_table(),
@@ -5833,6 +6423,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
         "Production Horizon": _default_production_horizon_table(),
         "Herd Plan": _default_herd_plan_table(),
         "Pricing": _default_pricing_table(),
+        "Production Drivers": _default_production_driver_table(),
         "Operating Costs": _default_operating_cost_table(),
         "Variable Expenses": _default_variable_expense_input_table(),
         "Direct Wages": _default_direct_wage_input_table(),
@@ -6126,11 +6717,17 @@ def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) 
         dup = pricing.duplicated(subset=["Period", "Product"], keep=False)
         if dup.any():
             issues.append("Pricing has duplicate Period+Product rows.")
+        issues.extend(
+            _pricing_validation_messages(
+                pricing,
+                assumptions.get("Production Drivers"),
+            )
+        )
 
     if issues:
         st.warning("Validation summary: " + " ".join(f"- {msg}" for msg in issues))
     else:
-        st.success("Validation summary: no duplicate key rows detected.")
+        st.success("Validation summary: commercial and schedule keys are consistent.")
 
 
 ANALYTICS_FRAMEWORK_TOOLS: List[Dict[str, str]] = [
@@ -7521,9 +8118,17 @@ def main() -> None:
             st.session_state.get("core_schedule")
         )
 
-    st.session_state.assumptions["Pricing"] = _sync_pricing_table_to_core(
+    synced_pricing = _sync_pricing_table_to_core(
         st.session_state.assumptions.get("Pricing", pd.DataFrame()),
         st.session_state.core_schedule,
+    )
+    st.session_state.assumptions["Pricing"] = _derive_pricing_quantities_from_production(
+        synced_pricing,
+        _pricing_schedule_context(
+            st.session_state.core_schedule,
+            st.session_state.assumptions.get("Herd Plan"),
+        ),
+        st.session_state.assumptions.get("Production Drivers"),
     )
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
@@ -8495,6 +9100,10 @@ def main() -> None:
         )
 
         st.markdown("#### Scenario Controls")
+        st.caption(
+            "Use the table to configure product-specific price and quantity shocks. The quick selectors below remain "
+            "for the most common milk-price and feed-cost stress tests."
+        )
         scenario_table = _ensure_scenario_controls_table(
             st.session_state.assumptions.get("Scenario Controls")
         )
@@ -8693,6 +9302,76 @@ def main() -> None:
             "These assumptions define product pricing logic and growth patterns that should align with the revenue "
             "and gross margin structure used in the Input Schedule."
         )
+        st.markdown("#### Production Quantity Drivers")
+        production_drivers = _ensure_production_driver_table(
+            st.session_state.assumptions.get("Production Drivers")
+        )
+        st.session_state.assumptions["Production Drivers"] = production_drivers
+        st.caption(
+            "These biological and commercial drivers convert herd size into product quantities. Milk and cheese share "
+            "one milk-output stream, while meat and pelt derive from slaughtered animals."
+        )
+
+        def _save_production_drivers(updated: pd.DataFrame) -> None:
+            ensured = _ensure_production_driver_table(updated)
+            st.session_state.assumptions["Production Drivers"] = ensured
+
+        production_driver_editor = st.data_editor(
+            st.session_state.assumptions["Production Drivers"],
+            use_container_width=True,
+            key="assump::production_drivers",
+            column_config={
+                "Product": st.column_config.TextColumn("Product"),
+                "Unit": st.column_config.TextColumn("Unit"),
+                "Quantity Mode": st.column_config.SelectboxColumn(
+                    "Quantity Mode",
+                    options=["Derived", "Manual Override"],
+                ),
+                "Lactating Herd Share %": st.column_config.NumberColumn(
+                    "Lactating Herd Share (%)", format="%.2f", step=0.1
+                ),
+                "Litres per Lactating Doe per Day": st.column_config.NumberColumn(
+                    "Litres / Doe / Day", format="%.3f", step=0.1
+                ),
+                "Milk Allocation to Cheese %": st.column_config.NumberColumn(
+                    "Milk to Cheese (%)", format="%.2f", step=0.1
+                ),
+                "Cheese Yield Kg per Litre": st.column_config.NumberColumn(
+                    "Cheese Yield (Kg/Litre)", format="%.3f", step=0.01
+                ),
+                "Slaughter Rate % of Herd per Period": st.column_config.NumberColumn(
+                    "Slaughter Rate (% / Period)", format="%.2f", step=0.1
+                ),
+                "Meat Yield Kg per Goat": st.column_config.NumberColumn(
+                    "Meat Yield (Kg/Goat)", format="%.2f", step=0.1
+                ),
+                "Pelt Units per Goat": st.column_config.NumberColumn(
+                    "Pelt Units / Goat", format="%.2f", step=0.1
+                ),
+                "Driver Growth %": st.column_config.NumberColumn(
+                    "Driver Growth (%)", format="%.2f", step=0.1
+                ),
+            },
+            disabled=["Product", "Unit"],
+        )
+        _save_production_drivers(production_driver_editor)
+        dairy_drivers = st.session_state.assumptions["Production Drivers"].loc[
+            st.session_state.assumptions["Production Drivers"]["Product"].isin(["Milk", "Cheese"])
+        ]
+        slaughter_drivers = st.session_state.assumptions["Production Drivers"].loc[
+            st.session_state.assumptions["Production Drivers"]["Product"].isin(["Meat", "Pelt"])
+        ]
+        dairy_col, slaughter_col = st.columns(2)
+        with dairy_col:
+            st.markdown("**Dairy Drivers**")
+            st.dataframe(dairy_drivers, use_container_width=True, hide_index=True)
+        with slaughter_col:
+            st.markdown("**Livestock & Slaughter Drivers**")
+            st.dataframe(slaughter_drivers, use_container_width=True, hide_index=True)
+        assumption_tables["Production Drivers"] = st.session_state.assumptions[
+            "Production Drivers"
+        ]
+
         st.markdown("#### Pricing Assumptions")
         pricing_table = _sync_pricing_table_to_core(
             st.session_state.assumptions.get("Pricing", pd.DataFrame()),
@@ -8712,8 +9391,11 @@ def main() -> None:
         st.session_state.setdefault("pricing_plan_product", "Milk")
         st.session_state.setdefault("pricing_plan_active", True)
         st.session_state.setdefault("pricing_plan_allocation_pct", 100.0)
+        st.session_state.setdefault("pricing_plan_quantity_mode", "Derived")
         st.session_state.setdefault("pricing_plan_quantity", 0.0)
         st.session_state.setdefault("pricing_plan_growth_pct", 0.0)
+        st.session_state.setdefault("pricing_plan_period_start", None)
+        st.session_state.setdefault("pricing_plan_period_end", None)
 
         product_options = sorted(
             {
@@ -8724,8 +9406,25 @@ def main() -> None:
                 if str(product).strip()
             }
         )
-        plan_product_col, plan_active_col, plan_alloc_col, plan_qty_col, plan_growth_col, plan_btn_col = st.columns(
-            [1.2, 0.9, 1.1, 1.4, 1.1, 1]
+        period_options = (
+            pricing_table.get("Period", pd.Series(dtype=str))
+            .dropna()
+            .astype(str)
+            .drop_duplicates()
+            .tolist()
+        )
+        if period_options:
+            if st.session_state.get("pricing_plan_period_start") not in period_options:
+                st.session_state.pricing_plan_period_start = period_options[0]
+            if st.session_state.get("pricing_plan_period_end") not in period_options:
+                st.session_state.pricing_plan_period_end = period_options[-1]
+
+        st.caption(
+            "Plan product activation by date range. Use dairy settings for milk and cheese, and slaughter-linked "
+            "settings for meat and pelt."
+        )
+        plan_product_col, plan_active_col, plan_alloc_col, plan_mode_col, plan_qty_col, plan_growth_col = st.columns(
+            [1.1, 0.8, 1.0, 1.1, 1.2, 1.0]
         )
         plan_product_col.selectbox(
             "Plan product",
@@ -8740,8 +9439,13 @@ def main() -> None:
             step=1.0,
             key="pricing_plan_allocation_pct",
         )
+        plan_mode_col.selectbox(
+            "Quantity mode",
+            options=["Derived", "Manual Override"],
+            key="pricing_plan_quantity_mode",
+        )
         plan_qty_col.number_input(
-            f"Base quantity / {period_label}",
+            f"Manual qty / {period_label}",
             min_value=0.0,
             step=10.0,
             key="pricing_plan_quantity",
@@ -8753,7 +9457,18 @@ def main() -> None:
             step=0.1,
             key="pricing_plan_growth_pct",
         )
-        if plan_btn_col.button("Apply plan", key="pricing_apply_plan"):
+        range_start_col, range_end_col, plan_btn_col = st.columns([1.1, 1.1, 1])
+        range_start_col.selectbox(
+            "From period",
+            options=period_options,
+            key="pricing_plan_period_start",
+        )
+        range_end_col.selectbox(
+            "To period",
+            options=period_options,
+            key="pricing_plan_period_end",
+        )
+        if plan_btn_col.button("Apply plan to range", key="pricing_apply_plan"):
             pricing_table = _apply_pricing_product_plan(
                 pricing_table,
                 st.session_state.get("pricing_plan_product", "Milk"),
@@ -8761,19 +9476,40 @@ def main() -> None:
                 allocation_pct=float(
                     st.session_state.get("pricing_plan_allocation_pct", 100.0)
                 ),
+                quantity_mode=str(
+                    st.session_state.get("pricing_plan_quantity_mode", "Derived")
+                ),
                 base_quantity=float(st.session_state.get("pricing_plan_quantity", 0.0)),
                 yearly_growth_pct=float(
                     st.session_state.get("pricing_plan_growth_pct", 0.0)
                 ),
+                period_start=st.session_state.get("pricing_plan_period_start"),
+                period_end=st.session_state.get("pricing_plan_period_end"),
             )
             st.session_state.assumptions["Pricing"] = pricing_table
+        refresh_context = _pricing_schedule_context(
+            st.session_state.core_schedule,
+            st.session_state.assumptions.get("Herd Plan"),
+        )
+        if st.button("Refresh derived quantities", key="pricing_refresh_quantities"):
+            refreshed = _derive_pricing_quantities_from_production(
+                st.session_state.assumptions["Pricing"],
+                refresh_context,
+                st.session_state.assumptions.get("Production Drivers"),
+            )
+            st.session_state.assumptions["Pricing"] = refreshed
 
         def _save_pricing_matrix(updated: pd.DataFrame) -> None:
             ensured = _sync_pricing_table_to_core(
                 updated,
                 st.session_state.core_schedule,
             )
-            st.session_state.assumptions["Pricing"] = ensured
+            refreshed = _derive_pricing_quantities_from_production(
+                ensured,
+                refresh_context,
+                st.session_state.assumptions.get("Production Drivers"),
+            )
+            st.session_state.assumptions["Pricing"] = refreshed
 
         pricing_matrix = st.data_editor(
             st.session_state.assumptions["Pricing"],
@@ -8785,6 +9521,13 @@ def main() -> None:
                 "Active": st.column_config.CheckboxColumn("Active"),
                 "Allocation %": st.column_config.NumberColumn(
                     "Allocation (%)", format="%.2f", step=1.0
+                ),
+                "Quantity Mode": st.column_config.SelectboxColumn(
+                    "Quantity Mode",
+                    options=["Derived", "Manual Override"],
+                ),
+                "Manual Quantity Override": st.column_config.NumberColumn(
+                    f"Manual qty / {period_label}", format="%.2f", step=1.0
                 ),
                 "Quantity per Period": st.column_config.NumberColumn(
                     f"Quantity per {period_label}", format="%.2f", step=1.0
@@ -8800,9 +9543,18 @@ def main() -> None:
                     "Revenue", format="%.2f"
                 ),
             },
-            disabled=["Period", "Product", "Revenue"],
+            disabled=["Period", "Product", "Quantity per Period", "Revenue"],
         )
         _save_pricing_matrix(pricing_matrix)
+
+        pricing_validation = _pricing_validation_messages(
+            st.session_state.assumptions["Pricing"],
+            st.session_state.assumptions.get("Production Drivers"),
+        )
+        if pricing_validation:
+            st.warning("Commercial validation: " + " ".join(f"- {msg}" for msg in pricing_validation))
+        else:
+            st.success("Commercial validation: active products, allocations, and production drivers are aligned.")
 
         st.markdown("##### Revenue Driven by Active Products")
         st.dataframe(
@@ -8906,6 +9658,24 @@ def main() -> None:
         st.info(
             "Use the product planner and pricing matrix above as the source of truth for period-based product activation and revenue planning."
         )
+        st.caption(
+            "The add/remove row tools below remain as a manual fallback, but the planner and matrix above should be the primary commercial workflow."
+        )
+
+        st.markdown("##### Commercial Mix Summary")
+        summary_col1, summary_col2 = st.columns(2)
+        with summary_col1:
+            st.markdown("**Revenue by Product**")
+            st.dataframe(
+                _pricing_family_summary(st.session_state.assumptions["Pricing"]),
+                use_container_width=True,
+            )
+        with summary_col2:
+            st.markdown("**Quantity by Product and Period**")
+            st.dataframe(
+                _pricing_quantity_by_period(st.session_state.assumptions["Pricing"]),
+                use_container_width=True,
+            )
 
         assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
@@ -9464,20 +10234,20 @@ def main() -> None:
             if cleaned is not None:
                 combined_supplementary[f"Assumptions - {name}"] = cleaned
 
-        custom_adjustments = {
-            "Milk price change (%)": float(milk_price),
-            "Feed cost change (%)": float(feed_cost),
-        }
+        custom_adjustments = _scenario_controls_value_map(
+            assumption_tables.get("Scenario Controls", pd.DataFrame())
+        )
+        custom_adjustments["Milk price change (%)"] = float(milk_price)
+        custom_adjustments["Feed cost change (%)"] = float(feed_cost)
 
         current_presets = _current_scenario_presets()
         matches_preset = any(
-            np.isclose(
-                custom_adjustments["Milk price change (%)"],
-                preset["adjustments"].get("Milk price change (%)", 0.0),
-            )
-            and np.isclose(
-                custom_adjustments["Feed cost change (%)"],
-                preset["adjustments"].get("Feed cost change (%)", 0.0),
+            all(
+                np.isclose(
+                    float(custom_adjustments.get(driver, 0.0)),
+                    float(preset["adjustments"].get(driver, 0.0)),
+                )
+                for driver in DEFAULT_SCENARIO_ADJUSTMENTS
             )
             for preset in current_presets.values()
         )
@@ -9639,6 +10409,9 @@ def main() -> None:
             scenario_comparison = _scenario_viability_table(
                 st.session_state.get("all_scenario_results", {})
             )
+            pricing_assumptions = results.get("pricing_assumptions")
+            if not isinstance(pricing_assumptions, pd.DataFrame):
+                pricing_assumptions = pd.DataFrame()
 
             st.markdown("#### Investor Viability Snapshot")
             viability_cols = st.columns(4)
@@ -9678,6 +10451,24 @@ def main() -> None:
             if not scenario_comparison.empty:
                 st.markdown("#### Scenario Viability Comparison")
                 st.dataframe(_format_kpis_for_display(scenario_comparison))
+
+            if not pricing_assumptions.empty:
+                st.markdown("#### Commercial Product View")
+                product_view_col1, product_view_col2 = st.columns(2)
+                with product_view_col1:
+                    product_revenue_summary = _pricing_family_summary(pricing_assumptions)
+                    st.markdown("**Revenue by Product**")
+                    st.dataframe(product_revenue_summary, use_container_width=True)
+                    if not product_revenue_summary.empty:
+                        product_chart = product_revenue_summary.set_index("Product")["Total Revenue"]
+                        st.bar_chart(product_chart)
+                with product_view_col2:
+                    product_qty_summary = _pricing_quantity_by_period(pricing_assumptions)
+                    st.markdown("**Quantity by Period**")
+                    st.dataframe(product_qty_summary, use_container_width=True)
+                    qty_chart = product_qty_summary.set_index("Period") if "Period" in product_qty_summary.columns else pd.DataFrame()
+                    if not qty_chart.empty:
+                        st.line_chart(qty_chart)
 
             st.subheader("KPIs (Annual)")
             st.dataframe(_format_kpis_for_display(kpis))
@@ -9780,6 +10571,8 @@ def main() -> None:
                 "Asset Schedules",
                 "Outputs",
                 "Benchmark KPIs",
+                "Commercial Revenue by Product",
+                "Commercial Quantity by Period",
                 "Working Capital Schedule",
                 "Debt Capacity Schedule",
                 "UFCF Schedule",
