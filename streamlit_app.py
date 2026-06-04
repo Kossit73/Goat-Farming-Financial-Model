@@ -6841,6 +6841,10 @@ def main() -> None:
     with tabs[1]:
         st.subheader("Input Schedule")
         _render_workflow_status_strip()
+        st.caption(
+            "Translate the planning, commercial, operating, labour, and funding assumptions into period-by-period "
+            "schedules. Build the operating model first, then complete the capital and asset support schedules."
+        )
         current_period_type = _normalize_period_type(
             st.session_state.get("schedule_period_type")
         )
@@ -6864,15 +6868,28 @@ def main() -> None:
         _render_scenario_selector()
         _render_scenario_preset_editors()
 
+        st.markdown("### Operating Model Schedules")
+        st.caption(
+            "These schedules should follow the Assumptions page flow: planning and herd assumptions shape the core "
+            "schedule, commercial assumptions support revenue and COGS, and labour assumptions support the wage schedules."
+        )
+
         schedule_tab_names = [
             "Core Schedule",
             "COGS Schedule",
             "Variable Expenses Schedule",
             "Direct Wages Schedule",
             "Admin Wages Schedule",
-            "Capex Schedule",
         ]
-        schedule_tabs = st.tabs(schedule_tab_names)
+        schedule_tabs = st.tabs(
+            [
+                "1. Core Schedule",
+                "2. COGS Schedule",
+                "3. Variable Expenses",
+                "4. Direct Wages",
+                "5. Admin Wages",
+            ]
+        )
 
         with schedule_tabs[0]:
             core_table = st.session_state.get("core_schedule")
@@ -6888,7 +6905,11 @@ def main() -> None:
                 ),
             )
             core_editor = st.session_state.core_schedule
-            st.markdown("### Supplementary Tables")
+            st.markdown("### Capital & Asset Support Schedules")
+            st.caption(
+                "Complete these support schedules after the operating model tabs. They should stay aligned with the "
+                "Capital & Financing assumptions and provide the asset, capex, and ownership detail that supports the model."
+            )
             for name in list(st.session_state.supplementary.keys()):
                 if name == "Capitalisation Table":
                     st.markdown("#### Capitalisation Table Schedule")
@@ -8021,7 +8042,18 @@ def main() -> None:
         _render_workflow_status_strip()
         _render_assumption_validation_summary(st.session_state.assumptions)
         st.caption(
-            "All core model assumption categories are consolidated below on a single page."
+            "Define the planning, commercial, operating, labour, and funding rules here first. Then use the Input "
+            "Schedule page to translate the same logic into period-by-period operating and capital schedules."
+        )
+        st.info(
+            "Recommended flow: 1. Planning & Scenario Design -> 2. Commercial Drivers -> 3. Operating Drivers -> "
+            "4. Capital, Funding & Valuation -> 5. Input Schedule."
+        )
+
+        st.markdown("### 1. Planning & Scenario Design")
+        st.caption(
+            "These assumptions set the planning horizon, scenario stress, and herd-growth logic that feeds the Core "
+            "Schedule and the Scenario Explorer on the Input Schedule page."
         )
 
         st.markdown("#### Scenario Controls")
@@ -8089,7 +8121,6 @@ def main() -> None:
         ]
         run_clicked = st.button("Run Scenarios", type="primary")
 
-        st.markdown("---")
         st.markdown("#### Production Time Horizon")
         production_table = _ensure_production_horizon_table(
             st.session_state.assumptions.get("Production Horizon")
@@ -8143,7 +8174,6 @@ def main() -> None:
         else:
             assumption_tables["Production Horizon"] = production_table
 
-        st.markdown("---")
         st.markdown("#### Herd Plan (Heads)")
         herd_plan = _ensure_herd_plan_table(
             st.session_state.assumptions.get("Herd Plan", pd.DataFrame())
@@ -8220,7 +8250,11 @@ def main() -> None:
         )
         assumption_tables["Herd Plan"] = st.session_state.assumptions["Herd Plan"]
 
-        st.markdown("---")
+        st.markdown("### 2. Commercial Drivers")
+        st.caption(
+            "These assumptions define product pricing logic and growth patterns that should align with the revenue "
+            "and gross margin structure used in the Input Schedule."
+        )
         st.markdown("#### Pricing Assumptions")
         pricing_table = _ensure_pricing_table(
             st.session_state.assumptions.get("Pricing", pd.DataFrame())
@@ -8402,7 +8436,11 @@ def main() -> None:
 
         assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
-        st.markdown("---")
+        st.markdown("### 3. Operating Drivers")
+        st.caption(
+            "These assumptions establish the operating-cost baseline that should stay coordinated with the COGS, "
+            "variable expenses, and wage schedules on the Input Schedule page."
+        )
         st.markdown("#### Operating Cost Assumptions")
         st.caption(
             "Fields `variable_feed_cost_per_herd`, `variable_healthcare_cost_per_herd`, and "
@@ -8597,7 +8635,11 @@ def main() -> None:
             "Operating Costs"
         ]
     
-        st.markdown("---")
+        st.markdown("### 4. Capital, Funding & Valuation")
+        st.caption(
+            "These assumptions support the capital structure, capex, ownership, and investor-return logic that is "
+            "captured in the capital and asset support schedules on the Input Schedule page."
+        )
         st.markdown("#### Capital & Financing Assumptions")
         capital_table = _ensure_capital_financing_table(
             st.session_state.assumptions.get("Capital & Financing")
@@ -8617,7 +8659,6 @@ def main() -> None:
             "Capital & Financing"
         ]
     
-        st.markdown("---")
         st.markdown("#### Valuation Inputs")
         include_valuation = st.checkbox("Include valuation inputs", value=True)
         valuation_table = _ensure_valuation_inputs_table(
