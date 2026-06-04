@@ -374,132 +374,561 @@ class GoatModel:
             return None
         return float(value)
 
-    def computed_npv(self) -> Optional[float]:
-        """Return DCF-based NPV from UFCF timeline, WACC, and terminal value."""
-
-        cash_flows = self.ufcf()
-        if cash_flows is None or cash_flows.empty:
+    @staticmethod
+    def _normalise_frequency_code(freq: Optional[str]) -> Optional[str]:
+        if not freq:
             return None
+        freq_str = str(freq).upper()
+        replacements = [
+            ("BQE", "BQ"),
+            ("QE", "Q"),
+            ("SME", "SM"),
+            ("BME", "BM"),
+            ("ME", "M"),
+            ("BYE", "BY"),
+            ("YE", "Y"),
+        ]
+        for alias, replacement in replacements:
+            if alias in freq_str:
+                freq_str = freq_str.replace(alias, replacement)
+        return freq_str
 
+    def _periods_per_year(self, index: Optional[pd.DatetimeIndex] = None) -> int:
+        idx = index if index is not None else self.dates
+        if len(idx) <= 1:
+            return 12
+
+        freq = pd.infer_freq(idx) if isinstance(idx, pd.DatetimeIndex) else None
+        if freq:
+            normalised = self._normalise_frequency_code(freq)
+            base_freq = normalised.split("-")[0] if normalised else None
+            mapping = {
+                "A": 1,
+                "Y": 1,
+                "Q": 4,
+                "M": 12,
+                "BM": 12,
+                "W": 52,
+                "D": 365,
+            }
+            for key, value in mapping.items():
+                if base_freq and base_freq.startswith(key):
+                    return value
+
+        deltas = np.diff(idx.asi8)
+        if len(deltas) == 0:
+            return 12
+        median_delta = float(np.median(deltas))
+        if median_delta <= 0:
+            return 12
+        year_delta = pd.Timedelta(days=365.25).value
+        periods = int(round(year_delta / median_delta))
+        return max(periods, 1)
+
+    def _valuation_rate(self) -> float:
         rate = self.wacc()
         if rate is None:
-            return None
+            return 0.12
         if rate > 1:
-            rate = rate / 100.0
-        if rate <= -0.9999:
-            return None
+            rate /= 100.0
+        return float(np.clip(rate, 1e-6, 1.0))
 
-        timeline = cash_flows.index.to_series().sort_values()
-        diffs_days = timeline.diff().dt.days.astype(float)
-        diffs_years = (diffs_days / 365.25).fillna(1.0).clip(lower=1e-9)
-        periods = diffs_years.cumsum().to_numpy()
+    def _terminal_growth_rate(self) -> float:
+        value = self.valuation_inputs.get("Terminal Growth Rate", 0.02)
+        try:
+            growth = float(value)
+        except (TypeError, ValueError):
+            growth = 0.02
+        if growth > 1:
+            growth /= 100.0
+        return float(np.clip(growth, -0.2, 0.2))
 
-        discount_factors = np.power(1 + rate, periods)
-        npv_value = float(np.nansum(cash_flows.to_numpy() / discount_factors))
+    def _working_capital_metric(self, key: str, default: float) -> float:
+        value = self.valuation_inputs.get(key, default)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = default
+        return max(numeric, 0.0)
 
-        terminal_value = self.terminal_value()
-        if terminal_value is not None:
-            last_step = float(diffs_years.iloc[-1]) if len(diffs_years) else 1.0
-            horizon = float(periods[-1] + last_step) if len(periods) else 1.0
-            npv_value += float(terminal_value) / ((1 + rate) ** horizon)
+    def _capital_financing_assumptions(self) -> Optional[pd.DataFrame]:
+        for key in ("Assumptions - Capital & Financing", "Capital & Financing"):
+            table = self.supplementary_tables.get(key)
+            if isinstance(table, pd.DataFrame) and not table.empty:
+                return table.copy()
+        return None
 
-        return npv_value
-
-    def computed_irr(self) -> Optional[float]:
-        """Solve an IRR from irregular UFCF timing using a bisection search."""
-
-        cash_flows = self.ufcf()
-        if cash_flows is None or cash_flows.empty:
-            return None
-
-        timeline = cash_flows.index.to_series().sort_values()
-        diffs_days = timeline.diff().dt.days.astype(float)
-        diffs_years = (diffs_days / 365.25).fillna(1.0).clip(lower=1e-9)
-        periods = diffs_years.cumsum().to_numpy()
-
-        values = cash_flows.to_numpy().astype(float)
-        terminal_value = self.terminal_value()
-        if terminal_value is not None and len(values) > 0:
-            last_step = float(diffs_years.iloc[-1]) if len(diffs_years) else 1.0
-            terminal_period = float(periods[-1] + last_step) if len(periods) else 1.0
-        else:
-            terminal_period = None
-
-        def _npv(rate: float) -> float:
-            if rate <= -0.9999:
-                return np.nan
-            discounted = np.nansum(values / np.power(1 + rate, periods))
-            if terminal_value is not None and terminal_period is not None:
-                discounted += float(terminal_value) / ((1 + rate) ** terminal_period)
-            return float(discounted)
-
-        low, high = -0.95, 5.0
-        npv_low, npv_high = _npv(low), _npv(high)
-        if not np.isfinite(npv_low) or not np.isfinite(npv_high):
-            return None
-        if npv_low == 0:
-            return low
-        if npv_high == 0:
-            return high
-        if npv_low * npv_high > 0:
-            return None
-
-        for _ in range(120):
-            mid = (low + high) / 2.0
-            npv_mid = _npv(mid)
-            if not np.isfinite(npv_mid):
-                return None
-            if abs(npv_mid) < 1e-7:
-                return mid
-            if npv_low * npv_mid < 0:
-                high = mid
-                npv_high = npv_mid
+    def _capex_spend_schedule(self, index: pd.DatetimeIndex) -> pd.Series:
+        capex = self.capex()
+        if capex is None:
+            cfi = self.cfi()
+            if cfi is not None:
+                capex_series = (-pd.to_numeric(cfi, errors="coerce")).clip(lower=0.0)
             else:
-                low = mid
-                npv_low = npv_mid
+                capex_series = pd.Series(0.0, index=index, dtype=float)
+        else:
+            capex_series = pd.to_numeric(capex, errors="coerce").reindex(index).fillna(0.0)
 
-        return (low + high) / 2.0
+        capex_table = self.capex_schedule()
+        if capex_table is None or capex_table.empty:
+            return capex_series.reindex(index).fillna(0.0)
 
-    def payback_period_years(self) -> Optional[float]:
-        """Estimate simple payback period (years) from UFCF timeline."""
+        work = capex_table.copy()
+        if "Year" not in work.columns or "Spend" not in work.columns:
+            return capex_series.reindex(index).fillna(0.0)
 
-        cash_flows = self.ufcf()
-        if cash_flows is None or cash_flows.empty:
-            return None
+        work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+        work["Spend"] = pd.to_numeric(work.get("Spend"), errors="coerce")
+        by_year = work.dropna(subset=["Year", "Spend"]).groupby("Year")["Spend"].sum()
 
-        ordered = cash_flows.sort_index()
-        values = ordered.to_numpy(dtype=float)
-        if not np.isfinite(values).any():
-            return None
+        supplemental = pd.Series(0.0, index=index, dtype=float)
+        for year, spend in by_year.items():
+            mask = index.year == int(year)
+            if mask.any():
+                first_period = index[mask][0]
+                supplemental.loc[first_period] += float(spend)
 
-        diffs_days = ordered.index.to_series().diff().dt.days.astype(float)
+        return capex_series.reindex(index).fillna(0.0).add(supplemental, fill_value=0.0)
+
+    def _effective_tax_rate(self, df: pd.DataFrame) -> float:
+        npbt_col = "NPBT_adj" if "NPBT_adj" in df.columns else "NPBT"
+        tax_col = "Tax Expense_adj" if "Tax Expense_adj" in df.columns else "Tax Expense"
+        npbt = (
+            pd.to_numeric(df[npbt_col], errors="coerce")
+            if npbt_col in df.columns
+            else pd.Series(dtype=float)
+        )
+        tax = (
+            pd.to_numeric(df[tax_col], errors="coerce")
+            if tax_col in df.columns
+            else pd.Series(dtype=float)
+        )
+        if not npbt.empty and not tax.empty:
+            aligned = pd.concat([npbt, tax], axis=1).dropna()
+            aligned = aligned[aligned.iloc[:, 0] > 1e-9]
+            if not aligned.empty:
+                ratios = aligned.iloc[:, 1] / aligned.iloc[:, 0]
+                if ratios.notna().any():
+                    return float(np.clip(ratios.median(), 0.0, 0.6))
+        return 0.28
+
+    def working_capital_schedule(
+        self, df: Optional[pd.DataFrame] = None, annual: bool = False
+    ) -> pd.DataFrame:
+        if df is None:
+            df = self.to_tidy()
+
+        revenue_col = "Revenue_adj" if "Revenue_adj" in df.columns else "Revenue"
+        cogs_col = "COGS_adj" if "COGS_adj" in df.columns else "COGS"
+        if revenue_col not in df.columns or cogs_col not in df.columns:
+            return pd.DataFrame()
+
+        work = pd.DataFrame(index=df.index.copy())
+        work["Revenue"] = pd.to_numeric(df.get(revenue_col), errors="coerce").fillna(0.0)
+        work["COGS"] = pd.to_numeric(df.get(cogs_col), errors="coerce").fillna(0.0)
+
+        periods_per_year = max(self._periods_per_year(work.index), 1)
+        period_days = 365.25 / periods_per_year
+        dso = self._working_capital_metric("Receivable Days", 30.0)
+        dio = self._working_capital_metric("Inventory Days", 45.0)
+        dpo = self._working_capital_metric("Payable Days", 30.0)
+
+        work["Receivable Days"] = dso
+        work["Inventory Days"] = dio
+        work["Payable Days"] = dpo
+        work["Accounts Receivable"] = work["Revenue"] * (dso / period_days)
+        work["Inventory"] = work["COGS"] * (dio / period_days)
+        work["Accounts Payable"] = work["COGS"] * (dpo / period_days)
+        work["Net Working Capital"] = (
+            work["Accounts Receivable"] + work["Inventory"] - work["Accounts Payable"]
+        )
+        work["Change in NWC"] = work["Net Working Capital"].diff().fillna(
+            work["Net Working Capital"]
+        )
+
+        if not annual:
+            return work
+
+        grouped = pd.DataFrame(index=pd.Index(sorted(work.index.year.unique()), name="Year"))
+        grouped["Revenue"] = work["Revenue"].groupby(work.index.year).sum(min_count=1)
+        grouped["COGS"] = work["COGS"].groupby(work.index.year).sum(min_count=1)
+        for column in [
+            "Accounts Receivable",
+            "Inventory",
+            "Accounts Payable",
+            "Net Working Capital",
+        ]:
+            grouped[column] = work[column].groupby(work.index.year).last()
+        grouped["Change in NWC"] = work["Change in NWC"].groupby(work.index.year).sum(
+            min_count=1
+        )
+        grouped["Receivable Days"] = dso
+        grouped["Inventory Days"] = dio
+        grouped["Payable Days"] = dpo
+        return grouped
+
+    def debt_capacity_schedule(
+        self, df: Optional[pd.DataFrame] = None, annual: bool = False
+    ) -> pd.DataFrame:
+        if df is None:
+            df = self.to_tidy()
+
+        idx = df.index.copy()
+        if len(idx) == 0:
+            return pd.DataFrame()
+
+        periods_per_year = max(self._periods_per_year(idx), 1)
+        debt_table = self._capital_financing_assumptions()
+        opening_debt = pd.Series(0.0, index=idx, dtype=float)
+        drawdown = pd.Series(0.0, index=idx, dtype=float)
+        principal = pd.Series(0.0, index=idx, dtype=float)
+        interest = pd.Series(0.0, index=idx, dtype=float)
+        ending_debt = pd.Series(0.0, index=idx, dtype=float)
+
+        if debt_table is not None:
+            work = debt_table.copy()
+            work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+            work["Interest/Return %"] = pd.to_numeric(
+                work.get("Interest/Return %"), errors="coerce"
+            )
+            work["Term (years)"] = pd.to_numeric(work.get("Term (years)"), errors="coerce")
+
+            debt_mask = (
+                work["Amount"].notna()
+                & (work["Amount"] > 0)
+                & work["Interest/Return %"].notna()
+                & (work["Interest/Return %"] > 0)
+                & work["Term (years)"].notna()
+                & (work["Term (years)"] > 0)
+            )
+            debt_rows = work.loc[debt_mask]
+
+            for _, row in debt_rows.iterrows():
+                principal_amount = float(row["Amount"])
+                annual_rate = float(row["Interest/Return %"])
+                if annual_rate > 1:
+                    annual_rate /= 100.0
+                term_periods = max(int(round(float(row["Term (years)"]) * periods_per_year)), 1)
+                period_principal = principal_amount / term_periods
+                outstanding = principal_amount
+
+                for pos, period in enumerate(idx):
+                    if pos == 0:
+                        drawdown.iloc[pos] += principal_amount
+                    if outstanding <= 1e-9:
+                        break
+                    opening_debt.iloc[pos] += outstanding
+                    period_interest = outstanding * (annual_rate / periods_per_year)
+                    scheduled_principal = min(period_principal, outstanding)
+                    interest.iloc[pos] += period_interest
+                    principal.iloc[pos] += scheduled_principal
+                    outstanding = max(outstanding - scheduled_principal, 0.0)
+                    ending_debt.iloc[pos] += outstanding
+
+        debt_service = principal + interest
+        ebit_col = "EBIT_adj" if "EBIT_adj" in df.columns else "EBIT"
+        ebitda_col = "EBITDA_adj" if "EBITDA_adj" in df.columns else "EBITDA"
+        cfo_col = "CFO_adj" if "CFO_adj" in df.columns else "CFO"
+        cash_col = (
+            "Closing Cash Balance_adj"
+            if "Closing Cash Balance_adj" in df.columns
+            else "Closing Cash Balance"
+        )
+
+        if ebit_col in df.columns:
+            ebit = pd.to_numeric(df[ebit_col], errors="coerce").reindex(idx).fillna(0.0)
+        else:
+            ebit = pd.Series(0.0, index=idx, dtype=float)
+        if ebitda_col in df.columns:
+            ebitda = (
+                pd.to_numeric(df[ebitda_col], errors="coerce").reindex(idx).fillna(0.0)
+            )
+        else:
+            ebitda = pd.Series(0.0, index=idx, dtype=float)
+        if cfo_col in df.columns:
+            cfo = pd.to_numeric(df[cfo_col], errors="coerce").reindex(idx).fillna(0.0)
+        else:
+            cfo = pd.Series(0.0, index=idx, dtype=float)
+        if cash_col in df.columns:
+            closing_cash = (
+                pd.to_numeric(df[cash_col], errors="coerce").reindex(idx).fillna(0.0)
+            )
+        else:
+            closing_cash = pd.Series(0.0, index=idx, dtype=float)
+
+        dscr = self._safe_divide(cfo, debt_service, allow_negative=False)
+        interest_coverage = self._safe_divide(ebit, interest, allow_negative=False)
+        net_debt = ending_debt - closing_cash
+        net_debt_to_ebitda = self._safe_divide(net_debt, ebitda, allow_negative=False)
+
+        dscr_covenant = self._working_capital_metric("DSCR Covenant", 1.20)
+        ic_covenant = self._working_capital_metric("Interest Coverage Covenant", 1.50)
+        min_cash_reserve = self._working_capital_metric("Minimum Cash Reserve", 25000.0)
+
+        out = pd.DataFrame(
+            {
+                "Opening Debt": opening_debt,
+                "Debt Drawdown": drawdown,
+                "Principal Repayment": principal,
+                "Interest Expense (Debt)": interest,
+                "Debt Service": debt_service,
+                "Ending Debt": ending_debt,
+                "CFADS": cfo,
+                "DSCR": dscr,
+                "DSCR Covenant": dscr_covenant,
+                "DSCR Headroom": dscr - dscr_covenant,
+                "Interest Coverage": interest_coverage,
+                "Interest Coverage Covenant": ic_covenant,
+                "Interest Coverage Headroom": interest_coverage - ic_covenant,
+                "Closing Cash": closing_cash,
+                "Minimum Cash Reserve": min_cash_reserve,
+                "Cash Reserve Headroom": closing_cash - min_cash_reserve,
+                "Net Debt": net_debt,
+                "Net Debt / EBITDA": net_debt_to_ebitda,
+            },
+            index=idx,
+        )
+        out["Covenant Breach"] = (
+            (out["DSCR"].fillna(0.0) < dscr_covenant)
+            | (out["Interest Coverage"].fillna(0.0) < ic_covenant)
+            | (out["Closing Cash"].fillna(0.0) < min_cash_reserve)
+        )
+
+        if not annual:
+            return out
+
+        grouped = pd.DataFrame(index=pd.Index(sorted(idx.year.unique()), name="Year"))
+        for column in [
+            "Opening Debt",
+            "Debt Drawdown",
+            "Principal Repayment",
+            "Interest Expense (Debt)",
+            "Debt Service",
+            "Ending Debt",
+            "CFADS",
+            "Closing Cash",
+            "Net Debt",
+        ]:
+            aggregator = "last" if column in {"Opening Debt", "Ending Debt", "Closing Cash", "Net Debt"} else "sum"
+            if aggregator == "last":
+                grouped[column] = out[column].groupby(idx.year).last()
+            else:
+                grouped[column] = out[column].groupby(idx.year).sum(min_count=1)
+
+        for column in [
+            "DSCR",
+            "DSCR Covenant",
+            "DSCR Headroom",
+            "Interest Coverage",
+            "Interest Coverage Covenant",
+            "Interest Coverage Headroom",
+            "Minimum Cash Reserve",
+            "Cash Reserve Headroom",
+            "Net Debt / EBITDA",
+        ]:
+            grouped[column] = out[column].groupby(idx.year).last()
+
+        grouped["Covenant Breach"] = out["Covenant Breach"].groupby(idx.year).any()
+        return grouped
+
+    def ufcf_schedule(
+        self, df: Optional[pd.DataFrame] = None, annual: bool = False
+    ) -> pd.DataFrame:
+        if df is None:
+            df = self.to_tidy()
+
+        idx = df.index.copy()
+        if len(idx) == 0:
+            return pd.DataFrame()
+
+        ebit_col = "EBIT_adj" if "EBIT_adj" in df.columns else "EBIT"
+        dep_col = (
+            "Depreciation & Amortization_adj"
+            if "Depreciation & Amortization_adj" in df.columns
+            else "Depreciation & Amortization"
+        )
+        if ebit_col in df.columns:
+            ebit = pd.to_numeric(df[ebit_col], errors="coerce").reindex(idx).fillna(0.0)
+        else:
+            ebit = pd.Series(0.0, index=idx, dtype=float)
+        if dep_col in df.columns:
+            depreciation = (
+                pd.to_numeric(df[dep_col], errors="coerce").reindex(idx).fillna(0.0)
+            )
+        else:
+            depreciation = pd.Series(0.0, index=idx, dtype=float)
+        tax_rate = self._effective_tax_rate(df)
+        nopat = ebit * (1.0 - tax_rate)
+
+        wc = self.working_capital_schedule(df, annual=False)
+        capex = self._capex_spend_schedule(idx)
+
+        out = pd.DataFrame(index=idx)
+        out["EBIT"] = ebit
+        out["Tax Rate"] = tax_rate
+        out["NOPAT"] = nopat
+        out["Depreciation"] = depreciation
+        out["Capex"] = capex.reindex(idx).fillna(0.0)
+        out["Change in NWC"] = (
+            wc["Change in NWC"].reindex(idx).fillna(0.0) if not wc.empty else 0.0
+        )
+        out["UFCF"] = out["NOPAT"] + out["Depreciation"] - out["Capex"] - out["Change in NWC"]
+
+        if not annual:
+            return out
+
+        grouped = pd.DataFrame(index=pd.Index(sorted(idx.year.unique()), name="Year"))
+        for column in ["EBIT", "NOPAT", "Depreciation", "Capex", "Change in NWC", "UFCF"]:
+            grouped[column] = out[column].groupby(idx.year).sum(min_count=1)
+        grouped["Tax Rate"] = tax_rate
+        return grouped
+
+    def valuation_summary(
+        self, df: Optional[pd.DataFrame] = None, annual: bool = False
+    ) -> Dict[str, object]:
+        working_df = df if df is not None else self.to_tidy()
+        ufcf_table = self.ufcf()
+
+        if working_df is None or working_df.empty:
+            return {}
+
+        if ufcf_table is not None and df is None and not annual:
+            ufcf_series = ufcf_table.sort_index()
+            ufcf_frame = pd.DataFrame({"UFCF": ufcf_series}, index=ufcf_series.index)
+        else:
+            ufcf_frame = self.ufcf_schedule(working_df, annual=annual)
+            if ufcf_frame.empty or "UFCF" not in ufcf_frame.columns:
+                return {}
+            ufcf_series = pd.to_numeric(ufcf_frame["UFCF"], errors="coerce").dropna()
+
+        if ufcf_series.empty:
+            return {}
+
+        rate = self._valuation_rate()
+        growth = self._terminal_growth_rate()
+        periods_per_year = max(self._periods_per_year(ufcf_series.index), 1)
+
+        diffs_days = ufcf_series.index.to_series().diff().dt.days.astype(float)
         valid_diffs = diffs_days.iloc[1:][np.isfinite(diffs_days.iloc[1:])]
-        median_days = float(np.median(valid_diffs)) if not valid_diffs.empty else 365.25
+        median_days = float(np.median(valid_diffs)) if not valid_diffs.empty else 365.25 / periods_per_year
         if not np.isfinite(median_days) or median_days <= 0:
-            median_days = 365.25
+            median_days = 365.25 / periods_per_year
         diffs_years = (diffs_days / 365.25).fillna(median_days / 365.25).clip(lower=1e-9)
         periods = diffs_years.cumsum().to_numpy()
 
+        trailing_periods = min(periods_per_year, len(ufcf_series))
+        trailing_ufcf = float(ufcf_series.iloc[-trailing_periods:].sum())
+        if trailing_periods < periods_per_year and trailing_periods > 0:
+            trailing_ufcf *= periods_per_year / trailing_periods
+
+        effective_growth = min(growth, rate - 1e-6) if rate > growth else growth
+        terminal_value = 0.0
+        if trailing_ufcf > 0 and rate > effective_growth:
+            terminal_value = trailing_ufcf * (1.0 + effective_growth) / (rate - effective_growth)
+
+        discount_factors = 1 / np.power(1 + rate, periods)
+        pv_cash_flows = ufcf_series.to_numpy() * discount_factors
+        terminal_period = float(periods[-1] + diffs_years.iloc[-1]) if len(periods) else 1.0
+        terminal_value_pv = (
+            terminal_value / ((1 + rate) ** terminal_period) if terminal_value > 0 else 0.0
+        )
+        enterprise_value = float(np.nansum(pv_cash_flows) + terminal_value_pv)
+
+        values = ufcf_series.to_numpy(dtype=float)
+
+        def _npv_at(test_rate: float) -> float:
+            if test_rate <= -0.9999:
+                return np.nan
+            discounted = np.nansum(values / np.power(1 + test_rate, periods))
+            if terminal_value > 0:
+                discounted += terminal_value / ((1 + test_rate) ** terminal_period)
+            return float(discounted)
+
+        irr_value: Optional[float] = None
+        low, high = -0.95, 5.0
+        npv_low, npv_high = _npv_at(low), _npv_at(high)
+        if (
+            np.isfinite(npv_low)
+            and np.isfinite(npv_high)
+            and npv_low * npv_high <= 0
+        ):
+            for _ in range(120):
+                mid = (low + high) / 2.0
+                npv_mid = _npv_at(mid)
+                if not np.isfinite(npv_mid):
+                    break
+                if abs(npv_mid) < 1e-7:
+                    irr_value = mid
+                    break
+                if npv_low * npv_mid < 0:
+                    high = mid
+                    npv_high = npv_mid
+                else:
+                    low = mid
+                    npv_low = npv_mid
+            if irr_value is None:
+                irr_value = (low + high) / 2.0
+
         cumulative = np.cumsum(values)
+        payback_years: Optional[float] = None
         if cumulative[0] >= 0:
-            return 0.0
+            payback_years = 0.0
+        else:
+            crossing = np.where(cumulative >= 0)[0]
+            if len(crossing) > 0:
+                cross_idx = int(crossing[0])
+                if cross_idx == 0:
+                    payback_years = float(periods[0])
+                else:
+                    prev_cum = float(cumulative[cross_idx - 1])
+                    curr_cum = float(cumulative[cross_idx])
+                    prev_t = float(periods[cross_idx - 1])
+                    curr_t = float(periods[cross_idx])
+                    if np.isclose(curr_cum, prev_cum):
+                        payback_years = curr_t
+                    else:
+                        frac = float(np.clip((0.0 - prev_cum) / (curr_cum - prev_cum), 0.0, 1.0))
+                        payback_years = prev_t + (curr_t - prev_t) * frac
 
-        crossing = np.where(cumulative >= 0)[0]
-        if len(crossing) == 0:
-            return None
+        cash_flow_df = pd.DataFrame(
+            {
+                "UFCF": ufcf_series.to_numpy(),
+                "Discount Factor": discount_factors,
+                "Present Value": pv_cash_flows,
+            },
+            index=ufcf_series.index,
+        )
 
-        idx = int(crossing[0])
-        if idx == 0:
-            return float(periods[0])
-        prev_cum = float(cumulative[idx - 1])
-        curr_cum = float(cumulative[idx])
-        prev_t = float(periods[idx - 1])
-        curr_t = float(periods[idx])
-        if np.isclose(curr_cum, prev_cum):
-            return curr_t
-        frac = (0.0 - prev_cum) / (curr_cum - prev_cum)
-        frac = float(np.clip(frac, 0.0, 1.0))
-        return prev_t + (curr_t - prev_t) * frac
+        return {
+            "cash_flows": cash_flow_df,
+            "discount_rate": rate,
+            "terminal_growth_rate": effective_growth,
+            "terminal_value": terminal_value,
+            "terminal_value_pv": terminal_value_pv,
+            "enterprise_value": enterprise_value,
+            "npv": enterprise_value,
+            "irr": irr_value,
+            "payback_years": payback_years,
+            "ufcf_schedule": ufcf_frame,
+        }
+
+    def computed_npv(self) -> Optional[float]:
+        """Return DCF-based NPV from UFCF timeline, WACC, and terminal value."""
+        summary = self.valuation_summary()
+        npv_value = summary.get("npv")
+        return float(npv_value) if npv_value is not None else None
+
+    def computed_irr(self) -> Optional[float]:
+        """Solve an IRR from irregular UFCF timing using a bisection search."""
+        summary = self.valuation_summary()
+        irr_value = summary.get("irr")
+        return float(irr_value) if irr_value is not None else None
+
+    def payback_period_years(self) -> Optional[float]:
+        """Estimate simple payback period (years) from UFCF timeline."""
+        summary = self.valuation_summary()
+        payback = summary.get("payback_years")
+        return float(payback) if payback is not None else None
 
     def _reference_milk_price_per_litre(self) -> Optional[float]:
         pricing = self.supplementary_tables.get("Assumptions - Pricing")
@@ -579,86 +1008,45 @@ class GoatModel:
 
     def discounted_cash_flow(self) -> Dict[str, object]:
         """Compute the discounted cash-flow valuation using stored assumptions."""
+        summary = self.valuation_summary()
+        if not summary:
+            raise ValueError("Unable to derive a UFCF schedule for discounted cash-flow analysis.")
 
-        cash_flows = self.ufcf()
-        if cash_flows is None or cash_flows.empty:
-            raise ValueError("UFCF schedule is required for discounted cash-flow analysis.")
+        cash_flows = summary.get("cash_flows")
+        if not isinstance(cash_flows, pd.DataFrame) or cash_flows.empty:
+            raise ValueError("Discounted cash-flow analysis requires non-empty UFCF cash flows.")
 
-        rate = self.wacc()
-        if rate is None:
-            raise ValueError("WACC is required for discounted cash-flow analysis.")
+        schedule = cash_flows.copy()
+        if not isinstance(schedule.index, pd.DatetimeIndex):
+            raise ValueError("Discounted cash-flow analysis requires dated UFCF periods.")
 
-        if rate > 1:
-            rate = rate / 100.0
-        if rate <= 0:
-            raise ValueError("WACC must be positive to compute discounted cash flow.")
-
-        cash_flows = cash_flows.sort_index()
-        if cash_flows.index.duplicated().any():
-            raise ValueError("Cash-flow timeline contains duplicate periods.")
-        if (cash_flows.index.to_series().diff().dt.total_seconds() <= 0).any():
-            raise ValueError("Cash-flow timeline must be strictly increasing.")
-
-        diffs_days = cash_flows.index.to_series().diff().dt.days.astype(float)
+        diffs_days = schedule.index.to_series().diff().dt.days.astype(float)
         valid_diffs = diffs_days.iloc[1:][np.isfinite(diffs_days.iloc[1:])]
         if not valid_diffs.empty:
             median_days = float(np.median(valid_diffs))
-        else:
-            median_days = 365.25
-        if not np.isfinite(median_days) or median_days <= 0:
-            median_days = 365.25
+            irregular = valid_diffs[
+                (valid_diffs - median_days).abs() > max(median_days * 0.25, 1.0)
+            ]
+            if not irregular.empty:
+                warnings.warn(
+                    "Cash-flow timeline contains irregular step sizes; results may be approximate.",
+                    DataQualityWarning,
+                    stacklevel=2,
+                )
 
-        irregular = valid_diffs[
-            (valid_diffs - median_days).abs() > max(median_days * 0.25, 1.0)
-        ]
-        if not irregular.empty:
-            warnings.warn(
-                "Cash-flow timeline contains irregular step sizes; results may be approximate.",
-                DataQualityWarning,
-                stacklevel=2,
-            )
-
-        diffs_years = diffs_days / 365.25
-        diffs_years.iloc[0] = median_days / 365.25
-        diffs_years = diffs_years.fillna(median_days / 365.25).clip(lower=1e-9)
-
-        periods = diffs_years.cumsum().to_numpy()
-        discount_factors = 1 / np.power(1 + rate, periods)
-        pv_cash_flows = cash_flows.to_numpy() * discount_factors
-
-        cash_flow_df = pd.DataFrame(
-            {
-                "UFCF": cash_flows.to_numpy(),
-                "Discount Factor": discount_factors,
-                "Present Value": pv_cash_flows,
-            },
-            index=cash_flows.index,
-        )
-
-        terminal_value = self.terminal_value()
-        terminal_value_pv = None
-        if terminal_value is not None:
-            last_step = diffs_years.iloc[-1]
-            horizon = periods[-1] + last_step
-            terminal_value_pv = float(terminal_value) / ((1 + rate) ** horizon)
-
-        total_pv = float(np.nansum(pv_cash_flows))
-        enterprise_value = total_pv + (terminal_value_pv or 0.0)
-
-        summary: Dict[str, object] = {
-            "cash_flows": cash_flow_df,
-            "discount_rate": rate,
-            "enterprise_value": enterprise_value,
+        output: Dict[str, object] = {
+            "cash_flows": schedule,
+            "discount_rate": summary.get("discount_rate"),
+            "enterprise_value": float(summary.get("enterprise_value", np.nan)),
+            "npv": float(summary.get("npv", np.nan)),
         }
-
-        if terminal_value_pv is not None:
-            summary["terminal_value_pv"] = terminal_value_pv
-
-        npv_value = self.npv()
-        if npv_value is not None:
-            summary["npv"] = float(npv_value)
-
-        return summary
+        if summary.get("terminal_value_pv") is not None:
+            output["terminal_value_pv"] = float(summary["terminal_value_pv"])
+        if summary.get("terminal_value") is not None:
+            output["terminal_value"] = float(summary["terminal_value"])
+        if summary.get("irr") is not None:
+            output["irr"] = float(summary["irr"])
+        return output
 
     # ---------- Supplementary schedules ----------
     def capitalisation_table(self) -> Optional[pd.DataFrame]:
@@ -864,20 +1252,39 @@ class GoatModel:
             out["Milk Yield per Doe"] = self._safe_divide(litres, herd_group)
             out["Feed Cost per Litre"] = self._safe_divide(grp["COGS"], litres)
 
-        computed_npv = self.computed_npv()
+        valuation_summary = self.valuation_summary(df)
+        computed_npv = valuation_summary.get("npv")
         if computed_npv is None:
             computed_npv = self.npv()
         if computed_npv is not None:
             out["NPV"] = float(computed_npv)
 
-        computed_irr = self.computed_irr()
+        computed_irr = valuation_summary.get("irr")
         if computed_irr is None:
             computed_irr = self.irr()
         if computed_irr is not None:
             out["IRR"] = float(computed_irr)
-        payback = self.payback_period_years()
+        payback = valuation_summary.get("payback_years")
         if payback is not None:
             out["Payback Period (Years)"] = payback
+
+        debt_capacity = self.debt_capacity_schedule(df, annual=annual)
+        if not debt_capacity.empty:
+            for metric in [
+                "DSCR",
+                "DSCR Headroom",
+                "Interest Coverage",
+                "Interest Coverage Headroom",
+                "Cash Reserve Headroom",
+            ]:
+                if metric in debt_capacity.columns:
+                    out[metric] = pd.to_numeric(
+                        debt_capacity[metric], errors="coerce"
+                    ).to_numpy()
+            if "Covenant Breach" in debt_capacity.columns:
+                out["Covenant Breach"] = (
+                    debt_capacity["Covenant Breach"].astype(bool).to_numpy()
+                )
         return out
 
     # ---------- Break-even ----------

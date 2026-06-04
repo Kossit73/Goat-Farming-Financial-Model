@@ -15,7 +15,7 @@ from goat_financial_model import GoatModel, InputSchedule
 
 
 def _build_sample_schedule() -> pd.DataFrame:
-    periods = pd.date_range("2024-01-31", periods=12, freq="ME")
+    periods = pd.date_range("2024-01-31", periods=12, freq="M")
     revenue = pd.Series(100000 + (periods.month - 1) * 5000, index=periods)
     cogs = revenue * 0.45
     gross_profit = revenue - cogs
@@ -161,7 +161,7 @@ def test_annual_advanced_analytics_uses_costs():
 
 
 def test_input_schedule_rejects_non_numeric_columns():
-    periods = pd.date_range("2024-01-31", periods=2, freq="ME")
+    periods = pd.date_range("2024-01-31", periods=2, freq="M")
     schedule = pd.DataFrame({"Revenue": ["one", "two"]}, index=periods)
 
     with pytest.raises(ValueError):
@@ -169,7 +169,7 @@ def test_input_schedule_rejects_non_numeric_columns():
 
 
 def test_ratios_mask_zero_or_negative_denominators():
-    periods = pd.date_range("2024-01-31", periods=3, freq="ME")
+    periods = pd.date_range("2024-01-31", periods=3, freq="M")
     schedule = pd.DataFrame(
         {
             "Revenue": [1000.0, 0.0, -500.0],
@@ -195,7 +195,7 @@ def test_ratios_mask_zero_or_negative_denominators():
 
 
 def test_discounted_cash_flow_summary():
-    periods = pd.date_range("2024-12-31", periods=3, freq="YE")
+    periods = pd.date_range("2024-12-31", periods=3, freq="Y")
     schedule = pd.DataFrame({"Revenue": [1.0, 1.0, 1.0]}, index=periods)
 
     valuation_inputs = {"WACC": 0.1, "Terminal Value": 200000.0}

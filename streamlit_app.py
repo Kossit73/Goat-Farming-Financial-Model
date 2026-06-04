@@ -39,6 +39,9 @@ except Exception:  # pragma: no cover - older versions exposed the exception els
     StreamlitAPIException = Exception
 
 
+_LOCAL_SESSION_STATE: Dict[str, Any] = {}
+
+
 def _can_rerun() -> bool:
     """Return True when the app is executing within a Streamlit runtime."""
 
@@ -64,8 +67,11 @@ def _safe_session_state_get(key: str, default: Any = None) -> Any:
 
     try:
         return st.session_state.get(key, default)
-    except StreamlitAPIException:
-        return default
+    except Exception:
+        try:
+            return st.session_state[key] if key in st.session_state else default
+        except Exception:
+            return _LOCAL_SESSION_STATE.get(key, default)
 
 
 def _safe_session_state_setdefault(key: str, value: Any) -> Any:
@@ -73,8 +79,14 @@ def _safe_session_state_setdefault(key: str, value: Any) -> Any:
 
     try:
         return st.session_state.setdefault(key, value)
-    except StreamlitAPIException:
-        return value
+    except Exception:
+        try:
+            if key not in st.session_state:
+                st.session_state[key] = value
+            return st.session_state[key]
+        except Exception:
+            pass
+        return _LOCAL_SESSION_STATE.setdefault(key, value)
 
 
 def _safe_session_state_set(key: str, value: Any) -> None:
@@ -82,8 +94,12 @@ def _safe_session_state_set(key: str, value: Any) -> None:
 
     try:
         st.session_state[key] = value
-    except StreamlitAPIException:
-        pass
+    except Exception:
+        try:
+            st.session_state[key] = value
+            return
+        except Exception:
+            _LOCAL_SESSION_STATE[key] = value
 
 
 def _safe_session_state_contains(key: str) -> bool:
@@ -91,8 +107,11 @@ def _safe_session_state_contains(key: str) -> bool:
 
     try:
         return key in st.session_state
-    except StreamlitAPIException:
-        return False
+    except Exception:
+        try:
+            return key in st.session_state
+        except Exception:
+            return key in _LOCAL_SESSION_STATE
 
 
 def _safe_session_state_pop(key: str, default: Any = None) -> Any:
@@ -100,8 +119,19 @@ def _safe_session_state_pop(key: str, default: Any = None) -> Any:
 
     try:
         return st.session_state.pop(key, default)
-    except StreamlitAPIException:
-        return default
+    except Exception:
+        try:
+            if key in st.session_state:
+                value = st.session_state[key]
+                del st.session_state[key]
+                return value
+            return default
+        except Exception:
+            return _LOCAL_SESSION_STATE.pop(key, default)
+
+
+if not _can_rerun():
+    st.session_state = _LOCAL_SESSION_STATE
 
 
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
@@ -114,6 +144,13 @@ DEFAULT_VALUATION_INPUTS = {
     "NPV": 0.0,
     "IRR": 0.0,
     "Terminal Value": 0.0,
+    "Terminal Growth Rate": 0.02,
+    "Receivable Days": 30.0,
+    "Inventory Days": 45.0,
+    "Payable Days": 30.0,
+    "Minimum Cash Reserve": 25000.0,
+    "DSCR Covenant": 1.20,
+    "Interest Coverage Covenant": 1.50,
 }
 
 ML_METHOD_LABELS = {
@@ -1226,7 +1263,8 @@ def _default_scenario_preset_table(name: str) -> pd.DataFrame:
 
 
 def _scenario_preset_removed_store() -> Dict[str, List[str]]:
-    store = st.session_state.setdefault("scenario_preset_removed_drivers", {})
+    raw_store = _safe_session_state_get("scenario_preset_removed_drivers", {})
+    store = raw_store if isinstance(raw_store, dict) else {}
     normalised: Dict[str, List[str]] = {}
     updated = False
 
@@ -1247,10 +1285,10 @@ def _scenario_preset_removed_store() -> Dict[str, List[str]]:
         updated = True
 
     if updated:
-        st.session_state["scenario_preset_removed_drivers"] = normalised
+        _safe_session_state_set("scenario_preset_removed_drivers", normalised)
         store = normalised
     else:
-        st.session_state["scenario_preset_removed_drivers"] = store
+        _safe_session_state_set("scenario_preset_removed_drivers", store)
 
     return store
 
@@ -1262,7 +1300,7 @@ def _unmark_removed_scenario_drivers(name: str, drivers: Iterable[str]) -> None:
     new_removed = sorted(current - lower_drivers)
     if new_removed != sorted(current):
         store[name] = new_removed
-        st.session_state["scenario_preset_removed_drivers"] = store
+        _safe_session_state_set("scenario_preset_removed_drivers", store)
 
 
 def _mark_removed_scenario_driver(name: str, driver: str) -> None:
@@ -1275,11 +1313,14 @@ def _mark_removed_scenario_driver(name: str, driver: str) -> None:
     if lowered not in current:
         current.add(lowered)
         store[name] = sorted(current)
-        st.session_state["scenario_preset_removed_drivers"] = store
+        _safe_session_state_set("scenario_preset_removed_drivers", store)
 
 
 def _scenario_preset_tables_store() -> Dict[str, pd.DataFrame]:
-    return st.session_state.setdefault("scenario_preset_tables", {})
+    raw_store = _safe_session_state_get("scenario_preset_tables", {})
+    store = raw_store if isinstance(raw_store, dict) else {}
+    _safe_session_state_set("scenario_preset_tables", store)
+    return store
 
 
 def _ensure_scenario_preset_table(
@@ -1345,22 +1386,23 @@ def _set_scenario_preset_table(name: str, table: pd.DataFrame) -> None:
     store[name] = table.copy(deep=True).reset_index(drop=True)
     drivers = store[name].get("Driver", pd.Series(dtype=str)).tolist()
     _unmark_removed_scenario_drivers(name, drivers)
-    st.session_state["scenario_preset_tables"] = store
+    _safe_session_state_set("scenario_preset_tables", store)
 
 
 def _get_scenario_preset_table(name: str) -> pd.DataFrame:
     store = _scenario_preset_tables_store()
     ensured = _ensure_scenario_preset_table(name, store.get(name))
     store[name] = ensured
-    st.session_state["scenario_preset_tables"] = store
+    _safe_session_state_set("scenario_preset_tables", store)
     return ensured
 
 
 def _scenario_preset_descriptions_store() -> Dict[str, str]:
-    store = st.session_state.setdefault("scenario_preset_descriptions", {})
+    raw_store = _safe_session_state_get("scenario_preset_descriptions", {})
+    store = raw_store if isinstance(raw_store, dict) else {}
     for name, preset in SCENARIO_PRESETS.items():
         store.setdefault(name, preset.get("description", ""))
-    st.session_state["scenario_preset_descriptions"] = store
+    _safe_session_state_set("scenario_preset_descriptions", store)
     return store
 
 
@@ -1371,7 +1413,7 @@ def _set_scenario_preset_description(name: str, description: str) -> Optional[st
     if normalized == previous:
         return None
     store[name] = normalized
-    st.session_state["scenario_preset_descriptions"] = store
+    _safe_session_state_set("scenario_preset_descriptions", store)
     _reset_cached_results()
     return normalized
 
@@ -1451,8 +1493,8 @@ def _current_scenario_presets() -> Dict[str, Dict[str, Any]]:
             "description": description,
         }
 
-    st.session_state["scenario_preset_tables"] = tables
-    st.session_state["scenario_preset_descriptions"] = descriptions
+    _safe_session_state_set("scenario_preset_tables", tables)
+    _safe_session_state_set("scenario_preset_descriptions", descriptions)
     return presets
 
 
@@ -1591,14 +1633,27 @@ def _build_scenario_suite(
 
 def _dynamic_outputs_table(model: GoatModel, scenario_df: pd.DataFrame) -> pd.DataFrame:
     rows: list[Dict[str, Any]] = []
-    irr_value = model.computed_irr() if hasattr(model, "computed_irr") else None
-    if irr_value is None and hasattr(model, "irr"):
-        irr_value = model.irr()
+    valuation = model.valuation_summary(scenario_df) if hasattr(model, "valuation_summary") else {}
+    debt_capacity = (
+        model.debt_capacity_schedule(scenario_df, annual=True)
+        if hasattr(model, "debt_capacity_schedule")
+        else pd.DataFrame()
+    )
     metrics = {
-        "IRR": irr_value,
-        "Payback Period (Years)": model.payback_period_years()
-        if hasattr(model, "payback_period_years")
-        else None,
+        "NPV": valuation.get("npv"),
+        "IRR": valuation.get("irr"),
+        "Payback Period (Years)": valuation.get("payback_years"),
+        "Terminal Value": valuation.get("terminal_value"),
+        "Minimum DSCR": (
+            pd.to_numeric(debt_capacity.get("DSCR"), errors="coerce").min()
+            if not debt_capacity.empty and "DSCR" in debt_capacity.columns
+            else None
+        ),
+        "Minimum Cash Headroom": (
+            pd.to_numeric(debt_capacity.get("Cash Reserve Headroom"), errors="coerce").min()
+            if not debt_capacity.empty and "Cash Reserve Headroom" in debt_capacity.columns
+            else None
+        ),
     }
     for metric, value in metrics.items():
         if value is None or pd.isna(value):
@@ -1612,7 +1667,14 @@ def _dynamic_benchmark_kpis_table(kpi_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["KPI", "Benchmark"])
     last_row = kpi_df.iloc[-1]
     rows: list[Dict[str, Any]] = []
-    for col in ["Milk Yield per Doe", "Feed Cost per Litre", "IRR", "Payback Period (Years)"]:
+    for col in [
+        "Milk Yield per Doe",
+        "Feed Cost per Litre",
+        "IRR",
+        "Payback Period (Years)",
+        "DSCR",
+        "Cash Reserve Headroom",
+    ]:
         value = pd.to_numeric(pd.Series([last_row.get(col)]), errors="coerce").iloc[0]
         if pd.notna(value):
             rows.append({"KPI": col, "Benchmark": float(value)})
@@ -1638,16 +1700,70 @@ def _valuation_diagnostic_messages(model: GoatModel) -> List[str]:
     messages: List[str] = []
     if model.wacc() is None:
         messages.append("Valuation input missing: WACC.")
-    if model.terminal_value() is None:
-        messages.append("Valuation input missing: Terminal Value.")
     try:
-        ufcf = model.ufcf()
+        summary = model.valuation_summary()
     except ValueError as exc:
-        messages.append(f"UFCF validation issue: {exc}")
+        messages.append(f"Valuation issue: {exc}")
         return messages
-    if ufcf is None or ufcf.empty:
-        messages.append("UFCF series is missing or empty; computed NPV/IRR cannot be derived.")
+    if not summary:
+        messages.append("Unable to derive UFCF from the current operating schedule.")
+        return messages
+    ufcf_schedule = summary.get("ufcf_schedule")
+    if not isinstance(ufcf_schedule, pd.DataFrame) or ufcf_schedule.empty:
+        messages.append("UFCF schedule is empty after valuation assembly.")
+    terminal_value = pd.to_numeric(
+        pd.Series([summary.get("terminal_value")]), errors="coerce"
+    ).iloc[0]
+    if pd.isna(terminal_value) or terminal_value <= 0:
+        messages.append("Terminal value did not compute from the current free-cash-flow profile.")
     return messages
+
+
+def _scenario_viability_table(
+    scenario_results: Dict[str, Dict[str, Any]]
+) -> pd.DataFrame:
+    rows: list[Dict[str, Any]] = []
+    for scenario_name, payload in (scenario_results or {}).items():
+        valuation = payload.get("valuation", {}) or {}
+        debt_capacity = payload.get("debt_capacity_annual")
+        if not isinstance(debt_capacity, pd.DataFrame):
+            debt_capacity = pd.DataFrame()
+        rows.append(
+            {
+                "Scenario": scenario_name,
+                "NPV": valuation.get("npv"),
+                "IRR": valuation.get("irr"),
+                "Payback (Years)": valuation.get("payback_years"),
+                "Terminal Value": valuation.get("terminal_value"),
+                "Min DSCR": (
+                    pd.to_numeric(debt_capacity.get("DSCR"), errors="coerce").min()
+                    if not debt_capacity.empty and "DSCR" in debt_capacity.columns
+                    else np.nan
+                ),
+                "Min DSCR Headroom": (
+                    pd.to_numeric(debt_capacity.get("DSCR Headroom"), errors="coerce").min()
+                    if not debt_capacity.empty and "DSCR Headroom" in debt_capacity.columns
+                    else np.nan
+                ),
+                "Min Cash Headroom": (
+                    pd.to_numeric(
+                        debt_capacity.get("Cash Reserve Headroom"), errors="coerce"
+                    ).min()
+                    if not debt_capacity.empty
+                    and "Cash Reserve Headroom" in debt_capacity.columns
+                    else np.nan
+                ),
+                "Covenant Breach Periods": (
+                    int(debt_capacity.get("Covenant Breach", pd.Series(dtype=bool)).sum())
+                    if not debt_capacity.empty and "Covenant Breach" in debt_capacity.columns
+                    else 0
+                ),
+            }
+        )
+    comparison = pd.DataFrame(rows)
+    if comparison.empty:
+        return comparison
+    return comparison.set_index("Scenario")
 
 
 def _execute_scenario_suite(
@@ -1685,13 +1801,26 @@ def _execute_scenario_suite(
         scenario_supplementary = {
             key: value.copy() for key, value in base_supplementary.items()
         }
+        valuation_summary = model.valuation_summary(scenario_df)
         scenario_kpis = model.kpis(scenario_df, annual=True)
+        working_capital_detail = model.working_capital_schedule(scenario_df, annual=False)
+        working_capital_annual = model.working_capital_schedule(scenario_df, annual=True)
+        debt_capacity_detail = model.debt_capacity_schedule(scenario_df, annual=False)
+        debt_capacity_annual = model.debt_capacity_schedule(scenario_df, annual=True)
+        ufcf_detail = model.ufcf_schedule(scenario_df, annual=False)
+        ufcf_annual = model.ufcf_schedule(scenario_df, annual=True)
         outputs_table = _dynamic_outputs_table(model, scenario_df)
         if not outputs_table.empty:
             scenario_supplementary["Outputs"] = outputs_table
         benchmark_table = _dynamic_benchmark_kpis_table(scenario_kpis)
         if not benchmark_table.empty:
             scenario_supplementary["Benchmark KPIs"] = benchmark_table
+        if not working_capital_annual.empty:
+            scenario_supplementary["Working Capital Schedule"] = working_capital_annual
+        if not debt_capacity_annual.empty:
+            scenario_supplementary["Debt Capacity Schedule"] = debt_capacity_annual
+        if not ufcf_annual.empty:
+            scenario_supplementary["UFCF Schedule"] = ufcf_annual
 
         scenario_inputs: Dict[str, Any] = {
             "Milk price change (%)": milk_pct,
@@ -1706,6 +1835,13 @@ def _execute_scenario_suite(
             "scenario": scenario_df,
             "kpis": scenario_kpis,
             "break_even": model.break_even(scenario_df, annual=True),
+            "valuation": valuation_summary,
+            "working_capital": working_capital_detail,
+            "working_capital_annual": working_capital_annual,
+            "debt_capacity": debt_capacity_detail,
+            "debt_capacity_annual": debt_capacity_annual,
+            "ufcf_schedule": ufcf_detail,
+            "ufcf_schedule_annual": ufcf_annual,
             "supplementary": scenario_supplementary,
             "selected_scenario": name,
             "scenario_inputs": scenario_inputs,
@@ -2074,9 +2210,11 @@ def _default_input_template_config() -> Dict[str, list[dict[str, object]]]:
 
 
 def _ensure_default_templates() -> Dict[str, list[dict[str, object]]]:
-    if DEFAULT_INPUT_CONFIG_KEY not in st.session_state:
-        st.session_state[DEFAULT_INPUT_CONFIG_KEY] = _default_input_template_config()
-    return st.session_state[DEFAULT_INPUT_CONFIG_KEY]
+    templates = _safe_session_state_get(DEFAULT_INPUT_CONFIG_KEY)
+    if not isinstance(templates, dict):
+        templates = _default_input_template_config()
+        _safe_session_state_set(DEFAULT_INPUT_CONFIG_KEY, templates)
+    return templates
 
 
 def _template_copy(template: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -2373,9 +2511,15 @@ def _ensure_operating_cost_table(
         elif field and (not category or category.lower() == "nan"):
             work.at[idx, "Category"] = OPERATING_COST_FIELD_TO_CATEGORY.get(field, "Operating Item")
     work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
-    unit_cost = pd.to_numeric(work.get("unit_cost_per_head_per_month"), errors="coerce")
+    if "unit_cost_per_head_per_month" in work.columns:
+        unit_cost = pd.to_numeric(work["unit_cost_per_head_per_month"], errors="coerce")
+    else:
+        unit_cost = pd.Series(np.nan, index=work.index, dtype=float)
     # Backward compatibility for historical tables still carrying "Monthly Cost".
-    monthly_legacy = pd.to_numeric(work.get("Monthly Cost"), errors="coerce")
+    if "Monthly Cost" in work.columns:
+        monthly_legacy = pd.to_numeric(work["Monthly Cost"], errors="coerce")
+    else:
+        monthly_legacy = pd.Series(np.nan, index=work.index, dtype=float)
     work["unit_cost_per_head_per_month"] = unit_cost.where(unit_cost.notna(), monthly_legacy)
     work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
 
@@ -4275,9 +4419,9 @@ def _rebase_schedule_to_horizon(
 def _reset_cached_results() -> None:
     """Clear cached scenario results so defaults regenerate with fresh inputs."""
 
-    st.session_state.all_scenario_results = {}
-    st.session_state.results = None
-    st.session_state.selected_scenario_name = next(iter(SCENARIO_PRESETS))
+    _safe_session_state_set("all_scenario_results", {})
+    _safe_session_state_set("results", None)
+    _safe_session_state_set("selected_scenario_name", next(iter(SCENARIO_PRESETS)))
 
 
 def _sync_production_horizon(start_year: int, end_year: int) -> None:
@@ -4455,66 +4599,139 @@ def _estimate_default_wacc_from_capital_table() -> float:
     cap_table = _default_capital_financing_table()
     amounts = pd.to_numeric(cap_table.get("Amount"), errors="coerce")
     returns = pd.to_numeric(cap_table.get("Interest/Return %"), errors="coerce") / 100.0
-    valid = amounts.notna() & returns.notna() & (amounts > 0)
+    valid = amounts.notna() & (amounts > 0)
     if not valid.any():
         return float(DEFAULT_VALUATION_INPUTS.get("WACC", 0.12))
     total = float(amounts[valid].sum())
     if total <= 0:
         return float(DEFAULT_VALUATION_INPUTS.get("WACC", 0.12))
+    returns = returns.where(returns > 0, float(DEFAULT_VALUATION_INPUTS.get("WACC", 0.12)))
     weighted = float((amounts[valid] * returns[valid]).sum() / total)
     return weighted if np.isfinite(weighted) and weighted > 0 else float(
         DEFAULT_VALUATION_INPUTS.get("WACC", 0.12)
     )
 
 
+def _prepare_detail_tables_for_schedule(
+    core_table: pd.DataFrame,
+    detail_tables: Dict[str, pd.DataFrame],
+) -> Dict[str, pd.DataFrame]:
+    prepared_details: Dict[str, pd.DataFrame] = {}
+    for name, table in (detail_tables or {}).items():
+        cleaned = _clean_editor_table(table)
+        if cleaned is None:
+            continue
+
+        prepared_source = cleaned.copy()
+        if name == "Variable Expenses Schedule":
+            prepared_source = _aggregate_variable_expenses(
+                _ensure_variable_expense_table(cleaned, core_table),
+                core_table,
+            )
+        elif name == "Direct Wages Schedule":
+            prepared_source = _aggregate_direct_wages(
+                _ensure_direct_wage_table(cleaned, core_table),
+                core_table,
+            )
+        elif name == "Admin Wages Schedule":
+            prepared_source = _aggregate_admin_wages(
+                _ensure_admin_wage_table(cleaned, core_table),
+                core_table,
+            )
+
+        prepared = _prepare_timeline_table(prepared_source)
+        expected_cols = DETAIL_SCHEDULE_COLUMNS.get(name)
+        if expected_cols:
+            missing = [col for col in expected_cols if col not in prepared.columns]
+            if missing:
+                raise ValueError(
+                    f"{name} is missing required column(s): {', '.join(missing)}"
+                )
+            prepared = prepared[expected_cols]
+        prepared_details[name] = prepared
+    return prepared_details
+
+
+def _build_schedule_dataframe(
+    core_table: pd.DataFrame,
+    detail_tables: Dict[str, pd.DataFrame],
+    assumptions: Optional[Dict[str, pd.DataFrame]] = None,
+) -> pd.DataFrame:
+    core_clean = _clean_editor_table(core_table)
+    if core_clean is None:
+        raise ValueError("Provide at least one period in the core schedule.")
+
+    core_prepared = _prepare_timeline_table(core_clean)
+    prepared_details = _prepare_detail_tables_for_schedule(core_clean, detail_tables)
+    schedule_df = _assemble_schedule(core_prepared, prepared_details)
+
+    if isinstance(assumptions, dict):
+        herd_plan = assumptions.get("Herd Plan")
+        if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
+            schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
+        operating_costs = assumptions.get("Operating Costs")
+        if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
+            schedule_df = _apply_operating_cost_assumptions_to_schedule(
+                schedule_df, operating_costs
+            )
+
+    return schedule_df
+
+
 def _computed_default_valuation_inputs() -> Dict[str, float]:
     fallback = {k: float(v) for k, v in DEFAULT_VALUATION_INPUTS.items() if pd.notna(v)}
+    computed = dict(fallback)
     try:
-        core, detail_tables = _default_schedule_components()
-        core_prepared = _prepare_timeline_table(core)
-        prepared_details: Dict[str, pd.DataFrame] = {}
-        for name, table in detail_tables.items():
-            cleaned = _clean_editor_table(table)
-            if cleaned is None:
-                continue
-            prepared_details[name] = _prepare_timeline_table(cleaned)
-        schedule_df = _assemble_schedule(core_prepared, prepared_details)
+        assumptions = {
+            "Production Horizon": _default_production_horizon_table(),
+            "Herd Plan": _default_herd_plan_table(),
+            "Operating Costs": _default_operating_cost_table(),
+            "Capital & Financing": _default_capital_financing_table(),
+            "Valuation Inputs": pd.DataFrame(
+                {
+                    "Metric": list(DEFAULT_VALUATION_INPUTS.keys()),
+                    "Value": list(DEFAULT_VALUATION_INPUTS.values()),
+                }
+            ),
+        }
+        core, detail_tables = _default_schedule_components(
+            production_horizon=assumptions.get("Production Horizon")
+        )
+        schedule_df = _build_schedule_dataframe(core, detail_tables, assumptions)
 
-        ufcf_series = pd.to_numeric(schedule_df.get("Net Cash Flow"), errors="coerce")
-        if ufcf_series.isna().all():
-            ufcf_series = pd.to_numeric(schedule_df.get("CFO"), errors="coerce")
-        ufcf_df = pd.DataFrame(
-            {"Period": schedule_df.index, "UFCF": ufcf_series.to_numpy()}
+        valuation_inputs = _valuation_table_to_inputs(assumptions["Valuation Inputs"])
+        valuation_inputs["WACC"] = float(
+            valuation_inputs.get("WACC", _estimate_default_wacc_from_capital_table())
         )
 
-        wacc = _estimate_default_wacc_from_capital_table()
-        valid_ufcf = pd.to_numeric(ufcf_df["UFCF"], errors="coerce").dropna()
-        last_ufcf = float(valid_ufcf.iloc[-1]) if not valid_ufcf.empty else 0.0
-        growth_rate = 0.02
-        terminal_value = (
-            (last_ufcf * (1.0 + growth_rate)) / max(wacc - growth_rate, 1e-6)
-            if np.isfinite(last_ufcf)
-            else 0.0
+        supplementary_tables = _default_supplementary_tables()
+        supplementary_tables["Capital & Financing"] = _ensure_capital_financing_table(
+            assumptions.get("Capital & Financing")
         )
-
-        valuation_inputs = {"WACC": float(wacc), "Terminal Value": float(terminal_value)}
-        schedule = InputSchedule(
+        model = InputSchedule(
             data=schedule_df,
             valuation_inputs=valuation_inputs,
-            supplementary_tables={"UFCF": ufcf_df},
-        )
-        model = schedule.to_model()
-        npv_value = model.computed_npv()
-        irr_value = model.computed_irr()
-        computed = {
-            "WACC": float(wacc),
-            "NPV": float(npv_value) if npv_value is not None else float(fallback.get("NPV", 0.0)),
-            "IRR": float(irr_value) if irr_value is not None else float(fallback.get("IRR", 0.0)),
-            "Terminal Value": float(terminal_value),
-        }
+            supplementary_tables=supplementary_tables,
+        ).to_model()
+        summary = model.valuation_summary()
+
+        computed.update(valuation_inputs)
+        if summary:
+            npv_value = summary.get("npv")
+            irr_value = summary.get("irr")
+            computed["WACC"] = float(summary.get("discount_rate", computed["WACC"]))
+            computed["NPV"] = (
+                float(npv_value) if npv_value is not None else float(computed.get("NPV", 0.0))
+            )
+            computed["IRR"] = (
+                float(irr_value) if irr_value is not None else float(computed.get("IRR", 0.0))
+            )
+            computed["Terminal Value"] = float(
+                summary.get("terminal_value", computed.get("Terminal Value", 0.0))
+            )
         return computed
     except Exception:
-        return fallback
+        return computed
 
 
 def _default_valuation_inputs_table() -> pd.DataFrame:
@@ -4544,9 +4761,23 @@ def _ensure_valuation_inputs_table(
         work["Value"] = np.nan
     work["Value"] = pd.to_numeric(work.get("Value"), errors="coerce")
 
+    existing_metrics = set(work["Metric"].astype(str))
+    missing_rows = [
+        {"Metric": metric, "Value": value}
+        for metric, value in DEFAULT_VALUATION_INPUTS.items()
+        if metric not in existing_metrics
+    ]
+    if missing_rows:
+        work = pd.concat([work, pd.DataFrame(missing_rows)], ignore_index=True)
+
     ordered_cols = ["Metric", "Value"]
     remainder = [col for col in work.columns if col not in ordered_cols]
-    return work[ordered_cols + remainder].reset_index(drop=True)
+    ordered = work[ordered_cols + remainder].reset_index(drop=True)
+    metric_order = {metric: idx for idx, metric in enumerate(DEFAULT_VALUATION_INPUTS)}
+    ordered = ordered.assign(
+        __metric_order=ordered["Metric"].map(metric_order).fillna(len(metric_order))
+    ).sort_values(["__metric_order", "Metric"], kind="stable")
+    return ordered.drop(columns="__metric_order").reset_index(drop=True)
 
 
 def _valuation_table_to_inputs(table: pd.DataFrame) -> Dict[str, float]:
@@ -4586,54 +4817,27 @@ def _ensure_default_results_loaded() -> None:
         return
 
     try:
-        core_clean = _clean_editor_table(core_table)
-        if core_clean is None:
-            return
-        core_prepared = _prepare_timeline_table(core_clean)
+        assumptions = st.session_state.get("assumptions", {})
+        schedule_df = _build_schedule_dataframe(core_table, detail_tables, assumptions)
     except ValueError:
         return
-
-    prepared_details: Dict[str, pd.DataFrame] = {}
-    for name, table in detail_tables.items():
-        cleaned = _clean_editor_table(table)
-        if cleaned is None:
-            continue
-        try:
-            prepared = _prepare_timeline_table(cleaned)
-        except ValueError:
-            continue
-
-        expected_cols = DETAIL_SCHEDULE_COLUMNS.get(name)
-        if expected_cols:
-            missing = [col for col in expected_cols if col not in prepared.columns]
-            if missing:
-                continue
-            prepared = prepared[expected_cols]
-
-        prepared_details[name] = prepared
-
-    try:
-        schedule_df = _assemble_schedule(core_prepared, prepared_details)
-    except ValueError:
-        return
-
-    assumptions = st.session_state.get("assumptions", {})
-    if isinstance(assumptions, dict):
-        herd_plan = assumptions.get("Herd Plan")
-        if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
-            schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
-        operating_costs = assumptions.get("Operating Costs")
-        if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
-            schedule_df = _apply_operating_cost_assumptions_to_schedule(
-                schedule_df, operating_costs
-            )
 
     valuation_inputs = dict(DEFAULT_VALUATION_INPUTS)
+    if isinstance(assumptions, dict):
+        valuation_table = assumptions.get("Valuation Inputs")
+        if isinstance(valuation_table, pd.DataFrame) and not valuation_table.empty:
+            valuation_inputs.update(_valuation_table_to_inputs(valuation_table))
     supplementary_copy = {
         name: table.copy()
         for name, table in (supplementary_tables or {}).items()
         if isinstance(table, pd.DataFrame)
     }
+    if isinstance(assumptions, dict):
+        cap_fin = assumptions.get("Capital & Financing")
+        if isinstance(cap_fin, pd.DataFrame) and not cap_fin.empty:
+            supplementary_copy["Capital & Financing"] = _ensure_capital_financing_table(
+                cap_fin
+            )
 
     try:
         scenario_suite = _build_scenario_suite()
@@ -8310,20 +8514,37 @@ def main() -> None:
         if valuation_issues:
             st.warning("Valuation diagnostics: " + " ".join(f"- {msg}" for msg in valuation_issues))
 
-        computed_npv = model.computed_npv() if hasattr(model, "computed_npv") else None
-        computed_irr = model.computed_irr() if hasattr(model, "computed_irr") else None
+        valuation_summary = results.get("valuation", {}) or {}
+        debt_capacity_annual = results.get("debt_capacity_annual")
+        if not isinstance(debt_capacity_annual, pd.DataFrame):
+            debt_capacity_annual = pd.DataFrame()
         valuation_metrics = {
-            "WACC": model.wacc(),
-            "NPV": computed_npv if computed_npv is not None else model.npv(),
-            "IRR": computed_irr if computed_irr is not None else (model.irr() if hasattr(model, "irr") else None),
-            "Terminal Value": model.terminal_value(),
+            "WACC": valuation_summary.get("discount_rate", model.wacc()),
+            "NPV": valuation_summary.get("npv", model.npv()),
+            "IRR": valuation_summary.get("irr", model.irr() if hasattr(model, "irr") else None),
+            "Terminal Value": valuation_summary.get("terminal_value", model.terminal_value()),
+            "Min DSCR": (
+                pd.to_numeric(debt_capacity_annual.get("DSCR"), errors="coerce").min()
+                if not debt_capacity_annual.empty and "DSCR" in debt_capacity_annual.columns
+                else None
+            ),
+            "Min Cash Headroom": (
+                pd.to_numeric(
+                    debt_capacity_annual.get("Cash Reserve Headroom"), errors="coerce"
+                ).min()
+                if not debt_capacity_annual.empty
+                and "Cash Reserve Headroom" in debt_capacity_annual.columns
+                else None
+            ),
         }
-        summary_cols = st.columns(4)
+        summary_cols = st.columns(len(valuation_metrics))
         for idx, (label, value) in enumerate(valuation_metrics.items()):
             if value is None or pd.isna(value):
                 summary_cols[idx].metric(label, "N/A")
             elif label in {"WACC", "IRR"}:
                 summary_cols[idx].metric(label, f"{value * 100:.2f}%")
+            elif label == "Min DSCR":
+                summary_cols[idx].metric(label, f"{value:.2f}x")
             else:
                 summary_cols[idx].metric(label, f"{value:,.2f}")
 
@@ -8373,6 +8594,59 @@ def main() -> None:
             st.subheader("Supplementary Schedules")
             st.info("Supplementary schedules will appear once a scenario has been run.")
         else:
+            valuation_summary = results.get("valuation", {}) or {}
+            working_capital_annual = results.get("working_capital_annual")
+            if not isinstance(working_capital_annual, pd.DataFrame):
+                working_capital_annual = pd.DataFrame()
+            debt_capacity_annual = results.get("debt_capacity_annual")
+            if not isinstance(debt_capacity_annual, pd.DataFrame):
+                debt_capacity_annual = pd.DataFrame()
+            ufcf_schedule_annual = results.get("ufcf_schedule_annual")
+            if not isinstance(ufcf_schedule_annual, pd.DataFrame):
+                ufcf_schedule_annual = pd.DataFrame()
+            scenario_comparison = _scenario_viability_table(
+                st.session_state.get("all_scenario_results", {})
+            )
+
+            st.markdown("#### Investor Viability Snapshot")
+            viability_cols = st.columns(4)
+            viability_metrics = [
+                (
+                    "NPV",
+                    valuation_summary.get("npv"),
+                    "{:,.2f}",
+                ),
+                (
+                    "IRR",
+                    valuation_summary.get("irr"),
+                    "{:.2%}",
+                ),
+                (
+                    "Payback",
+                    valuation_summary.get("payback_years"),
+                    "{:.2f} years",
+                ),
+                (
+                    "Covenant Breach Periods",
+                    (
+                        int(debt_capacity_annual["Covenant Breach"].sum())
+                        if not debt_capacity_annual.empty
+                        and "Covenant Breach" in debt_capacity_annual.columns
+                        else None
+                    ),
+                    "{:,.0f}",
+                ),
+            ]
+            for idx, (label, value, fmt) in enumerate(viability_metrics):
+                if value is None or pd.isna(value):
+                    viability_cols[idx].metric(label, "N/A")
+                else:
+                    viability_cols[idx].metric(label, fmt.format(value))
+
+            if not scenario_comparison.empty:
+                st.markdown("#### Scenario Viability Comparison")
+                st.dataframe(_format_kpis_for_display(scenario_comparison))
+
             st.subheader("KPIs (Annual)")
             st.dataframe(_format_kpis_for_display(kpis))
 
@@ -8405,6 +8679,59 @@ def main() -> None:
                 st.markdown("#### Break-even Revenue")
                 st.bar_chart(break_even["Break-even Revenue"])
 
+            viability_col1, viability_col2 = st.columns(2)
+            with viability_col1:
+                st.markdown("#### Working Capital")
+                wc_cols = [
+                    col
+                    for col in [
+                        "Accounts Receivable",
+                        "Inventory",
+                        "Accounts Payable",
+                        "Net Working Capital",
+                    ]
+                    if not working_capital_annual.empty and col in working_capital_annual.columns
+                ]
+                if wc_cols:
+                    st.line_chart(working_capital_annual[wc_cols])
+                else:
+                    st.info("Working-capital schedule becomes available after valuation inputs are assembled.")
+
+                st.markdown("#### UFCF")
+                if not ufcf_schedule_annual.empty and "UFCF" in ufcf_schedule_annual.columns:
+                    st.bar_chart(ufcf_schedule_annual["UFCF"])
+                else:
+                    st.info("UFCF schedule is not available for this scenario.")
+
+            with viability_col2:
+                st.markdown("#### Debt Capacity")
+                debt_cols = [
+                    col
+                    for col in ["DSCR", "Interest Coverage", "Cash Reserve Headroom"]
+                    if not debt_capacity_annual.empty and col in debt_capacity_annual.columns
+                ]
+                if debt_cols:
+                    st.line_chart(debt_capacity_annual[debt_cols])
+                else:
+                    st.info("Debt-capacity schedule is not available for this scenario.")
+
+                if not debt_capacity_annual.empty:
+                    display_cols = [
+                        col
+                        for col in [
+                            "DSCR",
+                            "DSCR Headroom",
+                            "Interest Coverage",
+                            "Interest Coverage Headroom",
+                            "Cash Reserve Headroom",
+                            "Covenant Breach",
+                        ]
+                        if col in debt_capacity_annual.columns
+                    ]
+                    if display_cols:
+                        st.markdown("#### Covenant Headroom")
+                        st.dataframe(_format_kpis_for_display(debt_capacity_annual[display_cols]))
+
             st.download_button(
                 "Download Scenario CSV",
                 scenario.to_csv().encode("utf-8"),
@@ -8421,6 +8748,9 @@ def main() -> None:
                 "Asset Schedules",
                 "Outputs",
                 "Benchmark KPIs",
+                "Working Capital Schedule",
+                "Debt Capacity Schedule",
+                "UFCF Schedule",
             ]:
                 _render_table(name, supplementary_render.get(name))
 
