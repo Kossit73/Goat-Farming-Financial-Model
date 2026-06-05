@@ -9798,28 +9798,23 @@ def main() -> None:
             )
             st.session_state.assumptions["Production Drivers"] = merged
 
-        full_driver_edit_enabled = st.toggle(
-            "Edit all Production Driver columns",
-            key="assump::production_drivers::edit_all",
-            help="When enabled, Product and Unit become editable. Product choices stay constrained to the active business type.",
+        st.markdown("##### Editing Mode")
+        edit_mode = st.radio(
+            "Choose how you want to edit Production Quantity Drivers",
+            options=["Guided", "Full table"],
+            horizontal=True,
+            key="assump::production_drivers::edit_mode",
         )
+        full_driver_edit_enabled = edit_mode == "Full table"
         driver_disabled_columns: list[str] = [] if full_driver_edit_enabled else ["Product", "Unit"]
         if full_driver_edit_enabled:
             st.caption(
-                "Full edit mode is on. Product can be reassigned only within the active business-type products, and duplicate product rows are collapsed on save."
+                "Full table mode edits every active row in one place and unlocks all columns. Product choices stay constrained to the active business type."
             )
-
-        production_driver_editor = st.data_editor(
-            st.session_state.assumptions["Production Drivers"],
-            use_container_width=True,
-            key="assump::production_drivers",
-            column_config=_production_driver_column_config(
-                st.session_state.assumptions["Production Drivers"],
-                active_products,
-            ),
-            disabled=driver_disabled_columns,
-        )
-        _save_production_drivers(production_driver_editor)
+        else:
+            st.caption(
+                "Guided mode keeps Product and Unit fixed and separates the inputs into simpler Dairy and Livestock tables."
+            )
         visible_dairy_products = [
             product for product in _PRODUCTION_DRIVER_DAIRY_PRODUCTS if product in active_products
         ]
@@ -9836,8 +9831,8 @@ def main() -> None:
                 visible_livestock_products
             )
         ]
-        with st.expander("Edit Dairy and Slaughter table columns", expanded=False):
-            st.caption("Core calculation columns stay locked. Added columns appear in both editors.")
+        with st.expander("Manage Production Driver Columns", expanded=False):
+            st.caption("Add or remove custom columns used in the Production Quantity Drivers tables.")
             add_key = "assump::production_drivers::new_column"
             _safe_session_state_setdefault(add_key, "")
             add_cols = st.columns([2.2, 1])
@@ -9881,7 +9876,19 @@ def main() -> None:
                 _safe_session_state_set("assump::production_drivers::remove_columns", [])
                 _maybe_rerun()
 
-        if visible_dairy_products and visible_livestock_products:
+        if full_driver_edit_enabled:
+            production_driver_editor = st.data_editor(
+                st.session_state.assumptions["Production Drivers"],
+                use_container_width=True,
+                key="assump::production_drivers",
+                column_config=_production_driver_column_config(
+                    st.session_state.assumptions["Production Drivers"],
+                    active_products,
+                ),
+                disabled=driver_disabled_columns,
+            )
+            _save_production_drivers(production_driver_editor)
+        elif visible_dairy_products and visible_livestock_products:
             dairy_col, slaughter_col = st.columns(2)
             with dairy_col:
                 st.markdown("**Dairy Drivers**")
@@ -9932,6 +9939,12 @@ def main() -> None:
             _save_production_driver_subset(
                 visible_livestock_products,
                 slaughter_editor,
+            )
+        with st.expander("Show Full Production Driver Table", expanded=False):
+            st.dataframe(
+                st.session_state.assumptions["Production Drivers"],
+                use_container_width=True,
+                hide_index=True,
             )
         assumption_tables["Production Drivers"] = st.session_state.assumptions[
             "Production Drivers"
