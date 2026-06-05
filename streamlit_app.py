@@ -10767,5 +10767,39 @@ def main() -> None:
     with tabs[5]:
         _render_ai_orchestration_layer(results)
 
+# ---------------------------------------------------------------------------
+# Scenario state hooks — called by the parent NumQuants shell.
+# ---------------------------------------------------------------------------
+
+_GOAT_STATE_KEYS = [
+    "core_schedule",           # pd.DataFrame — the main financial schedule
+    "detail_schedules",        # dict[str, pd.DataFrame] — supplementary detail tabs
+    "assumptions",             # dict[str, pd.DataFrame] — assumption tables
+    "supplementary",           # dict[str, pd.DataFrame] — supplementary tables
+    "selected_scenario_name",  # str
+    "schedule_period_type",    # str ('monthly' | 'annual')
+    DEFAULT_INPUT_CONFIG_KEY,  # "default_input_templates"
+]
+
+
+def get_state() -> dict:
+    """Snapshot all user-editable schedule and assumption data."""
+    import streamlit as _st
+    return {k: _st.session_state[k] for k in _GOAT_STATE_KEYS if k in _st.session_state}
+
+
+def set_state(state: dict) -> None:
+    """Restore a previously saved state snapshot.
+
+    Writes to session_state before main() runs. main() checks
+    'if key not in st.session_state' before setting defaults, so restored
+    values take precedence over defaults.
+    """
+    import streamlit as _st
+    for k, v in state.items():
+        if k in _GOAT_STATE_KEYS:
+            _st.session_state[k] = v
+
+
 if __name__ == "__main__":
     main()
