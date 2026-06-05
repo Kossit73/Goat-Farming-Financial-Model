@@ -3737,11 +3737,34 @@ def _sync_pricing_table_to_core(
         return base
 
     current = _ensure_pricing_table(table)
+    allowed_periods = set(base.get("Period", pd.Series(dtype=str)).astype(str).tolist())
+    if allowed_periods:
+        current = current.loc[
+            current.get("Period", pd.Series(dtype=str)).astype(str).isin(allowed_periods)
+        ].reset_index(drop=True)
     base_indexed = base.set_index(["Period", "Product"])
     current_indexed = current.set_index(["Period", "Product"])
     merged = base_indexed.combine_first(current_indexed)
     merged.update(current_indexed)
     return _ensure_pricing_table(merged.reset_index())
+
+
+def _sync_commercial_assumptions_to_core(
+    assumptions: Optional[Dict[str, pd.DataFrame]],
+    core: pd.DataFrame,
+) -> Dict[str, pd.DataFrame]:
+    """Align pricing periods and derived quantities to the active core schedule."""
+
+    synced: Dict[str, pd.DataFrame] = dict(assumptions or {})
+    pricing_table = synced.get("Pricing")
+    pricing_df = pricing_table if isinstance(pricing_table, pd.DataFrame) else pd.DataFrame()
+    synced_pricing = _sync_pricing_table_to_core(pricing_df, core)
+    synced["Pricing"] = _derive_pricing_quantities_from_production(
+        synced_pricing,
+        _pricing_schedule_context(core, synced.get("Herd Plan")),
+        synced.get("Production Drivers"),
+    )
+    return synced
 
 
 def _pricing_revenue_by_period(table: pd.DataFrame) -> pd.DataFrame:
@@ -6205,16 +6228,7 @@ def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
     assumptions = st.session_state.get("assumptions", {})
     if isinstance(assumptions, dict):
         core_schedule = st.session_state.get("core_schedule", pd.DataFrame())
-        pricing_table = assumptions.get("Pricing")
-        if isinstance(pricing_table, pd.DataFrame):
-            synced_pricing = _sync_pricing_table_to_core(
-                pricing_table, core_schedule
-            )
-            assumptions["Pricing"] = _derive_pricing_quantities_from_production(
-                synced_pricing,
-                _pricing_schedule_context(core_schedule, assumptions.get("Herd Plan")),
-                assumptions.get("Production Drivers"),
-            )
+        assumptions = _sync_commercial_assumptions_to_core(assumptions, core_schedule)
 
         for table_name in ["Operating Costs", "Herd Plan"]:
             table = assumptions.get(table_name)
@@ -6379,18 +6393,18 @@ def _build_schedule_dataframe(
     schedule_df = _assemble_schedule(core_prepared, prepared_details)
 
     if isinstance(assumptions, dict):
-        herd_plan = assumptions.get("Herd Plan")
+        synced_assumptions = _sync_commercial_assumptions_to_core(assumptions, core_clean)
+        herd_plan = synced_assumptions.get("Herd Plan")
         if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
             schedule_df = _apply_herd_plan_to_schedule(schedule_df, herd_plan)
-        operating_costs = assumptions.get("Operating Costs")
+        operating_costs = synced_assumptions.get("Operating Costs")
         if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
             schedule_df = _apply_operating_cost_assumptions_to_schedule(
                 schedule_df, operating_costs
             )
-        pricing = assumptions.get("Pricing")
+        pricing = synced_assumptions.get("Pricing")
         if isinstance(pricing, pd.DataFrame) and not pricing.empty:
-            pricing = _sync_pricing_table_to_core(pricing, core_clean)
-            production_drivers = assumptions.get("Production Drivers")
+            production_drivers = synced_assumptions.get("Production Drivers")
             schedule_df = _apply_pricing_assumptions_to_schedule(
                 schedule_df,
                 pricing,
@@ -6814,7 +6828,13 @@ def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) 
         duplicate_years = herd.duplicated(subset=["Year"], keep=False)
         if duplicate_years.any():
             issues.append("Herd Plan has duplicate years.")
-    pricing = assumptions.get("Pricing", pd.DataFrame())
+    core_for_validation = st.session_state.get("core_schedule", pd.DataFrame())
+    synced_assumptions = (
+        _sync_commercial_assumptions_to_core(assumptions, core_for_validation)
+        if isinstance(assumptions, dict)
+        else {}
+    )
+    pricing = synced_assumptions.get("Pricing", pd.DataFrame())
     if isinstance(pricing, pd.DataFrame) and not pricing.empty and {"Period", "Product"}.issubset(pricing.columns):
         dup = pricing.duplicated(subset=["Period", "Product"], keep=False)
         if dup.any():
@@ -6822,7 +6842,7 @@ def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) 
         issues.extend(
             _pricing_validation_messages(
                 pricing,
-                assumptions.get("Production Drivers"),
+                synced_assumptions.get("Production Drivers"),
             )
         )
 
@@ -8220,17 +8240,9 @@ def main() -> None:
             st.session_state.get("core_schedule")
         )
 
-    synced_pricing = _sync_pricing_table_to_core(
-        st.session_state.assumptions.get("Pricing", pd.DataFrame()),
+    st.session_state.assumptions = _sync_commercial_assumptions_to_core(
+        st.session_state.assumptions,
         st.session_state.core_schedule,
-    )
-    st.session_state.assumptions["Pricing"] = _derive_pricing_quantities_from_production(
-        synced_pricing,
-        _pricing_schedule_context(
-            st.session_state.core_schedule,
-            st.session_state.assumptions.get("Herd Plan"),
-        ),
-        st.session_state.assumptions.get("Production Drivers"),
     )
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
@@ -9522,11 +9534,11 @@ def main() -> None:
         ]
 
         st.markdown("#### Pricing Assumptions")
-        pricing_table = _sync_pricing_table_to_core(
-            st.session_state.assumptions.get("Pricing", pd.DataFrame()),
+        st.session_state.assumptions = _sync_commercial_assumptions_to_core(
+            st.session_state.assumptions,
             st.session_state.core_schedule,
         )
-        st.session_state.assumptions["Pricing"] = pricing_table
+        pricing_table = st.session_state.assumptions["Pricing"]
         period_label = (
             "quarter"
             if st.session_state.get("schedule_period_type") == "quarterly"
@@ -9649,16 +9661,13 @@ def main() -> None:
             st.session_state.assumptions["Pricing"] = refreshed
 
         def _save_pricing_matrix(updated: pd.DataFrame) -> None:
-            ensured = _sync_pricing_table_to_core(
-                updated,
+            refreshed_assumptions = dict(st.session_state.assumptions)
+            refreshed_assumptions["Pricing"] = updated
+            refreshed_assumptions = _sync_commercial_assumptions_to_core(
+                refreshed_assumptions,
                 st.session_state.core_schedule,
             )
-            refreshed = _derive_pricing_quantities_from_production(
-                ensured,
-                refresh_context,
-                st.session_state.assumptions.get("Production Drivers"),
-            )
-            st.session_state.assumptions["Pricing"] = refreshed
+            st.session_state.assumptions = refreshed_assumptions
 
         pricing_matrix = st.data_editor(
             st.session_state.assumptions["Pricing"],
@@ -9720,7 +9729,12 @@ def main() -> None:
 
         if add_col.button("Add Product", key="pricing_add_row"):
             pricing_table = _add_pricing_row(pricing_table)
-            st.session_state.assumptions["Pricing"] = pricing_table
+            updated_assumptions = dict(st.session_state.assumptions)
+            updated_assumptions["Pricing"] = pricing_table
+            st.session_state.assumptions = _sync_commercial_assumptions_to_core(
+                updated_assumptions,
+                st.session_state.core_schedule,
+            )
             _clear_schedule_editor_state("assump::pricing")
 
         option_labels: list[str] = []
@@ -9747,7 +9761,12 @@ def main() -> None:
                 pricing_table = _remove_pricing_row(
                     pricing_table, option_index[choice]
                 )
-                st.session_state.assumptions["Pricing"] = pricing_table
+                updated_assumptions = dict(st.session_state.assumptions)
+                updated_assumptions["Pricing"] = pricing_table
+                st.session_state.assumptions = _sync_commercial_assumptions_to_core(
+                    updated_assumptions,
+                    st.session_state.core_schedule,
+                )
                 st.session_state.pricing_remove_choice = "-- Select Row --"
                 _clear_schedule_editor_state("assump::pricing")
 
@@ -9791,12 +9810,21 @@ def main() -> None:
                 st.session_state.get("pricing_increment_pct", 0.0),
                 st.session_state.get("pricing_increment_target"),
             )
-            st.session_state.assumptions["Pricing"] = pricing_table
+            updated_assumptions = dict(st.session_state.assumptions)
+            updated_assumptions["Pricing"] = pricing_table
+            st.session_state.assumptions = _sync_commercial_assumptions_to_core(
+                updated_assumptions,
+                st.session_state.core_schedule,
+            )
             _clear_schedule_editor_state("assump::pricing")
 
         def _save_pricing(updated: pd.DataFrame) -> None:
-            ensured = _ensure_pricing_table(updated)
-            st.session_state.assumptions["Pricing"] = ensured
+            updated_assumptions = dict(st.session_state.assumptions)
+            updated_assumptions["Pricing"] = updated
+            st.session_state.assumptions = _sync_commercial_assumptions_to_core(
+                updated_assumptions,
+                st.session_state.core_schedule,
+            )
 
         _render_schedule_row_editor(
             "assump::pricing",

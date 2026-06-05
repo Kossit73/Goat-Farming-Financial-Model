@@ -625,6 +625,84 @@ def test_sync_pricing_table_to_core_expands_products_to_new_periods():
     assert ("2026-01-31", "Meat") in period_product_pairs
 
 
+def test_sync_commercial_assumptions_to_core_rebases_pricing_periods_to_horizon():
+    core = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-02-28"],
+            "Revenue": [1000.0, 1200.0],
+        }
+    )
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Herd Plan"] = pd.DataFrame(
+        {
+            "Year": [2026],
+            "Herd Size (heads)": [100.0],
+            "Herd Growth %": [0.0],
+        }
+    )
+    assumptions["Pricing"] = pd.DataFrame(
+        {
+            "Period": ["2025-12-31"],
+            "Product": ["Milk"],
+            "Active": [True],
+            "Allocation %": [100.0],
+            "Quantity Mode": ["Derived"],
+            "Manual Quantity Override": [pd.NA],
+            "Quantity per Period": [0.0],
+            "Unit": ["Litre"],
+            "Base Price": [2.5],
+            "Price Growth %": [0.0],
+        }
+    )
+
+    synced = streamlit_app._sync_commercial_assumptions_to_core(assumptions, core)
+
+    assert "2025-12-31" not in synced["Pricing"]["Period"].tolist()
+    assert {"2026-01-31", "2026-02-28"} == set(synced["Pricing"]["Period"].tolist())
+    assert synced["Pricing"]["Quantity per Period"].fillna(0.0).ge(0.0).all()
+
+
+def test_build_schedule_dataframe_rebases_commercial_periods_to_core_schedule():
+    assumptions = streamlit_app._default_assumption_tables()
+    core = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-02-28"],
+            "Revenue": [0.0, 0.0],
+            "COGS": [0.0, 0.0],
+            "Variable Expenses": [0.0, 0.0],
+            "Fixed Expenses": [0.0, 0.0],
+            "Direct Wages": [0.0, 0.0],
+            "Admin Wages": [0.0, 0.0],
+        }
+    )
+    assumptions["Herd Plan"] = pd.DataFrame(
+        {
+            "Year": [2026],
+            "Herd Size (heads)": [100.0],
+            "Herd Growth %": [0.0],
+        }
+    )
+    assumptions["Pricing"] = pd.DataFrame(
+        {
+            "Period": ["2025-12-31"],
+            "Product": ["Milk"],
+            "Active": [True],
+            "Allocation %": [100.0],
+            "Quantity Mode": ["Manual Override"],
+            "Manual Quantity Override": [50.0],
+            "Quantity per Period": [50.0],
+            "Unit": ["Litre"],
+            "Base Price": [2.0],
+            "Price Growth %": [0.0],
+        }
+    )
+
+    built = streamlit_app._build_schedule_dataframe(core, {}, assumptions)
+
+    built_periods = pd.to_datetime(built.index if built.index.name == "Period" else built["Period"], errors="coerce")
+    assert set(built_periods.strftime("%Y-%m-%d").tolist()) == {"2026-01-31", "2026-02-28"}
+
+
 def test_pricing_product_plan_can_target_a_period_range_only():
     pricing = pd.DataFrame(
         {
