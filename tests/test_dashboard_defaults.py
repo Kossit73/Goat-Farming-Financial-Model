@@ -581,6 +581,22 @@ def test_merge_production_driver_subset_updates_target_products_only():
     assert merged.loc[merged["Product"] == "Meat", "Benchmark Note"].iloc[0] == "Keep"
 
 
+def test_merge_production_driver_subset_dedupes_when_product_is_reassigned():
+    drivers = streamlit_app._default_production_driver_table()
+    slaughter_subset = drivers.loc[drivers["Product"].isin(["Meat", "Offal", "Pelt", "Live Herd"])].copy()
+    slaughter_subset.loc[slaughter_subset["Product"] == "Meat", "Product"] = "Offal"
+    slaughter_subset.loc[slaughter_subset["Product"] == "Offal", "Offal Yield Kg per Goat"] = 5.0
+
+    merged = streamlit_app._merge_production_driver_subset(
+        drivers,
+        slaughter_subset,
+        ["Meat", "Offal", "Pelt", "Live Herd"],
+    )
+
+    assert merged["Product"].value_counts().max() == 1
+    assert merged.loc[merged["Product"] == "Offal", "Offal Yield Kg per Goat"].iloc[0] == 5.0
+
+
 def test_manual_quantity_override_is_preserved_over_derived_drivers():
     schedule = pd.DataFrame(
         {"Herd Size (heads)": [100.0]},

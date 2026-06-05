@@ -2657,6 +2657,9 @@ def _sync_production_driver_table_to_products(
     current = current.loc[
         current["Product"].astype(str).str.strip().isin(product_list)
     ].copy()
+    if not current.empty:
+        current["Product"] = current["Product"].astype(str).str.strip()
+        current = current.drop_duplicates(subset=["Product"], keep="last").reset_index(drop=True)
 
     for column in current.columns:
         if column not in base.columns:
@@ -2721,6 +2724,7 @@ def _merge_production_driver_subset(
 ) -> pd.DataFrame:
     base = _ensure_production_driver_table(table)
     edited = subset.copy()
+    edited["Product"] = edited.get("Product", "").astype(str).str.strip()
     product_keys = {str(product).strip().casefold() for product in products if str(product).strip()}
 
     for column in edited.columns:
@@ -2738,6 +2742,8 @@ def _merge_production_driver_subset(
 
     keep_mask = ~base["Product"].astype(str).str.strip().str.casefold().isin(product_keys)
     merged = pd.concat([base.loc[keep_mask].copy(), edited], ignore_index=True, sort=False)
+    merged["Product"] = merged["Product"].astype(str).str.strip()
+    merged = merged.drop_duplicates(subset=["Product"], keep="last").reset_index(drop=True)
     merged["_sort_order"] = (
         merged["Product"].astype(str).str.strip().str.casefold().map(base_order).fillna(len(base_order))
     )
@@ -2745,10 +2751,22 @@ def _merge_production_driver_subset(
     return _ensure_production_driver_table(merged)
 
 
-def _production_driver_column_config(table: Optional[pd.DataFrame]) -> dict[str, Any]:
+def _production_driver_column_config(
+    table: Optional[pd.DataFrame],
+    product_options: Optional[Sequence[str]] = None,
+) -> dict[str, Any]:
     drivers = _ensure_production_driver_table(table)
+    cleaned_product_options = [
+        str(product).strip()
+        for product in (product_options or [])
+        if str(product).strip()
+    ]
     config: dict[str, Any] = {
-        "Product": st.column_config.TextColumn("Product"),
+        "Product": (
+            st.column_config.SelectboxColumn("Product", options=cleaned_product_options)
+            if cleaned_product_options
+            else st.column_config.TextColumn("Product")
+        ),
         "Unit": st.column_config.TextColumn("Unit"),
         "Quantity Mode": st.column_config.SelectboxColumn(
             "Quantity Mode",
@@ -9780,14 +9798,26 @@ def main() -> None:
             )
             st.session_state.assumptions["Production Drivers"] = merged
 
+        full_driver_edit_enabled = st.toggle(
+            "Edit all Production Driver columns",
+            key="assump::production_drivers::edit_all",
+            help="When enabled, Product and Unit become editable. Product choices stay constrained to the active business type.",
+        )
+        driver_disabled_columns: list[str] = [] if full_driver_edit_enabled else ["Product", "Unit"]
+        if full_driver_edit_enabled:
+            st.caption(
+                "Full edit mode is on. Product can be reassigned only within the active business-type products, and duplicate product rows are collapsed on save."
+            )
+
         production_driver_editor = st.data_editor(
             st.session_state.assumptions["Production Drivers"],
             use_container_width=True,
             key="assump::production_drivers",
             column_config=_production_driver_column_config(
-                st.session_state.assumptions["Production Drivers"]
+                st.session_state.assumptions["Production Drivers"],
+                active_products,
             ),
-            disabled=["Product", "Unit"],
+            disabled=driver_disabled_columns,
         )
         _save_production_drivers(production_driver_editor)
         visible_dairy_products = [
@@ -9860,8 +9890,8 @@ def main() -> None:
                     use_container_width=True,
                     hide_index=True,
                     key="assump::production_drivers::dairy",
-                    column_config=_production_driver_column_config(dairy_drivers),
-                    disabled=["Product", "Unit"],
+                    column_config=_production_driver_column_config(dairy_drivers, visible_dairy_products),
+                    disabled=driver_disabled_columns,
                 )
                 _save_production_driver_subset(visible_dairy_products, dairy_editor)
             with slaughter_col:
@@ -9871,8 +9901,8 @@ def main() -> None:
                     use_container_width=True,
                     hide_index=True,
                     key="assump::production_drivers::slaughter",
-                    column_config=_production_driver_column_config(slaughter_drivers),
-                    disabled=["Product", "Unit"],
+                    column_config=_production_driver_column_config(slaughter_drivers, visible_livestock_products),
+                    disabled=driver_disabled_columns,
                 )
                 _save_production_driver_subset(
                     visible_livestock_products,
@@ -9885,8 +9915,8 @@ def main() -> None:
                 use_container_width=True,
                 hide_index=True,
                 key="assump::production_drivers::dairy",
-                column_config=_production_driver_column_config(dairy_drivers),
-                disabled=["Product", "Unit"],
+                column_config=_production_driver_column_config(dairy_drivers, visible_dairy_products),
+                disabled=driver_disabled_columns,
             )
             _save_production_driver_subset(visible_dairy_products, dairy_editor)
         elif visible_livestock_products:
@@ -9896,8 +9926,8 @@ def main() -> None:
                 use_container_width=True,
                 hide_index=True,
                 key="assump::production_drivers::slaughter",
-                column_config=_production_driver_column_config(slaughter_drivers),
-                disabled=["Product", "Unit"],
+                column_config=_production_driver_column_config(slaughter_drivers, visible_livestock_products),
+                disabled=driver_disabled_columns,
             )
             _save_production_driver_subset(
                 visible_livestock_products,
