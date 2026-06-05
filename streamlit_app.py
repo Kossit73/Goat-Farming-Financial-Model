@@ -1918,8 +1918,8 @@ def _dynamic_benchmark_kpis_table(kpi_df: pd.DataFrame) -> pd.DataFrame:
     last_row = kpi_df.iloc[-1]
     rows: list[Dict[str, Any]] = []
     for col in [
-        "Milk Yield per Doe",
-        "Feed Cost per Litre",
+        "Revenue per Herd Head",
+        "Feed Cost per Herd Head",
         "IRR",
         "Payback Period (Years)",
         "DSCR",
@@ -2382,7 +2382,7 @@ DEFAULT_VARIABLE_ITEMS = [
 
 DEFAULT_DIRECT_WAGE_ITEMS = [
     {
-        "Position": "Milking Crew",
+        "Position": "Operations Crew",
         "Head Count": 3.0,
         "Monthly Salary per Head": 1800.0,
         "Total Salary": 5400.0,
@@ -6099,7 +6099,7 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
         "Capex Schedule": pd.DataFrame(
             {
                 "Year": [2024, 2025],
-                "Category": ["Milking Equipment", "Housing Upgrades"],
+                "Category": ["Production Equipment", "Housing Upgrades"],
                 "Spend": [45000.0, 38000.0],
                 "Depreciation Rate %": [8.0, 6.5],
                 "Depreciation": [3600.0, 2470.0],
@@ -6107,7 +6107,7 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
         ),
         "Asset Schedules": pd.DataFrame(
             {
-                "Asset": ["Barn", "Parlour"],
+                "Asset": ["Barn", "Processing Facility"],
                 "Year": [2024, 2025],
                 "Opening NBV": [120000.0, 65000.0],
                 "Additions": [10000.0, 5000.0],
@@ -6124,8 +6124,8 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
         ),
         "Benchmark KPIs": pd.DataFrame(
             {
-                "KPI": ["Milk Yield per Doe", "Feed Cost per Litre"],
-                "Benchmark": [3.6, 0.18],
+                "KPI": ["Revenue per Herd Head", "Feed Cost per Herd Head"],
+                "Benchmark": [1500.0, 320.0],
             }
         ),
     }
@@ -7311,7 +7311,7 @@ def _analytics_framework_store() -> Dict[str, Dict[str, Any]]:
             "inputs": _default_framework_table(
                 ["Input", "Source", "Transform", "Active"],
                 [
-                    ("Milk Price Series", "Scenario Output", "none", True),
+                    ("Primary Product Price Series", "Scenario Output", "none", True),
                     ("Feed Cost Series", "Scenario Output", "none", True),
                     ("Herd Productivity", "Input Schedule", "rolling_mean", True),
                 ],
@@ -7323,7 +7323,7 @@ def _analytics_framework_store() -> Dict[str, Dict[str, Any]]:
             "drivers": _default_framework_table(
                 ["Driver", "Base", "Low", "High"],
                 [
-                    ("Milk Price", 1.0, -20.0, 20.0),
+                    ("Primary Product Price", 1.0, -20.0, 20.0),
                     ("Feed Cost", 1.0, -20.0, 20.0),
                     ("Herd Productivity", 1.0, -15.0, 15.0),
                 ],
