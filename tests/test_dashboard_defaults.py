@@ -480,6 +480,53 @@ def test_production_drivers_derive_meat_and_pelt_from_slaughter():
     assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == 5.0
 
 
+def test_production_drivers_derive_offal_and_live_herd_from_saleable_stream():
+    schedule = pd.DataFrame(
+        {"Herd Size (heads)": [100.0]},
+        index=pd.to_datetime(["2026-03-31"]),
+    )
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-03-31"] * 4,
+            "Product": ["Meat", "Offal", "Pelt", "Live Herd"],
+            "Active": [True, True, True, True],
+            "Allocation %": [100.0, 100.0, 100.0, 100.0],
+            "Quantity Mode": ["Derived", "Derived", "Derived", "Derived"],
+            "Manual Quantity Override": [pd.NA, pd.NA, pd.NA, pd.NA],
+            "Quantity per Period": [0.0, 0.0, 0.0, 0.0],
+            "Unit": ["Kg", "Kg", "Piece", "Head"],
+            "Base Price": [10.0, 4.0, 3.0, 85.0],
+            "Price Growth %": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    drivers = pd.DataFrame(
+        {
+            "Product": ["Meat", "Offal", "Pelt", "Live Herd"],
+            "Unit": ["Kg", "Kg", "Piece", "Head"],
+            "Quantity Mode": ["Derived", "Derived", "Derived", "Derived"],
+            "Lactating Herd Share %": [0.0, 0.0, 0.0, 0.0],
+            "Litres per Lactating Doe per Day": [0.0, 0.0, 0.0, 0.0],
+            "Milk Allocation to Cheese %": [0.0, 0.0, 0.0, 0.0],
+            "Cheese Yield Kg per Litre": [0.0, 0.0, 0.0, 0.0],
+            "Slaughter Rate % of Herd per Period": [5.0, 5.0, 5.0, 5.0],
+            "Live Herd Sales Share %": [20.0, 20.0, 20.0, 20.0],
+            "Meat Yield Kg per Goat": [20.0, 0.0, 0.0, 0.0],
+            "Offal Yield Kg per Goat": [0.0, 4.0, 0.0, 0.0],
+            "Pelt Units per Goat": [0.0, 0.0, 1.0, 0.0],
+            "Driver Growth %": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+
+    derived = streamlit_app._derive_pricing_quantities_from_production(
+        pricing, schedule, drivers
+    )
+
+    assert derived.loc[derived["Product"] == "Meat", "Quantity per Period"].iloc[0] == 80.0
+    assert derived.loc[derived["Product"] == "Offal", "Quantity per Period"].iloc[0] == 16.0
+    assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == 4.0
+    assert derived.loc[derived["Product"] == "Live Herd", "Quantity per Period"].iloc[0] == 1.0
+
+
 def test_add_production_driver_column_preserves_core_schema():
     drivers = streamlit_app._default_production_driver_table()
 
@@ -660,6 +707,33 @@ def test_sync_commercial_assumptions_to_core_rebases_pricing_periods_to_horizon(
     assert "2025-12-31" not in synced["Pricing"]["Period"].tolist()
     assert {"2026-01-31", "2026-02-28"} == set(synced["Pricing"]["Period"].tolist())
     assert synced["Pricing"]["Quantity per Period"].fillna(0.0).ge(0.0).all()
+
+
+def test_default_assumptions_include_business_configuration():
+    assumptions = streamlit_app._default_assumption_tables()
+
+    assert "Business Configuration" in assumptions
+    assert streamlit_app._selected_business_type(assumptions) == "Combined"
+
+
+def test_sync_commercial_assumptions_filters_rows_to_business_type():
+    core = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-02-28"],
+            "Revenue": [1000.0, 1200.0],
+        }
+    )
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Business Configuration"] = pd.DataFrame({"Business Type": ["Meat"]})
+
+    synced = streamlit_app._sync_commercial_assumptions_to_core(assumptions, core)
+
+    assert set(synced["Pricing"]["Product"].unique()) == {"Meat", "Offal", "Pelt", "Live Herd"}
+    assert set(synced["Production Drivers"]["Product"].unique()) == {"Meat", "Offal", "Pelt", "Live Herd"}
+    scenario_drivers = set(synced["Scenario Controls"]["Driver"].tolist())
+    assert "Milk price change (%)" not in scenario_drivers
+    assert "Meat price change (%)" in scenario_drivers
+    assert "Feed cost change (%)" in scenario_drivers
 
 
 def test_build_schedule_dataframe_rebases_commercial_periods_to_core_schedule():
