@@ -480,6 +480,60 @@ def test_production_drivers_derive_meat_and_pelt_from_slaughter():
     assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == 5.0
 
 
+def test_add_production_driver_column_preserves_core_schema():
+    drivers = streamlit_app._default_production_driver_table()
+
+    updated = streamlit_app._add_production_driver_column(drivers, "Benchmark Note")
+
+    assert "Benchmark Note" in updated.columns
+    assert {
+        "Product",
+        "Quantity Mode",
+        "Lactating Herd Share %",
+        "Slaughter Rate % of Herd per Period",
+    }.issubset(updated.columns)
+
+
+def test_remove_production_driver_columns_only_drops_custom_fields():
+    drivers = streamlit_app._add_production_driver_column(
+        streamlit_app._default_production_driver_table(),
+        "Benchmark Note",
+    )
+
+    updated = streamlit_app._remove_production_driver_columns(
+        drivers,
+        ["Benchmark Note", "Product"],
+    )
+
+    assert "Benchmark Note" not in updated.columns
+    assert "Product" in updated.columns
+
+
+def test_merge_production_driver_subset_updates_target_products_only():
+    drivers = streamlit_app._add_production_driver_column(
+        streamlit_app._default_production_driver_table(),
+        "Benchmark Note",
+    )
+    drivers.loc[drivers["Product"] == "Meat", "Benchmark Note"] = "Keep"
+
+    dairy_subset = drivers.loc[drivers["Product"].isin(["Milk", "Cheese"])].copy()
+    dairy_subset.loc[dairy_subset["Product"] == "Milk", "Lactating Herd Share %"] = 62.5
+    dairy_subset.loc[dairy_subset["Product"] == "Cheese", "Benchmark Note"] = "Stretch"
+
+    merged = streamlit_app._merge_production_driver_subset(
+        drivers,
+        dairy_subset,
+        ["Milk", "Cheese"],
+    )
+
+    assert (
+        merged.loc[merged["Product"] == "Milk", "Lactating Herd Share %"].iloc[0]
+        == 62.5
+    )
+    assert merged.loc[merged["Product"] == "Cheese", "Benchmark Note"].iloc[0] == "Stretch"
+    assert merged.loc[merged["Product"] == "Meat", "Benchmark Note"].iloc[0] == "Keep"
+
+
 def test_manual_quantity_override_is_preserved_over_derived_drivers():
     schedule = pd.DataFrame(
         {"Herd Size (heads)": [100.0]},

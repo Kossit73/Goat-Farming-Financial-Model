@@ -2303,6 +2303,34 @@ DEFAULT_PRODUCTION_DRIVER_ROWS = [
     },
 ]
 
+_PRODUCTION_DRIVER_REQUIRED_COLUMNS = [
+    "Product",
+    "Unit",
+    "Quantity Mode",
+    "Lactating Herd Share %",
+    "Litres per Lactating Doe per Day",
+    "Milk Allocation to Cheese %",
+    "Cheese Yield Kg per Litre",
+    "Slaughter Rate % of Herd per Period",
+    "Meat Yield Kg per Goat",
+    "Pelt Units per Goat",
+    "Driver Growth %",
+]
+
+_PRODUCTION_DRIVER_NUMERIC_COLUMNS = [
+    "Lactating Herd Share %",
+    "Litres per Lactating Doe per Day",
+    "Milk Allocation to Cheese %",
+    "Cheese Yield Kg per Litre",
+    "Slaughter Rate % of Herd per Period",
+    "Meat Yield Kg per Goat",
+    "Pelt Units per Goat",
+    "Driver Growth %",
+]
+
+_PRODUCTION_DRIVER_DAIRY_PRODUCTS = ("Milk", "Cheese")
+_PRODUCTION_DRIVER_SLAUGHTER_PRODUCTS = ("Meat", "Pelt")
+
 
 DEFAULT_OPERATING_COST_ROWS = [
     {
@@ -2446,19 +2474,7 @@ def _default_pricing_table() -> pd.DataFrame:
 
 def _default_production_driver_table() -> pd.DataFrame:
     rows = _get_template("production_driver_rows", DEFAULT_PRODUCTION_DRIVER_ROWS)
-    columns = [
-        "Product",
-        "Unit",
-        "Quantity Mode",
-        "Lactating Herd Share %",
-        "Litres per Lactating Doe per Day",
-        "Milk Allocation to Cheese %",
-        "Cheese Yield Kg per Litre",
-        "Slaughter Rate % of Herd per Period",
-        "Meat Yield Kg per Goat",
-        "Pelt Units per Goat",
-        "Driver Growth %",
-    ]
+    columns = list(_PRODUCTION_DRIVER_REQUIRED_COLUMNS)
     table = _template_to_dataframe(rows, columns)
     if table.empty:
         return pd.DataFrame(columns=columns)
@@ -2469,37 +2485,12 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
     if table is None or table.empty:
         work = _template_to_dataframe(
             _get_template("production_driver_rows", DEFAULT_PRODUCTION_DRIVER_ROWS),
-            [
-                "Product",
-                "Unit",
-                "Quantity Mode",
-                "Lactating Herd Share %",
-                "Litres per Lactating Doe per Day",
-                "Milk Allocation to Cheese %",
-                "Cheese Yield Kg per Litre",
-                "Slaughter Rate % of Herd per Period",
-                "Meat Yield Kg per Goat",
-                "Pelt Units per Goat",
-                "Driver Growth %",
-            ],
+            list(_PRODUCTION_DRIVER_REQUIRED_COLUMNS),
         )
     else:
         work = table.copy()
 
-    required_cols = [
-        "Product",
-        "Unit",
-        "Quantity Mode",
-        "Lactating Herd Share %",
-        "Litres per Lactating Doe per Day",
-        "Milk Allocation to Cheese %",
-        "Cheese Yield Kg per Litre",
-        "Slaughter Rate % of Herd per Period",
-        "Meat Yield Kg per Goat",
-        "Pelt Units per Goat",
-        "Driver Growth %",
-    ]
-    for column in required_cols:
+    for column in _PRODUCTION_DRIVER_REQUIRED_COLUMNS:
         if column not in work.columns:
             work[column] = np.nan
 
@@ -2509,22 +2500,15 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
     work["Quantity Mode"] = work.get("Quantity Mode", "Derived").astype(str).str.strip()
     work.loc[~work["Quantity Mode"].isin(["Derived", "Manual Override"]), "Quantity Mode"] = "Derived"
 
-    numeric_cols = [
-        "Lactating Herd Share %",
-        "Litres per Lactating Doe per Day",
-        "Milk Allocation to Cheese %",
-        "Cheese Yield Kg per Litre",
-        "Slaughter Rate % of Herd per Period",
-        "Meat Yield Kg per Goat",
-        "Pelt Units per Goat",
-        "Driver Growth %",
-    ]
-    for col in numeric_cols:
+    for col in _PRODUCTION_DRIVER_NUMERIC_COLUMNS:
         work[col] = pd.to_numeric(work.get(col), errors="coerce").fillna(0.0)
 
     work = work.dropna(how="all")
     if work.empty:
-        return _template_to_dataframe(DEFAULT_PRODUCTION_DRIVER_ROWS, required_cols)
+        return _template_to_dataframe(
+            DEFAULT_PRODUCTION_DRIVER_ROWS,
+            list(_PRODUCTION_DRIVER_REQUIRED_COLUMNS),
+        )
 
     defaults = {str(row["Product"]).strip(): row for _, row in pd.DataFrame(DEFAULT_PRODUCTION_DRIVER_ROWS).iterrows()}
     for idx in work.index:
@@ -2533,8 +2517,126 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
         if default_row is not None and not str(work.at[idx, "Unit"]).strip():
             work.at[idx, "Unit"] = str(default_row.get("Unit", "")).strip()
 
-    remainder = [col for col in work.columns if col not in required_cols]
-    return work[required_cols + remainder].reset_index(drop=True)
+    remainder = [col for col in work.columns if col not in _PRODUCTION_DRIVER_REQUIRED_COLUMNS]
+    return work[list(_PRODUCTION_DRIVER_REQUIRED_COLUMNS) + remainder].reset_index(drop=True)
+
+
+def _production_driver_custom_columns(table: Optional[pd.DataFrame]) -> list[str]:
+    drivers = _ensure_production_driver_table(table)
+    return [col for col in drivers.columns if col not in _PRODUCTION_DRIVER_REQUIRED_COLUMNS]
+
+
+def _normalise_production_driver_column_name(column_name: str) -> str:
+    return re.sub(r"\s+", " ", str(column_name).strip())
+
+
+def _add_production_driver_column(
+    table: Optional[pd.DataFrame],
+    column_name: str,
+    default_value: Any = "",
+) -> pd.DataFrame:
+    drivers = _ensure_production_driver_table(table)
+    cleaned = _normalise_production_driver_column_name(column_name)
+    if not cleaned or cleaned in drivers.columns:
+        return drivers
+    drivers[cleaned] = default_value
+    return _ensure_production_driver_table(drivers)
+
+
+def _remove_production_driver_columns(
+    table: Optional[pd.DataFrame],
+    columns: Iterable[str],
+) -> pd.DataFrame:
+    drivers = _ensure_production_driver_table(table)
+    removable = [
+        _normalise_production_driver_column_name(column)
+        for column in columns
+        if _normalise_production_driver_column_name(column)
+        and _normalise_production_driver_column_name(column) in drivers.columns
+        and _normalise_production_driver_column_name(column) not in _PRODUCTION_DRIVER_REQUIRED_COLUMNS
+    ]
+    if not removable:
+        return drivers
+    return _ensure_production_driver_table(drivers.drop(columns=removable))
+
+
+def _merge_production_driver_subset(
+    table: Optional[pd.DataFrame],
+    subset: pd.DataFrame,
+    products: Sequence[str],
+) -> pd.DataFrame:
+    base = _ensure_production_driver_table(table)
+    edited = subset.copy()
+    product_keys = {str(product).strip().casefold() for product in products if str(product).strip()}
+
+    for column in edited.columns:
+        if column not in base.columns:
+            base[column] = np.nan
+    for column in base.columns:
+        if column not in edited.columns:
+            edited[column] = np.nan
+
+    base_order = {
+        str(product).strip().casefold(): idx
+        for idx, product in enumerate(base.get("Product", pd.Series(dtype=str)).astype(str).tolist())
+        if str(product).strip()
+    }
+
+    keep_mask = ~base["Product"].astype(str).str.strip().str.casefold().isin(product_keys)
+    merged = pd.concat([base.loc[keep_mask].copy(), edited], ignore_index=True, sort=False)
+    merged["_sort_order"] = (
+        merged["Product"].astype(str).str.strip().str.casefold().map(base_order).fillna(len(base_order))
+    )
+    merged = merged.sort_values("_sort_order", kind="stable").drop(columns="_sort_order")
+    return _ensure_production_driver_table(merged)
+
+
+def _production_driver_column_config(table: Optional[pd.DataFrame]) -> dict[str, Any]:
+    drivers = _ensure_production_driver_table(table)
+    config: dict[str, Any] = {
+        "Product": st.column_config.TextColumn("Product"),
+        "Unit": st.column_config.TextColumn("Unit"),
+        "Quantity Mode": st.column_config.SelectboxColumn(
+            "Quantity Mode",
+            options=["Derived", "Manual Override"],
+        ),
+        "Lactating Herd Share %": st.column_config.NumberColumn(
+            "Lactating Herd Share (%)", format="%.2f", step=0.1
+        ),
+        "Litres per Lactating Doe per Day": st.column_config.NumberColumn(
+            "Litres / Doe / Day", format="%.3f", step=0.1
+        ),
+        "Milk Allocation to Cheese %": st.column_config.NumberColumn(
+            "Milk to Cheese (%)", format="%.2f", step=0.1
+        ),
+        "Cheese Yield Kg per Litre": st.column_config.NumberColumn(
+            "Cheese Yield (Kg/Litre)", format="%.3f", step=0.01
+        ),
+        "Slaughter Rate % of Herd per Period": st.column_config.NumberColumn(
+            "Slaughter Rate (% / Period)", format="%.2f", step=0.1
+        ),
+        "Meat Yield Kg per Goat": st.column_config.NumberColumn(
+            "Meat Yield (Kg/Goat)", format="%.2f", step=0.1
+        ),
+        "Pelt Units per Goat": st.column_config.NumberColumn(
+            "Pelt Units / Goat", format="%.2f", step=0.1
+        ),
+        "Driver Growth %": st.column_config.NumberColumn(
+            "Driver Growth (%)", format="%.2f", step=0.1
+        ),
+    }
+
+    for column in drivers.columns:
+        if column in config:
+            continue
+        series = drivers[column]
+        if is_bool_dtype(series):
+            config[column] = st.column_config.CheckboxColumn(column)
+        elif is_numeric_dtype(series):
+            config[column] = st.column_config.NumberColumn(column, format="%.2f", step=0.1)
+        else:
+            config[column] = st.column_config.TextColumn(column)
+    return config
 
 
 def _default_pricing_table_from_core(core: pd.DataFrame) -> pd.DataFrame:
@@ -9316,58 +9418,105 @@ def main() -> None:
             ensured = _ensure_production_driver_table(updated)
             st.session_state.assumptions["Production Drivers"] = ensured
 
+        def _save_production_driver_subset(products: Sequence[str], updated: pd.DataFrame) -> None:
+            merged = _merge_production_driver_subset(
+                st.session_state.assumptions.get("Production Drivers"),
+                updated,
+                products,
+            )
+            st.session_state.assumptions["Production Drivers"] = merged
+
         production_driver_editor = st.data_editor(
             st.session_state.assumptions["Production Drivers"],
             use_container_width=True,
             key="assump::production_drivers",
-            column_config={
-                "Product": st.column_config.TextColumn("Product"),
-                "Unit": st.column_config.TextColumn("Unit"),
-                "Quantity Mode": st.column_config.SelectboxColumn(
-                    "Quantity Mode",
-                    options=["Derived", "Manual Override"],
-                ),
-                "Lactating Herd Share %": st.column_config.NumberColumn(
-                    "Lactating Herd Share (%)", format="%.2f", step=0.1
-                ),
-                "Litres per Lactating Doe per Day": st.column_config.NumberColumn(
-                    "Litres / Doe / Day", format="%.3f", step=0.1
-                ),
-                "Milk Allocation to Cheese %": st.column_config.NumberColumn(
-                    "Milk to Cheese (%)", format="%.2f", step=0.1
-                ),
-                "Cheese Yield Kg per Litre": st.column_config.NumberColumn(
-                    "Cheese Yield (Kg/Litre)", format="%.3f", step=0.01
-                ),
-                "Slaughter Rate % of Herd per Period": st.column_config.NumberColumn(
-                    "Slaughter Rate (% / Period)", format="%.2f", step=0.1
-                ),
-                "Meat Yield Kg per Goat": st.column_config.NumberColumn(
-                    "Meat Yield (Kg/Goat)", format="%.2f", step=0.1
-                ),
-                "Pelt Units per Goat": st.column_config.NumberColumn(
-                    "Pelt Units / Goat", format="%.2f", step=0.1
-                ),
-                "Driver Growth %": st.column_config.NumberColumn(
-                    "Driver Growth (%)", format="%.2f", step=0.1
-                ),
-            },
+            column_config=_production_driver_column_config(
+                st.session_state.assumptions["Production Drivers"]
+            ),
             disabled=["Product", "Unit"],
         )
         _save_production_drivers(production_driver_editor)
         dairy_drivers = st.session_state.assumptions["Production Drivers"].loc[
-            st.session_state.assumptions["Production Drivers"]["Product"].isin(["Milk", "Cheese"])
+            st.session_state.assumptions["Production Drivers"]["Product"].isin(
+                _PRODUCTION_DRIVER_DAIRY_PRODUCTS
+            )
         ]
         slaughter_drivers = st.session_state.assumptions["Production Drivers"].loc[
-            st.session_state.assumptions["Production Drivers"]["Product"].isin(["Meat", "Pelt"])
+            st.session_state.assumptions["Production Drivers"]["Product"].isin(
+                _PRODUCTION_DRIVER_SLAUGHTER_PRODUCTS
+            )
         ]
+        with st.expander("Edit Dairy and Slaughter table columns", expanded=False):
+            st.caption("Core calculation columns stay locked. Added columns appear in both editors.")
+            add_key = "assump::production_drivers::new_column"
+            _safe_session_state_setdefault(add_key, "")
+            add_cols = st.columns([2.2, 1])
+            new_column = add_cols[0].text_input("New column name", key=add_key)
+            if add_cols[1].button("Add column", key=f"{add_key}::add", use_container_width=True):
+                cleaned = _normalise_production_driver_column_name(new_column)
+                if not cleaned:
+                    st.warning("Enter a column name before adding it.")
+                elif cleaned in st.session_state.assumptions["Production Drivers"].columns:
+                    st.warning(f"`{cleaned}` already exists.")
+                else:
+                    updated = _add_production_driver_column(
+                        st.session_state.assumptions["Production Drivers"],
+                        cleaned,
+                    )
+                    st.session_state.assumptions["Production Drivers"] = updated
+                    _safe_session_state_set(add_key, "")
+                    _maybe_rerun()
+
+            removable_columns = _production_driver_custom_columns(
+                st.session_state.assumptions["Production Drivers"]
+            )
+            remove_cols = st.columns([2.2, 1])
+            columns_to_remove = remove_cols[0].multiselect(
+                "Custom columns",
+                options=removable_columns,
+                key="assump::production_drivers::remove_columns",
+                disabled=not removable_columns,
+            )
+            if remove_cols[1].button(
+                "Remove columns",
+                key="assump::production_drivers::remove_columns::apply",
+                use_container_width=True,
+                disabled=not columns_to_remove,
+            ):
+                updated = _remove_production_driver_columns(
+                    st.session_state.assumptions["Production Drivers"],
+                    columns_to_remove,
+                )
+                st.session_state.assumptions["Production Drivers"] = updated
+                _safe_session_state_set("assump::production_drivers::remove_columns", [])
+                _maybe_rerun()
+
         dairy_col, slaughter_col = st.columns(2)
         with dairy_col:
             st.markdown("**Dairy Drivers**")
-            st.dataframe(dairy_drivers, use_container_width=True, hide_index=True)
+            dairy_editor = st.data_editor(
+                dairy_drivers,
+                use_container_width=True,
+                hide_index=True,
+                key="assump::production_drivers::dairy",
+                column_config=_production_driver_column_config(dairy_drivers),
+                disabled=["Product", "Unit"],
+            )
+            _save_production_driver_subset(_PRODUCTION_DRIVER_DAIRY_PRODUCTS, dairy_editor)
         with slaughter_col:
             st.markdown("**Livestock & Slaughter Drivers**")
-            st.dataframe(slaughter_drivers, use_container_width=True, hide_index=True)
+            slaughter_editor = st.data_editor(
+                slaughter_drivers,
+                use_container_width=True,
+                hide_index=True,
+                key="assump::production_drivers::slaughter",
+                column_config=_production_driver_column_config(slaughter_drivers),
+                disabled=["Product", "Unit"],
+            )
+            _save_production_driver_subset(
+                _PRODUCTION_DRIVER_SLAUGHTER_PRODUCTS,
+                slaughter_editor,
+            )
         assumption_tables["Production Drivers"] = st.session_state.assumptions[
             "Production Drivers"
         ]
