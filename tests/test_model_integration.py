@@ -138,6 +138,72 @@ def _build_model_with_equity_facilities(
     ).to_model()
 
 
+def _build_valuation_model(
+    ebit_values: list[float],
+    *,
+    depreciation_values: Optional[list[float]] = None,
+    capex_values: Optional[list[float]] = None,
+    valuation_inputs: Optional[dict[str, float]] = None,
+    supplementary_tables: Optional[dict[str, pd.DataFrame]] = None,
+) -> GoatModel:
+    periods = pd.date_range("2024-12-31", periods=len(ebit_values), freq="Y")
+    ebit = pd.Series(ebit_values, index=periods, dtype=float)
+    depreciation = pd.Series(
+        depreciation_values or [0.0] * len(ebit_values), index=periods, dtype=float
+    )
+    capex = pd.Series(capex_values or [0.0] * len(ebit_values), index=periods, dtype=float)
+    zero = pd.Series(0.0, index=periods, dtype=float)
+
+    ebitda = ebit + depreciation
+    npbt = ebit.copy()
+    tax = zero.copy()
+    npat = npbt - tax
+    cfo = ebitda
+    cfi = -capex
+    cff = zero.copy()
+    net_cash = cfo + cfi + cff
+    closing_cash = net_cash.cumsum()
+    opening_cash = closing_cash.shift(1).fillna(0.0)
+    current_assets = closing_cash.copy()
+    non_current_assets = zero.copy()
+    current_liabilities = zero.copy()
+    non_current_liabilities = zero.copy()
+    equity = current_assets + non_current_assets - current_liabilities - non_current_liabilities
+
+    schedule = pd.DataFrame(
+        {
+            "Revenue": zero,
+            "COGS": zero,
+            "EBITDA": ebitda,
+            "Depreciation & Amortization": depreciation,
+            "EBIT": ebit,
+            "Interest Expense": zero,
+            "NPBT": npbt,
+            "Tax Expense": tax,
+            "NPAT": npat,
+            "CFO": cfo,
+            "CFI": cfi,
+            "CFF": cff,
+            "Net Cash Flow": net_cash,
+            "Capex": capex,
+            "Opening Cash Balance": opening_cash,
+            "Closing Cash Balance": closing_cash,
+            "Cash and Cash Equivalents": closing_cash,
+            "Current Assets": current_assets,
+            "Non-current Assets": non_current_assets,
+            "Current Liabilities": current_liabilities,
+            "Non-current Liabilities": non_current_liabilities,
+            "Equity": equity,
+        }
+    )
+
+    return InputSchedule(
+        data=schedule,
+        valuation_inputs=valuation_inputs or {},
+        supplementary_tables=supplementary_tables or {},
+    ).to_model()
+
+
 def test_scenario_and_statements_pipeline():
     model = _build_model()
 
@@ -243,31 +309,48 @@ def test_ratios_mask_zero_or_negative_denominators():
     assert np.isnan(break_even.loc[periods[2], "Break-even Revenue"])
 
 
-def test_discounted_cash_flow_summary():
+def test_discounted_cash_flow_uses_model_ufcf_and_manual_terminal_value():
     periods = pd.date_range("2024-12-31", periods=3, freq="Y")
-    schedule = pd.DataFrame({"Revenue": [1.0, 1.0, 1.0]}, index=periods)
+    valuation_inputs = {"WACC": 0.1, "Terminal Value": 200.0}
+    supplementary_ufcf = pd.DataFrame({"Period": periods, "UFCF": [999.0, 999.0, 999.0]})
 
-    valuation_inputs = {"WACC": 0.1, "Terminal Value": 200000.0}
-    ufcf_table = pd.DataFrame({"Period": periods, "UFCF": [10000.0, 12000.0, 15000.0]})
-
-    model = InputSchedule(
-        data=schedule,
+    model = _build_valuation_model(
+        [100.0, 110.0, 120.0],
         valuation_inputs=valuation_inputs,
-        supplementary_tables={"UFCF": ufcf_table},
-    ).to_model()
+        supplementary_tables={"UFCF": supplementary_ufcf},
+    )
 
     summary = model.discounted_cash_flow()
 
     cash_flows = summary["cash_flows"]
-    assert list(cash_flows.columns) == ["UFCF", "Discount Factor", "Present Value"]
-    assert cash_flows["Discount Factor"].iloc[0] < 1
-    assert "terminal_value_pv" in summary
-
     expected_discount = [1 / (1.1**i) for i in range(1, 4)]
-    assert cash_flows["Discount Factor"].tolist() == pytest.approx(expected_discount, rel=1e-3)
+    expected_ufcf = [100.0, 110.0, 120.0]
+    expected_terminal_pv = 200.0 / (1.1**4)
+    expected_enterprise_value = sum(
+        cash_flow * discount for cash_flow, discount in zip(expected_ufcf, expected_discount)
+    ) + expected_terminal_pv
 
-    pv_total = cash_flows["Present Value"].sum() + summary["terminal_value_pv"]
-    assert summary["enterprise_value"] == pytest.approx(pv_total, rel=1e-6)
+    assert list(cash_flows.columns) == ["UFCF", "Discount Factor", "Present Value"]
+    assert cash_flows["UFCF"].tolist() == pytest.approx(expected_ufcf, rel=1e-6)
+    assert cash_flows["Discount Factor"].tolist() == pytest.approx(expected_discount, rel=1e-6)
+    assert summary["terminal_value"] == pytest.approx(200.0, rel=1e-6)
+    assert summary["terminal_value_pv"] == pytest.approx(expected_terminal_pv, rel=1e-6)
+    assert summary["enterprise_value"] == pytest.approx(expected_enterprise_value, rel=1e-6)
+
+
+def test_discounted_cash_flow_irr_matches_explicit_cash_flows():
+    model = _build_valuation_model(
+        [-100.0, 60.0, 80.0],
+        valuation_inputs={"WACC": 0.1, "Terminal Value": 0.0},
+    )
+
+    summary = model.discounted_cash_flow()
+    roots = np.roots([-100.0, 60.0, 80.0])
+    expected_root = max(root.real for root in roots if abs(root.imag) < 1e-9 and root.real > 0)
+    expected_irr = expected_root - 1.0
+
+    assert summary["terminal_value"] == pytest.approx(0.0, rel=1e-6)
+    assert summary["irr"] == pytest.approx(expected_irr, rel=1e-6)
 
 
 def test_execute_scenario_suite_runs_presets():
@@ -318,6 +401,33 @@ def test_loan_facilities_support_mid_horizon_drawdown_in_debt_capacity():
     assert pytest.approx(0.0, rel=1e-6) == debt_capacity.iloc[1]["Debt Drawdown"]
     assert pytest.approx(1200.0, rel=1e-6) == debt_capacity.iloc[2]["Debt Drawdown"]
     assert pytest.approx(1200.0, rel=1e-6) == debt_capacity.iloc[2]["Opening Debt"]
+
+
+def test_annual_debt_capacity_recomputes_ratios_from_annual_totals():
+    model = _build_model_with_loan_facilities()
+
+    monthly = model.debt_capacity_schedule(annual=False)
+    annual = model.debt_capacity_schedule(annual=True)
+    tidy = model.to_tidy()
+
+    assert len(annual) == 1
+    annual_row = annual.iloc[0]
+    expected_dscr = monthly["CFADS"].sum() / monthly["Debt Service"].sum()
+    expected_interest_coverage = tidy["EBIT"].sum() / monthly["Interest Expense (Debt)"].sum()
+    expected_cash_headroom = monthly["Closing Cash"].iloc[-1] - annual_row["Minimum Cash Reserve"]
+    expected_net_debt_to_ebitda = annual_row["Net Debt"] / tidy["EBITDA"].sum()
+
+    assert annual_row["Opening Debt"] == pytest.approx(monthly["Opening Debt"].iloc[0], rel=1e-6)
+    assert annual_row["DSCR"] == pytest.approx(expected_dscr, rel=1e-6)
+    assert annual_row["Interest Coverage"] == pytest.approx(
+        expected_interest_coverage, rel=1e-6
+    )
+    assert annual_row["Cash Reserve Headroom"] == pytest.approx(
+        expected_cash_headroom, rel=1e-6
+    )
+    assert annual_row["Net Debt / EBITDA"] == pytest.approx(
+        expected_net_debt_to_ebitda, rel=1e-6
+    )
 
 
 def test_loan_facilities_flow_into_scenario_outputs():

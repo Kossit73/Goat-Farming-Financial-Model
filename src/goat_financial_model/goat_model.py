@@ -779,7 +779,9 @@ class GoatModel:
             "Ending Debt",
             "Financing Fees",
         ]:
-            if column in {"Opening Debt", "Ending Debt"}:
+            if column == "Opening Debt":
+                grouped[column] = work.groupby("Year")[column].first()
+            elif column == "Ending Debt":
                 grouped[column] = work.groupby("Year")[column].last()
             else:
                 grouped[column] = work.groupby("Year")[column].sum(min_count=1)
@@ -1352,37 +1354,43 @@ class GoatModel:
             return out
 
         grouped = pd.DataFrame(index=pd.Index(sorted(idx.year.unique()), name="Year"))
+        year_groups = idx.year
+        grouped["Opening Debt"] = out["Opening Debt"].groupby(year_groups).first()
         for column in [
-            "Opening Debt",
             "Debt Drawdown",
             "Principal Repayment",
             "Interest Expense (Debt)",
             "Debt Service",
-            "Ending Debt",
             "CFADS",
-            "Closing Cash",
-            "Net Debt",
         ]:
-            aggregator = "last" if column in {"Opening Debt", "Ending Debt", "Closing Cash", "Net Debt"} else "sum"
-            if aggregator == "last":
-                grouped[column] = out[column].groupby(idx.year).last()
-            else:
-                grouped[column] = out[column].groupby(idx.year).sum(min_count=1)
+            grouped[column] = out[column].groupby(year_groups).sum(min_count=1)
+        grouped["Ending Debt"] = out["Ending Debt"].groupby(year_groups).last()
+        grouped["Closing Cash"] = out["Closing Cash"].groupby(year_groups).last()
+        grouped["Net Debt"] = grouped["Ending Debt"] - grouped["Closing Cash"]
 
-        for column in [
-            "DSCR",
-            "DSCR Covenant",
-            "DSCR Headroom",
-            "Interest Coverage",
-            "Interest Coverage Covenant",
-            "Interest Coverage Headroom",
-            "Minimum Cash Reserve",
-            "Cash Reserve Headroom",
-            "Net Debt / EBITDA",
-        ]:
-            grouped[column] = out[column].groupby(idx.year).last()
+        annual_ebit = ebit.groupby(year_groups).sum(min_count=1)
+        annual_ebitda = ebitda.groupby(year_groups).sum(min_count=1)
 
-        grouped["Covenant Breach"] = out["Covenant Breach"].groupby(idx.year).any()
+        grouped["DSCR"] = self._safe_divide(
+            grouped["CFADS"], grouped["Debt Service"], allow_negative=False
+        )
+        grouped["DSCR Covenant"] = dscr_covenant
+        grouped["DSCR Headroom"] = grouped["DSCR"] - dscr_covenant
+        grouped["Interest Coverage"] = self._safe_divide(
+            annual_ebit, grouped["Interest Expense (Debt)"], allow_negative=False
+        )
+        grouped["Interest Coverage Covenant"] = ic_covenant
+        grouped["Interest Coverage Headroom"] = grouped["Interest Coverage"] - ic_covenant
+        grouped["Minimum Cash Reserve"] = min_cash_reserve
+        grouped["Cash Reserve Headroom"] = grouped["Closing Cash"] - min_cash_reserve
+        grouped["Net Debt / EBITDA"] = self._safe_divide(
+            grouped["Net Debt"], annual_ebitda, allow_negative=False
+        )
+        grouped["Covenant Breach"] = (
+            (grouped["DSCR"].fillna(0.0) < dscr_covenant)
+            | (grouped["Interest Coverage"].fillna(0.0) < ic_covenant)
+            | (grouped["Closing Cash"].fillna(0.0) < min_cash_reserve)
+        )
         return grouped
 
     def ufcf_schedule(
@@ -1441,51 +1449,71 @@ class GoatModel:
         self, df: Optional[pd.DataFrame] = None, annual: bool = False
     ) -> Dict[str, object]:
         working_df = df if df is not None else self.to_tidy()
-        ufcf_table = self.ufcf()
 
         if working_df is None or working_df.empty:
             return {}
 
-        if ufcf_table is not None and df is None and not annual:
+        ufcf_frame = self.ufcf_schedule(working_df, annual=annual)
+        if ufcf_frame.empty or "UFCF" not in ufcf_frame.columns:
+            ufcf_table = self.ufcf()
+            if ufcf_table is None or annual:
+                return {}
             ufcf_series = ufcf_table.sort_index()
             ufcf_frame = pd.DataFrame({"UFCF": ufcf_series}, index=ufcf_series.index)
         else:
-            ufcf_frame = self.ufcf_schedule(working_df, annual=annual)
-            if ufcf_frame.empty or "UFCF" not in ufcf_frame.columns:
-                return {}
             ufcf_series = pd.to_numeric(ufcf_frame["UFCF"], errors="coerce").dropna()
 
         if ufcf_series.empty:
             return {}
 
         rate = self._valuation_rate()
-        growth = self._terminal_growth_rate()
+        configured_growth = self._terminal_growth_rate()
+        manual_terminal_value = self.terminal_value()
         periods_per_year = max(self._periods_per_year(ufcf_series.index), 1)
-
-        diffs_days = ufcf_series.index.to_series().diff().dt.days.astype(float)
-        valid_diffs = diffs_days.iloc[1:][np.isfinite(diffs_days.iloc[1:])]
-        median_days = float(np.median(valid_diffs)) if not valid_diffs.empty else 365.25 / periods_per_year
-        if not np.isfinite(median_days) or median_days <= 0:
-            median_days = 365.25 / periods_per_year
-        diffs_years = (diffs_days / 365.25).fillna(median_days / 365.25).clip(lower=1e-9)
-        periods = diffs_years.cumsum().to_numpy()
+        inferred_freq = pd.infer_freq(ufcf_series.index)
+        if inferred_freq:
+            period_step = 1.0 / periods_per_year
+            diffs_years = pd.Series(period_step, index=ufcf_series.index, dtype=float)
+            periods = np.arange(1, len(ufcf_series) + 1, dtype=float) * period_step
+        else:
+            diffs_days = ufcf_series.index.to_series().diff().dt.days.astype(float)
+            valid_diffs = diffs_days.iloc[1:][np.isfinite(diffs_days.iloc[1:])]
+            median_days = (
+                float(np.median(valid_diffs))
+                if not valid_diffs.empty
+                else 365.25 / periods_per_year
+            )
+            if not np.isfinite(median_days) or median_days <= 0:
+                median_days = 365.25 / periods_per_year
+            diffs_years = (diffs_days / 365.25).fillna(median_days / 365.25).clip(lower=1e-9)
+            periods = diffs_years.cumsum().to_numpy()
 
         trailing_periods = min(periods_per_year, len(ufcf_series))
         trailing_ufcf = float(ufcf_series.iloc[-trailing_periods:].sum())
         if trailing_periods < periods_per_year and trailing_periods > 0:
             trailing_ufcf *= periods_per_year / trailing_periods
 
-        effective_growth = min(growth, rate - 1e-6) if rate > growth else growth
-        terminal_value = 0.0
-        if trailing_ufcf > 0 and rate > effective_growth:
-            terminal_value = trailing_ufcf * (1.0 + effective_growth) / (rate - effective_growth)
+        terminal_period = float(periods[-1] + diffs_years.iloc[-1]) if len(periods) else 1.0
 
+        def _terminal_value_at(discount_rate: float) -> Tuple[float, Optional[float]]:
+            if manual_terminal_value is not None and np.isfinite(manual_terminal_value):
+                return float(manual_terminal_value), None
+            if trailing_ufcf <= 0:
+                return 0.0, None
+
+            growth_rate = configured_growth
+            if discount_rate <= growth_rate:
+                growth_rate = discount_rate - 1e-6
+            if discount_rate <= growth_rate:
+                return 0.0, None
+
+            terminal = trailing_ufcf * (1.0 + growth_rate) / (discount_rate - growth_rate)
+            return float(terminal), float(growth_rate)
+
+        terminal_value, effective_growth = _terminal_value_at(rate)
         discount_factors = 1 / np.power(1 + rate, periods)
         pv_cash_flows = ufcf_series.to_numpy() * discount_factors
-        terminal_period = float(periods[-1] + diffs_years.iloc[-1]) if len(periods) else 1.0
-        terminal_value_pv = (
-            terminal_value / ((1 + rate) ** terminal_period) if terminal_value > 0 else 0.0
-        )
+        terminal_value_pv = terminal_value / ((1 + rate) ** terminal_period)
         enterprise_value = float(np.nansum(pv_cash_flows) + terminal_value_pv)
 
         values = ufcf_series.to_numpy(dtype=float)
@@ -1494,34 +1522,46 @@ class GoatModel:
             if test_rate <= -0.9999:
                 return np.nan
             discounted = np.nansum(values / np.power(1 + test_rate, periods))
-            if terminal_value > 0:
-                discounted += terminal_value / ((1 + test_rate) ** terminal_period)
+            terminal_value_at_rate, _ = _terminal_value_at(test_rate)
+            discounted += terminal_value_at_rate / ((1 + test_rate) ** terminal_period)
             return float(discounted)
 
         irr_value: Optional[float] = None
-        low, high = -0.95, 5.0
-        npv_low, npv_high = _npv_at(low), _npv_at(high)
-        if (
-            np.isfinite(npv_low)
-            and np.isfinite(npv_high)
-            and npv_low * npv_high <= 0
-        ):
-            for _ in range(120):
-                mid = (low + high) / 2.0
-                npv_mid = _npv_at(mid)
-                if not np.isfinite(npv_mid):
-                    break
-                if abs(npv_mid) < 1e-7:
-                    irr_value = mid
-                    break
-                if npv_low * npv_mid < 0:
-                    high = mid
-                    npv_high = npv_mid
-                else:
-                    low = mid
-                    npv_low = npv_mid
-            if irr_value is None:
-                irr_value = (low + high) / 2.0
+        search_grid = np.concatenate(([-0.95], np.linspace(-0.9, 5.0, 2000)))
+        previous_rate: Optional[float] = None
+        previous_npv: Optional[float] = None
+        for candidate_rate in search_grid:
+            candidate_npv = _npv_at(float(candidate_rate))
+            if not np.isfinite(candidate_npv):
+                previous_rate = None
+                previous_npv = None
+                continue
+            if (
+                previous_rate is not None
+                and previous_npv is not None
+                and previous_npv * candidate_npv <= 0
+            ):
+                low, high = previous_rate, float(candidate_rate)
+                npv_low, npv_high = previous_npv, float(candidate_npv)
+                for _ in range(120):
+                    mid = (low + high) / 2.0
+                    npv_mid = _npv_at(mid)
+                    if not np.isfinite(npv_mid):
+                        break
+                    if abs(npv_mid) < 1e-7:
+                        irr_value = mid
+                        break
+                    if npv_low * npv_mid < 0:
+                        high = mid
+                        npv_high = npv_mid
+                    else:
+                        low = mid
+                        npv_low = npv_mid
+                if irr_value is None:
+                    irr_value = (low + high) / 2.0
+                break
+            previous_rate = float(candidate_rate)
+            previous_npv = float(candidate_npv)
 
         cumulative = np.cumsum(values)
         payback_years: Optional[float] = None
