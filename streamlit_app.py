@@ -2075,6 +2075,8 @@ def _execute_scenario_suite(
         }
         valuation_summary = scenario_model.valuation_summary(scenario_df)
         scenario_kpis = scenario_model.kpis(scenario_df, annual=True)
+        debt_schedule_detail = scenario_model.debt_schedule(annual=False)
+        debt_schedule_annual = scenario_model.debt_schedule(annual=True)
         working_capital_detail = scenario_model.working_capital_schedule(scenario_df, annual=False)
         working_capital_annual = scenario_model.working_capital_schedule(scenario_df, annual=True)
         debt_capacity_detail = scenario_model.debt_capacity_schedule(scenario_df, annual=False)
@@ -2087,6 +2089,8 @@ def _execute_scenario_suite(
         benchmark_table = _dynamic_benchmark_kpis_table(scenario_kpis)
         if not benchmark_table.empty:
             scenario_supplementary["Benchmark KPIs"] = benchmark_table
+        if not debt_schedule_annual.empty:
+            scenario_supplementary["Debt Schedule"] = debt_schedule_annual
         if not working_capital_annual.empty:
             scenario_supplementary["Working Capital Schedule"] = working_capital_annual
         if not debt_capacity_annual.empty:
@@ -2116,6 +2120,8 @@ def _execute_scenario_suite(
             "kpis": scenario_kpis,
             "break_even": scenario_model.break_even(scenario_df, annual=True),
             "valuation": valuation_summary,
+            "debt_schedule": debt_schedule_detail,
+            "debt_schedule_annual": debt_schedule_annual,
             "working_capital": working_capital_detail,
             "working_capital_annual": working_capital_annual,
             "debt_capacity": debt_capacity_detail,
@@ -6107,6 +6113,7 @@ def _default_schedule_components(
 
 def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
     return {
+        "Loan Facilities": _default_loan_facilities_table(),
         "Capitalisation Table": pd.DataFrame(
             {
                 "Shareholder": ["Founder", "Investor"],
@@ -6628,6 +6635,73 @@ def _ensure_capital_financing_table(
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
 
     ordered_cols = ["Source", "Amount", "Interest/Return %", "Term (years)"]
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _default_loan_facilities_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Loan Name": ["Bank Loan"],
+            "Lender": ["Commercial Bank"],
+            "Start Period": [pd.Timestamp("2024-01-31")],
+            "Drawdown Amount": [250000.0],
+            "Interest Rate %": [6.5],
+            "Term (years)": [7.0],
+            "Repayment Type": ["straight_line"],
+            "Grace Periods": [0],
+            "Balloon Amount": [0.0],
+            "Fees": [0.0],
+            "Active": [True],
+        }
+    )
+
+
+def _coerce_bool_value(value: Any, default: bool = True) -> bool:
+    if pd.isna(value):
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y"}:
+        return True
+    if text in {"false", "0", "no", "n"}:
+        return False
+    return default
+
+
+def _ensure_loan_facilities_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_loan_facilities_table()
+    else:
+        work = table.copy()
+
+    defaults = _default_loan_facilities_table()
+    for column in defaults.columns:
+        if column not in work.columns:
+            work[column] = defaults.iloc[0][column]
+
+    for column in ["Loan Name", "Lender", "Repayment Type"]:
+        work[column] = work[column].fillna("").astype(str).str.strip()
+
+    work.loc[work["Loan Name"] == "", "Loan Name"] = "Loan Facility"
+    work["Lender"] = work["Lender"].replace({"nan": "", "<NA>": ""})
+    work["Repayment Type"] = work["Repayment Type"].replace({"": "straight_line"})
+    work["Start Period"] = pd.to_datetime(work.get("Start Period"), errors="coerce")
+
+    for column in [
+        "Drawdown Amount",
+        "Interest Rate %",
+        "Term (years)",
+        "Grace Periods",
+        "Balloon Amount",
+        "Fees",
+    ]:
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+
+    ordered_cols = list(defaults.columns)
     remainder = [col for col in work.columns if col not in ordered_cols]
     return work[ordered_cols + remainder].reset_index(drop=True)
 
@@ -8671,6 +8745,33 @@ def main() -> None:
                 "Capital & Financing assumptions and provide the asset, capex, and ownership detail that supports the model."
             )
             for name in list(st.session_state.supplementary.keys()):
+                if name == "Loan Facilities":
+                    st.markdown("#### Loan Facilities")
+                    loan_table = _ensure_loan_facilities_table(
+                        st.session_state.supplementary.get(name)
+                    )
+                    st.session_state.supplementary[name] = loan_table
+
+                    def _save_loans(updated: pd.DataFrame) -> None:
+                        st.session_state.supplementary[name] = _ensure_loan_facilities_table(
+                            updated
+                        )
+
+                    _render_schedule_row_editor(
+                        "supp::loan_facilities",
+                        loan_table,
+                        _save_loans,
+                    )
+
+                    cleaned_loans = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
+                    if cleaned_loans is not None:
+                        supplementary_tables[name] = _ensure_loan_facilities_table(
+                            cleaned_loans
+                        )
+                    continue
+
                 if name == "Capitalisation Table":
                     st.markdown("#### Capitalisation Table Schedule")
                     cap_table = _ensure_capitalisation_table(
@@ -11156,6 +11257,7 @@ def main() -> None:
             st.subheader("Supplementary Schedules")
             supplementary_render = results.get("supplementary", {})
             for name in [
+                "Loan Facilities",
                 "Capitalisation Table",
                 "Capex Schedule",
                 "Asset Schedules",
@@ -11163,6 +11265,7 @@ def main() -> None:
                 "Benchmark KPIs",
                 "Commercial Revenue by Product",
                 "Commercial Quantity by Period",
+                "Debt Schedule",
                 "Working Capital Schedule",
                 "Debt Capacity Schedule",
                 "UFCF Schedule",

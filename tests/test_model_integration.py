@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -87,6 +88,32 @@ def _build_model() -> GoatModel:
     schedule = _build_sample_schedule()
     input_schedule = InputSchedule(data=schedule)
     return input_schedule.to_model()
+
+
+def _build_model_with_loan_facilities(
+    *, start_period: Optional[pd.Timestamp] = None
+) -> GoatModel:
+    schedule = _build_sample_schedule()
+    first_period = start_period if start_period is not None else schedule.index[0]
+    facilities = pd.DataFrame(
+        {
+            "Loan Name": ["Expansion Loan"],
+            "Lender": ["Farm Bank"],
+            "Start Period": [first_period],
+            "Drawdown Amount": [1200.0],
+            "Interest Rate %": [12.0],
+            "Term (years)": [1.0],
+            "Repayment Type": ["straight_line"],
+            "Grace Periods": [0],
+            "Balloon Amount": [0.0],
+            "Fees": [0.0],
+            "Active": [True],
+        }
+    )
+    return InputSchedule(
+        data=schedule,
+        supplementary_tables={"Loan Facilities": facilities},
+    ).to_model()
 
 
 def test_scenario_and_statements_pipeline():
@@ -242,3 +269,46 @@ def test_execute_scenario_suite_runs_presets():
     for payload in results.values():
         assert "scenario" in payload
         assert "Revenue_adj" in payload["scenario"].columns
+
+
+def test_loan_facilities_drive_tidy_schedule_and_debt_schedule():
+    model = _build_model_with_loan_facilities()
+
+    tidy = model.to_tidy()
+    debt_schedule = model.debt_schedule(annual=False)
+
+    assert not debt_schedule.empty
+    assert "Loan Name" in debt_schedule.columns
+    assert pytest.approx(1200.0, rel=1e-6) == tidy.iloc[0]["Debt Drawdown"]
+    assert pytest.approx(100.0, rel=1e-6) == tidy.iloc[0]["Principal Repayment"]
+    assert pytest.approx(12.0, rel=1e-6) == tidy.iloc[0]["Interest Expense"]
+    assert pytest.approx(1100.0, rel=1e-6) == tidy.iloc[0]["CFF"]
+    assert pytest.approx(1100.0, rel=1e-6) == tidy.iloc[0]["Term Debt"]
+
+
+def test_loan_facilities_support_mid_horizon_drawdown_in_debt_capacity():
+    schedule = _build_sample_schedule()
+    model = _build_model_with_loan_facilities(start_period=schedule.index[2])
+
+    debt_capacity = model.debt_capacity_schedule(annual=False)
+
+    assert pytest.approx(0.0, rel=1e-6) == debt_capacity.iloc[0]["Debt Drawdown"]
+    assert pytest.approx(0.0, rel=1e-6) == debt_capacity.iloc[1]["Debt Drawdown"]
+    assert pytest.approx(1200.0, rel=1e-6) == debt_capacity.iloc[2]["Debt Drawdown"]
+    assert pytest.approx(1200.0, rel=1e-6) == debt_capacity.iloc[2]["Opening Debt"]
+
+
+def test_loan_facilities_flow_into_scenario_outputs():
+    model = _build_model_with_loan_facilities()
+
+    scenario = model.scenario()
+
+    assert pytest.approx(12.0, rel=1e-6) == scenario.iloc[0]["Interest Expense_adj"]
+    assert pytest.approx(1100.0, rel=1e-6) == scenario.iloc[0]["CFF_adj"]
+    expected_close = (
+        scenario.iloc[0]["Opening Cash Balance"]
+        + scenario.iloc[0]["CFO_adj"]
+        + scenario.iloc[0]["CFI_adj"]
+        + scenario.iloc[0]["CFF_adj"]
+    )
+    assert pytest.approx(expected_close, rel=1e-6) == scenario.iloc[0]["Closing Cash Balance_adj"]

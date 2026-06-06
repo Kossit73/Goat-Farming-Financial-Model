@@ -458,6 +458,424 @@ class GoatModel:
                 return table.copy()
         return None
 
+    def loan_facilities(self) -> Optional[pd.DataFrame]:
+        table = self.supplementary_tables.get("Loan Facilities")
+        if isinstance(table, pd.DataFrame) and not table.empty:
+            return table.copy()
+
+        debt_table = self._capital_financing_assumptions()
+        if debt_table is None or debt_table.empty:
+            return None
+
+        work = debt_table.copy()
+        work["Source"] = work.get("Source", pd.Series("Loan", index=work.index)).astype(str).str.strip()
+        work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
+        work["Interest/Return %"] = pd.to_numeric(work.get("Interest/Return %"), errors="coerce")
+        work["Term (years)"] = pd.to_numeric(work.get("Term (years)"), errors="coerce")
+
+        debt_mask = (
+            work["Amount"].notna()
+            & (work["Amount"] > 0)
+            & work["Interest/Return %"].notna()
+            & (work["Interest/Return %"] > 0)
+            & work["Term (years)"].notna()
+            & (work["Term (years)"] > 0)
+        )
+        if not debt_mask.any():
+            return None
+
+        start_period = self.dates[0] if len(self.dates) else pd.NaT
+        return pd.DataFrame(
+            {
+                "Loan Name": work.loc[debt_mask, "Source"].replace("", "Loan Facility"),
+                "Lender": work.loc[debt_mask, "Source"].replace("", "Lender"),
+                "Start Period": start_period,
+                "Drawdown Amount": work.loc[debt_mask, "Amount"].astype(float),
+                "Interest Rate %": work.loc[debt_mask, "Interest/Return %"].astype(float),
+                "Term (years)": work.loc[debt_mask, "Term (years)"].astype(float),
+                "Repayment Type": "straight_line",
+                "Grace Periods": 0,
+                "Balloon Amount": 0.0,
+                "Fees": 0.0,
+                "Active": True,
+            }
+        ).reset_index(drop=True)
+
+    @staticmethod
+    def _coerce_bool_series(values: pd.Series, default: bool = True) -> pd.Series:
+        if values.dtype == bool:
+            return values.fillna(default).astype(bool)
+
+        mapping = {
+            "true": True,
+            "1": True,
+            "yes": True,
+            "y": True,
+            "false": False,
+            "0": False,
+            "no": False,
+            "n": False,
+        }
+        cleaned = values.map(
+            lambda value: mapping.get(str(value).strip().lower(), default)
+            if pd.notna(value)
+            else default
+        )
+        return cleaned.astype(bool)
+
+    @staticmethod
+    def _normalise_repayment_type(value: object) -> str:
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if text in {"annuity", "amortising", "amortizing"}:
+            return "annuity"
+        if text in {"bullet", "bullet_payment"}:
+            return "bullet"
+        return "straight_line"
+
+    @staticmethod
+    def _resolve_period_on_index(
+        raw_period: object, index: pd.DatetimeIndex
+    ) -> Optional[pd.Timestamp]:
+        if len(index) == 0:
+            return None
+        if pd.isna(raw_period) or str(raw_period).strip() == "":
+            return pd.Timestamp(index[0])
+
+        candidate = pd.to_datetime(raw_period, errors="coerce")
+        if pd.isna(candidate):
+            return pd.Timestamp(index[0])
+
+        pos = int(index.searchsorted(candidate, side="left"))
+        if pos >= len(index):
+            return None
+        return pd.Timestamp(index[pos])
+
+    @staticmethod
+    def _annuity_payment(
+        principal_amount: float, period_rate: float, amortising_periods: int
+    ) -> float:
+        if amortising_periods <= 0 or principal_amount <= 0:
+            return 0.0
+        if abs(period_rate) <= 1e-12:
+            return principal_amount / amortising_periods
+        factor = (1 + period_rate) ** amortising_periods
+        return principal_amount * period_rate * factor / (factor - 1)
+
+    def _loan_schedule_detail(
+        self, index: Optional[pd.DatetimeIndex] = None
+    ) -> pd.DataFrame:
+        idx = index if index is not None else self.dates
+        if len(idx) == 0:
+            return pd.DataFrame()
+
+        facilities = self.loan_facilities()
+        if facilities is None or facilities.empty:
+            return pd.DataFrame()
+
+        work = facilities.copy()
+        for column in [
+            "Drawdown Amount",
+            "Interest Rate %",
+            "Term (years)",
+            "Grace Periods",
+            "Balloon Amount",
+            "Fees",
+        ]:
+            if column not in work.columns:
+                work[column] = np.nan
+            work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+        if "Loan Name" not in work.columns:
+            work["Loan Name"] = "Loan Facility"
+        work["Loan Name"] = work["Loan Name"].fillna("").astype(str).str.strip()
+        work.loc[work["Loan Name"] == "", "Loan Name"] = "Loan Facility"
+
+        if "Lender" not in work.columns:
+            work["Lender"] = ""
+        work["Lender"] = work["Lender"].fillna("").astype(str).str.strip()
+
+        if "Repayment Type" not in work.columns:
+            work["Repayment Type"] = "straight_line"
+        work["Repayment Type"] = work["Repayment Type"].map(self._normalise_repayment_type)
+
+        if "Active" not in work.columns:
+            work["Active"] = True
+        work["Active"] = self._coerce_bool_series(work["Active"], default=True)
+
+        periods_per_year = max(self._periods_per_year(idx), 1)
+        rows: List[Dict[str, object]] = []
+
+        for _, row in work.iterrows():
+            if not bool(row.get("Active", True)):
+                continue
+
+            drawdown_amount = float(row.get("Drawdown Amount") or 0.0)
+            annual_rate = float(row.get("Interest Rate %") or 0.0)
+            term_years = float(row.get("Term (years)") or 0.0)
+            if drawdown_amount <= 0 or annual_rate <= 0 or term_years <= 0:
+                continue
+
+            if annual_rate > 1:
+                annual_rate /= 100.0
+
+            term_periods = max(int(round(term_years * periods_per_year)), 1)
+            grace_periods = int(max(float(row.get("Grace Periods") or 0.0), 0.0))
+            grace_periods = min(grace_periods, term_periods - 1) if term_periods > 1 else 0
+            balloon_amount = max(float(row.get("Balloon Amount") or 0.0), 0.0)
+            balloon_amount = min(balloon_amount, drawdown_amount)
+            fees = max(float(row.get("Fees") or 0.0), 0.0)
+            repayment_type = self._normalise_repayment_type(row.get("Repayment Type"))
+            start_period = self._resolve_period_on_index(row.get("Start Period"), idx)
+            if start_period is None:
+                continue
+
+            start_pos = int(idx.get_loc(start_period))
+            active_periods = min(term_periods, len(idx) - start_pos)
+            if active_periods <= 0:
+                continue
+
+            amortising_periods = max(active_periods - grace_periods, 1)
+            amortising_principal = max(drawdown_amount - balloon_amount, 0.0)
+            period_rate = annual_rate / periods_per_year
+            annuity_payment = self._annuity_payment(
+                amortising_principal,
+                period_rate,
+                amortising_periods,
+            )
+            straight_line_principal = (
+                amortising_principal / amortising_periods if amortising_periods > 0 else 0.0
+            )
+
+            outstanding = drawdown_amount
+            for offset in range(active_periods):
+                pos = start_pos + offset
+                period = idx[pos]
+                opening_debt = outstanding
+                interest = opening_debt * period_rate
+                principal = 0.0
+
+                if offset >= grace_periods and opening_debt > 1e-9:
+                    periods_remaining = active_periods - offset
+                    is_final_period = periods_remaining == 1
+
+                    if repayment_type == "bullet":
+                        principal = opening_debt if is_final_period else 0.0
+                    elif repayment_type == "annuity":
+                        if is_final_period:
+                            principal = opening_debt
+                        else:
+                            principal = max(annuity_payment - interest, 0.0)
+                    else:
+                        principal = straight_line_principal
+                        if is_final_period:
+                            principal = opening_debt
+
+                    principal = min(principal, opening_debt)
+
+                ending_debt = max(opening_debt - principal, 0.0)
+                drawdown = drawdown_amount if offset == 0 else 0.0
+                period_fees = fees if offset == 0 else 0.0
+
+                rows.append(
+                    {
+                        "Period": pd.Timestamp(period),
+                        "Loan Name": row.get("Loan Name", "Loan Facility"),
+                        "Lender": row.get("Lender", ""),
+                        "Opening Debt": opening_debt,
+                        "Debt Drawdown": drawdown,
+                        "Principal Repayment": principal,
+                        "Interest Expense (Debt)": interest,
+                        "Debt Service": principal + interest,
+                        "Ending Debt": ending_debt,
+                        "Financing Fees": period_fees,
+                    }
+                )
+                outstanding = ending_debt
+                if outstanding <= 1e-9 and offset >= grace_periods:
+                    break
+
+        if not rows:
+            return pd.DataFrame()
+
+        detail = pd.DataFrame(rows)
+        detail["Period"] = pd.to_datetime(detail["Period"], errors="coerce")
+        return detail.sort_values(["Period", "Loan Name"], kind="stable").reset_index(drop=True)
+
+    def debt_schedule(self, annual: bool = False) -> pd.DataFrame:
+        detail = self._loan_schedule_detail(self.dates)
+        if detail.empty:
+            return detail
+        if not annual:
+            return detail
+
+        work = detail.copy()
+        work["Year"] = work["Period"].dt.year
+        grouped = pd.DataFrame(index=pd.Index(sorted(work["Year"].unique()), name="Year"))
+        for column in [
+            "Opening Debt",
+            "Debt Drawdown",
+            "Principal Repayment",
+            "Interest Expense (Debt)",
+            "Debt Service",
+            "Ending Debt",
+            "Financing Fees",
+        ]:
+            if column in {"Opening Debt", "Ending Debt"}:
+                grouped[column] = work.groupby("Year")[column].last()
+            else:
+                grouped[column] = work.groupby("Year")[column].sum(min_count=1)
+        return grouped
+
+    def _aggregated_debt_schedule(self, index: pd.DatetimeIndex) -> pd.DataFrame:
+        base = pd.DataFrame(index=index.copy())
+        for column in [
+            "Opening Debt",
+            "Debt Drawdown",
+            "Principal Repayment",
+            "Interest Expense (Debt)",
+            "Debt Service",
+            "Ending Debt",
+            "Financing Fees",
+        ]:
+            base[column] = 0.0
+
+        detail = self._loan_schedule_detail(index)
+        if detail.empty:
+            return base
+
+        grouped = detail.groupby("Period").agg(
+            {
+                "Opening Debt": "sum",
+                "Debt Drawdown": "sum",
+                "Principal Repayment": "sum",
+                "Interest Expense (Debt)": "sum",
+                "Debt Service": "sum",
+                "Ending Debt": "sum",
+                "Financing Fees": "sum",
+            }
+        )
+        grouped.index = pd.to_datetime(grouped.index, errors="coerce")
+        for column in grouped.columns:
+            base.loc[grouped.index, column] = pd.to_numeric(grouped[column], errors="coerce")
+        return base
+
+    @staticmethod
+    def _effective_tax_rate_from_frame(df: pd.DataFrame) -> float:
+        npbt = None
+        for candidate in ["NPBT_adj", "NPBT", "Net Profit Before Tax", "Profit Before Tax"]:
+            if candidate in df.columns:
+                npbt = pd.to_numeric(df[candidate], errors="coerce")
+                break
+
+        tax = None
+        for candidate in ["Tax Expense_adj", "Tax Expense", "Income Tax Expense", "Tax"]:
+            if candidate in df.columns:
+                tax = pd.to_numeric(df[candidate], errors="coerce")
+                break
+
+        if npbt is not None and tax is not None:
+            aligned = pd.concat([npbt, tax], axis=1).dropna()
+            aligned = aligned[aligned.iloc[:, 0] > 1e-9]
+            if not aligned.empty:
+                ratios = aligned.iloc[:, 1] / aligned.iloc[:, 0]
+                return float(np.clip(ratios.median(), 0.0, 0.6))
+
+        npat = None
+        for candidate in ["NPAT_adj", "NPAT", "Net Profit After Tax", "Net Income"]:
+            if candidate in df.columns:
+                npat = pd.to_numeric(df[candidate], errors="coerce")
+                break
+
+        if npbt is not None and npat is not None:
+            aligned = pd.concat([npbt, npat], axis=1).dropna()
+            aligned = aligned[aligned.iloc[:, 0] > 1e-9]
+            if not aligned.empty:
+                ratios = 1 - (aligned.iloc[:, 1] / aligned.iloc[:, 0])
+                return float(np.clip(ratios.median(), 0.0, 0.6))
+
+        return 0.28
+
+    def _apply_financing_schedule(
+        self, df: pd.DataFrame, *, adjusted: bool = False
+    ) -> pd.DataFrame:
+        work = df.copy()
+        debt = self._aggregated_debt_schedule(work.index)
+        if debt.empty or not debt.to_numpy().any():
+            return work
+
+        for column in debt.columns:
+            work[column] = debt[column].to_numpy()
+
+        ebit_col = "EBIT_adj" if adjusted and "EBIT_adj" in work.columns else "EBIT"
+        npbt_col = "NPBT_adj" if adjusted else "NPBT"
+        npat_col = "NPAT_adj" if adjusted else "NPAT"
+        tax_col = "Tax Expense_adj" if adjusted else "Tax Expense"
+        interest_col = "Interest Expense_adj" if adjusted else "Interest Expense"
+        cfo_col = "CFO_adj" if adjusted and "CFO_adj" in work.columns else "CFO"
+        cfi_col = "CFI_adj" if adjusted and "CFI_adj" in work.columns else "CFI"
+        cff_col = "CFF_adj" if adjusted else "CFF"
+        net_cash_col = "Net Cash Flow_adj" if adjusted else "Net Cash Flow"
+        closing_cash_col = "Closing Cash Balance_adj" if adjusted else "Closing Cash Balance"
+        cash_col = "Cash and Cash Equivalents_adj" if adjusted else "Cash and Cash Equivalents"
+        term_debt_col = "Term Debt_adj" if adjusted else "Term Debt"
+
+        original_npat = (
+            pd.to_numeric(work.get(npat_col), errors="coerce")
+            if npat_col in work.columns
+            else None
+        )
+        original_cfo = (
+            pd.to_numeric(work.get(cfo_col), errors="coerce")
+            if cfo_col in work.columns
+            else None
+        )
+
+        work[interest_col] = debt["Interest Expense (Debt)"].to_numpy()
+        if ebit_col in work.columns:
+            ebit = pd.to_numeric(work[ebit_col], errors="coerce")
+            npbt = ebit - pd.to_numeric(work[interest_col], errors="coerce").fillna(0.0)
+            work[npbt_col] = npbt
+
+            tax_rate = self._effective_tax_rate_from_frame(df)
+            tax = np.maximum(npbt.fillna(0.0), 0.0) * tax_rate
+            work[tax_col] = tax
+            work[npat_col] = npbt - tax
+
+            if original_cfo is not None:
+                if original_npat is not None:
+                    delta_npat = (
+                        pd.to_numeric(work[npat_col], errors="coerce").fillna(0.0)
+                        - original_npat.fillna(0.0)
+                    )
+                    work[cfo_col] = original_cfo.fillna(0.0) + delta_npat
+                else:
+                    work[cfo_col] = original_cfo
+
+        work[cff_col] = (
+            debt["Debt Drawdown"] - debt["Principal Repayment"] - debt["Financing Fees"]
+        ).to_numpy()
+
+        if cfo_col in work.columns and cfi_col in work.columns and cff_col in work.columns:
+            work[net_cash_col] = (
+                pd.to_numeric(work[cfo_col], errors="coerce").fillna(0.0)
+                + pd.to_numeric(work[cfi_col], errors="coerce").fillna(0.0)
+                + pd.to_numeric(work[cff_col], errors="coerce").fillna(0.0)
+            )
+        elif "Net Cash Flow" in work.columns and net_cash_col != "Net Cash Flow":
+            work[net_cash_col] = pd.to_numeric(work["Net Cash Flow"], errors="coerce")
+
+        if "Opening Cash Balance" in work.columns and net_cash_col in work.columns:
+            opening = pd.to_numeric(work["Opening Cash Balance"], errors="coerce").ffill().fillna(0.0)
+            work[closing_cash_col] = opening + pd.to_numeric(work[net_cash_col], errors="coerce").fillna(0.0)
+            work[cash_col] = work[closing_cash_col]
+
+        work[term_debt_col] = debt["Ending Debt"].to_numpy()
+        if "Non-current Liabilities" not in work.columns:
+            non_current_col = "Non-current Liabilities_adj" if adjusted else "Non-current Liabilities"
+            work[non_current_col] = debt["Ending Debt"].to_numpy()
+
+        return work
+
     def _capex_spend_schedule(self, index: pd.DatetimeIndex) -> pd.Series:
         capex = self.capex()
         if capex is None:
@@ -577,55 +995,17 @@ class GoatModel:
         if len(idx) == 0:
             return pd.DataFrame()
 
-        periods_per_year = max(self._periods_per_year(idx), 1)
-        debt_table = self._capital_financing_assumptions()
-        opening_debt = pd.Series(0.0, index=idx, dtype=float)
-        drawdown = pd.Series(0.0, index=idx, dtype=float)
-        principal = pd.Series(0.0, index=idx, dtype=float)
-        interest = pd.Series(0.0, index=idx, dtype=float)
-        ending_debt = pd.Series(0.0, index=idx, dtype=float)
-
-        if debt_table is not None:
-            work = debt_table.copy()
-            work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
-            work["Interest/Return %"] = pd.to_numeric(
-                work.get("Interest/Return %"), errors="coerce"
-            )
-            work["Term (years)"] = pd.to_numeric(work.get("Term (years)"), errors="coerce")
-
-            debt_mask = (
-                work["Amount"].notna()
-                & (work["Amount"] > 0)
-                & work["Interest/Return %"].notna()
-                & (work["Interest/Return %"] > 0)
-                & work["Term (years)"].notna()
-                & (work["Term (years)"] > 0)
-            )
-            debt_rows = work.loc[debt_mask]
-
-            for _, row in debt_rows.iterrows():
-                principal_amount = float(row["Amount"])
-                annual_rate = float(row["Interest/Return %"])
-                if annual_rate > 1:
-                    annual_rate /= 100.0
-                term_periods = max(int(round(float(row["Term (years)"]) * periods_per_year)), 1)
-                period_principal = principal_amount / term_periods
-                outstanding = principal_amount
-
-                for pos, period in enumerate(idx):
-                    if pos == 0:
-                        drawdown.iloc[pos] += principal_amount
-                    if outstanding <= 1e-9:
-                        break
-                    opening_debt.iloc[pos] += outstanding
-                    period_interest = outstanding * (annual_rate / periods_per_year)
-                    scheduled_principal = min(period_principal, outstanding)
-                    interest.iloc[pos] += period_interest
-                    principal.iloc[pos] += scheduled_principal
-                    outstanding = max(outstanding - scheduled_principal, 0.0)
-                    ending_debt.iloc[pos] += outstanding
-
-        debt_service = principal + interest
+        debt_totals = self._aggregated_debt_schedule(idx)
+        opening_debt = pd.to_numeric(debt_totals["Opening Debt"], errors="coerce").fillna(0.0)
+        drawdown = pd.to_numeric(debt_totals["Debt Drawdown"], errors="coerce").fillna(0.0)
+        principal = pd.to_numeric(
+            debt_totals["Principal Repayment"], errors="coerce"
+        ).fillna(0.0)
+        interest = pd.to_numeric(
+            debt_totals["Interest Expense (Debt)"], errors="coerce"
+        ).fillna(0.0)
+        ending_debt = pd.to_numeric(debt_totals["Ending Debt"], errors="coerce").fillna(0.0)
+        debt_service = pd.to_numeric(debt_totals["Debt Service"], errors="coerce").fillna(0.0)
         ebit_col = "EBIT_adj" if "EBIT_adj" in df.columns else "EBIT"
         ebitda_col = "EBITDA_adj" if "EBITDA_adj" in df.columns else "EBITDA"
         cfo_col = "CFO_adj" if "CFO_adj" in df.columns else "CFO"
@@ -1192,6 +1572,8 @@ class GoatModel:
             df["Closing Cash Balance_adj"] = opening + df["Net Cash Flow_adj"].fillna(0.0)
             notes["Closing Cash Balance_adj"] = "Opening balance plus adjusted net cash flow"
 
+        df = self._apply_financing_schedule(df, adjusted=True)
+
         if notes:
             scenario_notes = dict(df.attrs.get("scenario_notes", {}))
             scenario_notes.update(notes)
@@ -1421,6 +1803,7 @@ class GoatModel:
         )
         _accumulate(
             "Finance costs",
+            "Interest Expense_adj",
             "Interest Expense",
             "Finance Costs",
             "Interest",
@@ -1661,16 +2044,18 @@ class GoatModel:
             return cleaned
 
         flows = {
-            "operating": _aggregate_sum(df.get("CFO")),
-            "investing": _aggregate_sum(df.get("CFI")),
+            "operating": _aggregate_sum(df.get("CFO_adj") if "CFO_adj" in df else df.get("CFO")),
+            "investing": _aggregate_sum(df.get("CFI_adj") if "CFI_adj" in df else df.get("CFI")),
             "capex": _aggregate_sum(df.get("Capex")),
-            "financing": _aggregate_sum(df.get("CFF")),
+            "financing": _aggregate_sum(df.get("CFF_adj") if "CFF_adj" in df else df.get("CFF")),
         }
 
         if not any(series is not None for series in flows.values()):
             raise ValueError("No cash-flow data available in the schedule.")
 
-        net_cash_series = _aggregate_sum(df.get("Net Cash Flow"))
+        net_cash_series = _aggregate_sum(
+            df.get("Net Cash Flow_adj") if "Net Cash Flow_adj" in df else df.get("Net Cash Flow")
+        )
         if net_cash_series is None:
             available = [
                 series
@@ -1686,6 +2071,8 @@ class GoatModel:
             "Cash at Beginning of Period",
         ]
         closing_candidates = [
+            "Closing Cash Balance_adj",
+            "Cash and Cash Equivalents_adj",
             "Closing Cash Balance",
             "Closing Cash",
             "Cash and Cash Equivalents",
@@ -1783,6 +2170,8 @@ class GoatModel:
             return cleaned
 
         cash_candidates = (
+            "Cash and Cash Equivalents_adj",
+            "Closing Cash Balance_adj",
             "Cash and Cash Equivalents",
             "Closing Cash Balance",
             "Closing Cash",
@@ -1800,8 +2189,13 @@ class GoatModel:
             "Current Assets": df.get("Current Assets"),
             "Non-current Assets": df.get("Non-current Assets"),
             "Current Liabilities": df.get("Current Liabilities"),
-            "Non-current Liabilities": df.get("Non-current Liabilities"),
+            "Non-current Liabilities": (
+                df.get("Non-current Liabilities_adj")
+                if "Non-current Liabilities_adj" in df
+                else df.get("Non-current Liabilities")
+            ),
             "Equity": df.get("Equity"),
+            "Term Debt": df.get("Term Debt_adj") if "Term Debt_adj" in df else df.get("Term Debt"),
         }
 
         aggregated = {
@@ -1880,6 +2274,7 @@ class GoatModel:
         _append("Assets", "Non-current assets", out.get("Non-current Assets"))
         _append("Assets", "Total assets", total_assets)
         _append("Equity and liabilities", "Equity", total_equity)
+        _append("Equity and liabilities", "Term debt", out.get("Term Debt"))
         _append(
             "Equity and liabilities",
             "Non-current liabilities",
@@ -1947,6 +2342,7 @@ class GoatModel:
             "Fixed Expenses",
             "Admin Wages",
             "Depreciation & Amortization",
+            "Interest Expense_adj",
             "Interest Expense",
             "Tax Expense",
             "Capex",
@@ -1973,7 +2369,7 @@ class GoatModel:
         return payload
 
     def to_tidy(self) -> pd.DataFrame:
-        return self.data.copy()
+        return self._apply_financing_schedule(self.data.copy(), adjusted=False)
 
 
 def _clean_table(df: pd.DataFrame) -> pd.DataFrame:
