@@ -2077,6 +2077,8 @@ def _execute_scenario_suite(
         scenario_kpis = scenario_model.kpis(scenario_df, annual=True)
         debt_schedule_detail = scenario_model.debt_schedule(annual=False)
         debt_schedule_annual = scenario_model.debt_schedule(annual=True)
+        equity_schedule_detail = scenario_model.equity_schedule(annual=False)
+        equity_schedule_annual = scenario_model.equity_schedule(annual=True)
         working_capital_detail = scenario_model.working_capital_schedule(scenario_df, annual=False)
         working_capital_annual = scenario_model.working_capital_schedule(scenario_df, annual=True)
         debt_capacity_detail = scenario_model.debt_capacity_schedule(scenario_df, annual=False)
@@ -2091,6 +2093,8 @@ def _execute_scenario_suite(
             scenario_supplementary["Benchmark KPIs"] = benchmark_table
         if not debt_schedule_annual.empty:
             scenario_supplementary["Debt Schedule"] = debt_schedule_annual
+        if not equity_schedule_annual.empty:
+            scenario_supplementary["Equity Schedule"] = equity_schedule_annual
         if not working_capital_annual.empty:
             scenario_supplementary["Working Capital Schedule"] = working_capital_annual
         if not debt_capacity_annual.empty:
@@ -2122,6 +2126,8 @@ def _execute_scenario_suite(
             "valuation": valuation_summary,
             "debt_schedule": debt_schedule_detail,
             "debt_schedule_annual": debt_schedule_annual,
+            "equity_schedule": equity_schedule_detail,
+            "equity_schedule_annual": equity_schedule_annual,
             "working_capital": working_capital_detail,
             "working_capital_annual": working_capital_annual,
             "debt_capacity": debt_capacity_detail,
@@ -6114,6 +6120,7 @@ def _default_schedule_components(
 def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
     return {
         "Loan Facilities": _default_loan_facilities_table(),
+        "Equity Facilities": _default_equity_facilities_table(),
         "Capitalisation Table": pd.DataFrame(
             {
                 "Shareholder": ["Founder", "Investor"],
@@ -6700,6 +6707,50 @@ def _ensure_loan_facilities_table(table: Optional[pd.DataFrame]) -> pd.DataFrame
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
 
     work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+
+    ordered_cols = list(defaults.columns)
+    remainder = [col for col in work.columns if col not in ordered_cols]
+    return work[ordered_cols + remainder].reset_index(drop=True)
+
+
+def _default_equity_facilities_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Investor Name": ["Founder Equity", "Growth Investor"],
+            "Start Period": [pd.Timestamp("2024-01-31"), pd.Timestamp("2025-01-31")],
+            "Contribution Amount": [150000.0, 250000.0],
+            "Ownership %": [60.0, 40.0],
+            "Share Class": ["Ordinary", "Ordinary"],
+            "Issue Costs": [0.0, 0.0],
+            "Active": [True, True],
+        }
+    )
+
+
+def _ensure_equity_facilities_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_equity_facilities_table()
+    else:
+        work = table.copy()
+
+    defaults = _default_equity_facilities_table()
+    for column in defaults.columns:
+        if column not in work.columns:
+            work[column] = defaults.iloc[0][column]
+
+    for column in ["Investor Name", "Share Class"]:
+        work[column] = work[column].fillna("").astype(str).str.strip()
+
+    work.loc[work["Investor Name"] == "", "Investor Name"] = "Investor"
+    work["Share Class"] = work["Share Class"].replace({"": "Ordinary", "nan": "Ordinary"})
+    work["Start Period"] = pd.to_datetime(work.get("Start Period"), errors="coerce")
+
+    for column in ["Contribution Amount", "Ownership %", "Issue Costs"]:
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    work["Active"] = work.get("Active", True).map(
+        lambda value: _coerce_bool_value(value, True)
+    )
 
     ordered_cols = list(defaults.columns)
     remainder = [col for col in work.columns if col not in ordered_cols]
@@ -8769,6 +8820,33 @@ def main() -> None:
                     if cleaned_loans is not None:
                         supplementary_tables[name] = _ensure_loan_facilities_table(
                             cleaned_loans
+                        )
+                    continue
+
+                if name == "Equity Facilities":
+                    st.markdown("#### Equity Facilities")
+                    equity_table = _ensure_equity_facilities_table(
+                        st.session_state.supplementary.get(name)
+                    )
+                    st.session_state.supplementary[name] = equity_table
+
+                    def _save_equity(updated: pd.DataFrame) -> None:
+                        st.session_state.supplementary[name] = _ensure_equity_facilities_table(
+                            updated
+                        )
+
+                    _render_schedule_row_editor(
+                        "supp::equity_facilities",
+                        equity_table,
+                        _save_equity,
+                    )
+
+                    cleaned_equity = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
+                    if cleaned_equity is not None:
+                        supplementary_tables[name] = _ensure_equity_facilities_table(
+                            cleaned_equity
                         )
                     continue
 
@@ -11258,6 +11336,7 @@ def main() -> None:
             supplementary_render = results.get("supplementary", {})
             for name in [
                 "Loan Facilities",
+                "Equity Facilities",
                 "Capitalisation Table",
                 "Capex Schedule",
                 "Asset Schedules",
@@ -11266,6 +11345,7 @@ def main() -> None:
                 "Commercial Revenue by Product",
                 "Commercial Quantity by Period",
                 "Debt Schedule",
+                "Equity Schedule",
                 "Working Capital Schedule",
                 "Debt Capacity Schedule",
                 "UFCF Schedule",

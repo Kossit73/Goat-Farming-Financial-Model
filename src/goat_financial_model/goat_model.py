@@ -501,6 +501,44 @@ class GoatModel:
             }
         ).reset_index(drop=True)
 
+    def equity_facilities(self) -> Optional[pd.DataFrame]:
+        table = self.supplementary_tables.get("Equity Facilities")
+        if isinstance(table, pd.DataFrame) and not table.empty:
+            return table.copy()
+
+        capitalisation = self.capitalisation_table()
+        if capitalisation is None or capitalisation.empty:
+            return None
+
+        work = capitalisation.copy()
+        work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+        work["Shareholder"] = work.get(
+            "Shareholder", pd.Series("Investor", index=work.index)
+        ).astype(str).str.strip()
+        work["Ownership %"] = pd.to_numeric(work.get("Ownership %"), errors="coerce")
+        work["Investment"] = pd.to_numeric(work.get("Investment"), errors="coerce")
+
+        valid = work["Investment"].notna() & (work["Investment"] > 0)
+        if not valid.any():
+            return None
+
+        start_periods: List[pd.Timestamp] = []
+        for _, row in work.loc[valid].iterrows():
+            year_value = row.get("Year")
+            start_periods.append(self._resolve_year_on_index(year_value, self.dates))
+
+        return pd.DataFrame(
+            {
+                "Investor Name": work.loc[valid, "Shareholder"].replace("", "Investor"),
+                "Start Period": start_periods,
+                "Contribution Amount": work.loc[valid, "Investment"].astype(float),
+                "Ownership %": work.loc[valid, "Ownership %"].astype(float),
+                "Share Class": "Ordinary",
+                "Issue Costs": 0.0,
+                "Active": True,
+            }
+        ).reset_index(drop=True)
+
     @staticmethod
     def _coerce_bool_series(values: pd.Series, default: bool = True) -> pd.Series:
         if values.dtype == bool:
@@ -549,6 +587,27 @@ class GoatModel:
         if pos >= len(index):
             return None
         return pd.Timestamp(index[pos])
+
+    @staticmethod
+    def _resolve_year_on_index(
+        raw_year: object, index: pd.DatetimeIndex
+    ) -> pd.Timestamp:
+        if len(index) == 0:
+            return pd.NaT
+
+        year = pd.to_numeric(pd.Series([raw_year]), errors="coerce").iloc[0]
+        if pd.isna(year):
+            return pd.Timestamp(index[0])
+
+        year_int = int(year)
+        same_year = index[index.year == year_int]
+        if len(same_year):
+            return pd.Timestamp(same_year[0])
+
+        future = index[index.year >= year_int]
+        if len(future):
+            return pd.Timestamp(future[0])
+        return pd.Timestamp(index[-1])
 
     @staticmethod
     def _annuity_payment(
@@ -726,6 +785,102 @@ class GoatModel:
                 grouped[column] = work.groupby("Year")[column].sum(min_count=1)
         return grouped
 
+    def _equity_schedule_detail(
+        self, index: Optional[pd.DatetimeIndex] = None
+    ) -> pd.DataFrame:
+        idx = index if index is not None else self.dates
+        if len(idx) == 0:
+            return pd.DataFrame()
+
+        facilities = self.equity_facilities()
+        if facilities is None or facilities.empty:
+            return pd.DataFrame()
+
+        work = facilities.copy()
+        for column in ["Contribution Amount", "Ownership %", "Issue Costs"]:
+            if column not in work.columns:
+                work[column] = np.nan
+            work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+        if "Investor Name" not in work.columns:
+            work["Investor Name"] = "Investor"
+        work["Investor Name"] = work["Investor Name"].fillna("").astype(str).str.strip()
+        work.loc[work["Investor Name"] == "", "Investor Name"] = "Investor"
+
+        if "Share Class" not in work.columns:
+            work["Share Class"] = "Ordinary"
+        work["Share Class"] = work["Share Class"].fillna("").astype(str).str.strip()
+        work.loc[work["Share Class"] == "", "Share Class"] = "Ordinary"
+
+        if "Active" not in work.columns:
+            work["Active"] = True
+        work["Active"] = self._coerce_bool_series(work["Active"], default=True)
+
+        rows: List[Dict[str, object]] = []
+        running_contributed_equity = 0.0
+        ordered = work.sort_values(["Start Period", "Investor Name"], kind="stable")
+        for _, row in ordered.iterrows():
+            if not bool(row.get("Active", True)):
+                continue
+
+            contribution = max(float(row.get("Contribution Amount") or 0.0), 0.0)
+            if contribution <= 0:
+                continue
+
+            issue_costs = max(float(row.get("Issue Costs") or 0.0), 0.0)
+            start_period = self._resolve_period_on_index(row.get("Start Period"), idx)
+            if start_period is None:
+                continue
+
+            net_proceeds = max(contribution - issue_costs, 0.0)
+            running_contributed_equity += net_proceeds
+            rows.append(
+                {
+                    "Period": pd.Timestamp(start_period),
+                    "Investor Name": row.get("Investor Name", "Investor"),
+                    "Share Class": row.get("Share Class", "Ordinary"),
+                    "Ownership %": float(row.get("Ownership %") or 0.0),
+                    "Equity Contribution": contribution,
+                    "Equity Issue Costs": issue_costs,
+                    "Net Equity Proceeds": net_proceeds,
+                    "Cumulative Contributed Equity": running_contributed_equity,
+                }
+            )
+
+        if not rows:
+            return pd.DataFrame()
+
+        detail = pd.DataFrame(rows)
+        detail["Period"] = pd.to_datetime(detail["Period"], errors="coerce")
+        detail = detail.sort_values(["Period", "Investor Name"], kind="stable").reset_index(
+            drop=True
+        )
+        detail["Cumulative Contributed Equity"] = pd.to_numeric(
+            detail["Net Equity Proceeds"], errors="coerce"
+        ).fillna(0.0).cumsum()
+        return detail
+
+    def equity_schedule(self, annual: bool = False) -> pd.DataFrame:
+        detail = self._equity_schedule_detail(self.dates)
+        if detail.empty:
+            return detail
+        if not annual:
+            return detail
+
+        work = detail.copy()
+        work["Year"] = work["Period"].dt.year
+        grouped = pd.DataFrame(index=pd.Index(sorted(work["Year"].unique()), name="Year"))
+        for column in [
+            "Equity Contribution",
+            "Equity Issue Costs",
+            "Net Equity Proceeds",
+        ]:
+            grouped[column] = work.groupby("Year")[column].sum(min_count=1)
+        grouped["Cumulative Contributed Equity"] = work.groupby("Year")[
+            "Cumulative Contributed Equity"
+        ].last()
+        return grouped
+
     def _aggregated_debt_schedule(self, index: pd.DatetimeIndex) -> pd.DataFrame:
         base = pd.DataFrame(index=index.copy())
         for column in [
@@ -757,6 +912,35 @@ class GoatModel:
         grouped.index = pd.to_datetime(grouped.index, errors="coerce")
         for column in grouped.columns:
             base.loc[grouped.index, column] = pd.to_numeric(grouped[column], errors="coerce")
+        return base
+
+    def _aggregated_equity_schedule(self, index: pd.DatetimeIndex) -> pd.DataFrame:
+        base = pd.DataFrame(index=index.copy())
+        for column in [
+            "Equity Contribution",
+            "Equity Issue Costs",
+            "Net Equity Proceeds",
+            "Cumulative Contributed Equity",
+        ]:
+            base[column] = 0.0
+
+        detail = self._equity_schedule_detail(index)
+        if detail.empty:
+            return base
+
+        grouped = detail.groupby("Period").agg(
+            {
+                "Equity Contribution": "sum",
+                "Equity Issue Costs": "sum",
+                "Net Equity Proceeds": "sum",
+            }
+        )
+        grouped.index = pd.to_datetime(grouped.index, errors="coerce")
+        for column in grouped.columns:
+            base.loc[grouped.index, column] = pd.to_numeric(grouped[column], errors="coerce")
+        base["Cumulative Contributed Equity"] = (
+            pd.to_numeric(base["Net Equity Proceeds"], errors="coerce").fillna(0.0).cumsum()
+        )
         return base
 
     @staticmethod
@@ -800,11 +984,18 @@ class GoatModel:
     ) -> pd.DataFrame:
         work = df.copy()
         debt = self._aggregated_debt_schedule(work.index)
-        if debt.empty or not debt.to_numpy().any():
+        equity = self._aggregated_equity_schedule(work.index)
+        has_debt = not debt.empty and bool(debt.to_numpy().any())
+        has_equity = not equity.empty and bool(equity.to_numpy().any())
+        if not has_debt and not has_equity:
             return work
 
-        for column in debt.columns:
-            work[column] = debt[column].to_numpy()
+        if has_debt:
+            for column in debt.columns:
+                work[column] = debt[column].to_numpy()
+        if has_equity:
+            for column in equity.columns:
+                work[column] = equity[column].to_numpy()
 
         ebit_col = "EBIT_adj" if adjusted and "EBIT_adj" in work.columns else "EBIT"
         npbt_col = "NPBT_adj" if adjusted else "NPBT"
@@ -817,6 +1008,11 @@ class GoatModel:
         net_cash_col = "Net Cash Flow_adj" if adjusted else "Net Cash Flow"
         closing_cash_col = "Closing Cash Balance_adj" if adjusted else "Closing Cash Balance"
         cash_col = "Cash and Cash Equivalents_adj" if adjusted else "Cash and Cash Equivalents"
+        current_assets_col = "Current Assets_adj" if adjusted else "Current Assets"
+        non_current_liabilities_col = (
+            "Non-current Liabilities_adj" if adjusted else "Non-current Liabilities"
+        )
+        equity_col = "Equity_adj" if adjusted else "Equity"
         term_debt_col = "Term Debt_adj" if adjusted else "Term Debt"
 
         original_npat = (
@@ -829,9 +1025,40 @@ class GoatModel:
             if cfo_col in work.columns
             else None
         )
+        baseline_closing_cash = (
+            pd.to_numeric(work.get("Closing Cash Balance"), errors="coerce")
+            if "Closing Cash Balance" in work.columns
+            else None
+        )
+        baseline_current_assets = (
+            pd.to_numeric(work.get("Current Assets"), errors="coerce")
+            if "Current Assets" in work.columns
+            else None
+        )
+        baseline_non_current_assets = (
+            pd.to_numeric(work.get("Non-current Assets"), errors="coerce")
+            if "Non-current Assets" in work.columns
+            else None
+        )
+        baseline_current_liabilities = (
+            pd.to_numeric(work.get("Current Liabilities"), errors="coerce")
+            if "Current Liabilities" in work.columns
+            else None
+        )
+        baseline_non_current_liabilities = (
+            pd.to_numeric(work.get("Non-current Liabilities"), errors="coerce")
+            if "Non-current Liabilities" in work.columns
+            else None
+        )
+        baseline_term_debt = (
+            pd.to_numeric(work.get("Term Debt"), errors="coerce")
+            if "Term Debt" in work.columns
+            else pd.Series(0.0, index=work.index, dtype=float)
+        )
 
-        work[interest_col] = debt["Interest Expense (Debt)"].to_numpy()
-        if ebit_col in work.columns:
+        if has_debt:
+            work[interest_col] = debt["Interest Expense (Debt)"].to_numpy()
+        if has_debt and ebit_col in work.columns:
             ebit = pd.to_numeric(work[ebit_col], errors="coerce")
             npbt = ebit - pd.to_numeric(work[interest_col], errors="coerce").fillna(0.0)
             work[npbt_col] = npbt
@@ -851,9 +1078,15 @@ class GoatModel:
                 else:
                     work[cfo_col] = original_cfo
 
-        work[cff_col] = (
-            debt["Debt Drawdown"] - debt["Principal Repayment"] - debt["Financing Fees"]
-        ).to_numpy()
+        debt_financing_flow = pd.Series(0.0, index=work.index, dtype=float)
+        if has_debt:
+            debt_financing_flow = (
+                debt["Debt Drawdown"] - debt["Principal Repayment"] - debt["Financing Fees"]
+            )
+        equity_financing_flow = pd.Series(0.0, index=work.index, dtype=float)
+        if has_equity:
+            equity_financing_flow = equity["Net Equity Proceeds"]
+        work[cff_col] = (debt_financing_flow + equity_financing_flow).to_numpy()
 
         if cfo_col in work.columns and cfi_col in work.columns and cff_col in work.columns:
             work[net_cash_col] = (
@@ -869,10 +1102,51 @@ class GoatModel:
             work[closing_cash_col] = opening + pd.to_numeric(work[net_cash_col], errors="coerce").fillna(0.0)
             work[cash_col] = work[closing_cash_col]
 
-        work[term_debt_col] = debt["Ending Debt"].to_numpy()
-        if "Non-current Liabilities" not in work.columns:
-            non_current_col = "Non-current Liabilities_adj" if adjusted else "Non-current Liabilities"
-            work[non_current_col] = debt["Ending Debt"].to_numpy()
+        if has_debt:
+            work[term_debt_col] = debt["Ending Debt"].to_numpy()
+
+        if baseline_non_current_liabilities is not None and has_debt:
+            debt_delta = pd.to_numeric(debt["Ending Debt"], errors="coerce").fillna(0.0) - baseline_term_debt.fillna(0.0)
+            work[non_current_liabilities_col] = baseline_non_current_liabilities.fillna(0.0) + debt_delta
+        elif has_debt:
+            work[non_current_liabilities_col] = debt["Ending Debt"].to_numpy()
+
+        closing_cash_for_delta = (
+            pd.to_numeric(work.get(closing_cash_col), errors="coerce")
+            if closing_cash_col in work.columns
+            else None
+        )
+        if baseline_current_assets is not None and closing_cash_for_delta is not None and baseline_closing_cash is not None:
+            cash_delta = closing_cash_for_delta.fillna(0.0) - baseline_closing_cash.fillna(0.0)
+            work[current_assets_col] = baseline_current_assets.fillna(0.0) + cash_delta
+
+        current_assets_for_equity = None
+        for candidate in [current_assets_col, "Current Assets"]:
+            if candidate in work.columns:
+                current_assets_for_equity = pd.to_numeric(work[candidate], errors="coerce")
+                break
+        non_current_assets_for_equity = baseline_non_current_assets
+        current_liabilities_for_equity = baseline_current_liabilities
+        non_current_liabilities_for_equity = None
+        for candidate in [non_current_liabilities_col, "Non-current Liabilities"]:
+            if candidate in work.columns:
+                non_current_liabilities_for_equity = pd.to_numeric(
+                    work[candidate], errors="coerce"
+                )
+                break
+
+        if (
+            current_assets_for_equity is not None
+            and non_current_assets_for_equity is not None
+            and current_liabilities_for_equity is not None
+            and non_current_liabilities_for_equity is not None
+        ):
+            work[equity_col] = (
+                current_assets_for_equity.fillna(0.0)
+                + non_current_assets_for_equity.fillna(0.0)
+                - current_liabilities_for_equity.fillna(0.0)
+                - non_current_liabilities_for_equity.fillna(0.0)
+            )
 
         return work
 
@@ -2186,15 +2460,27 @@ class GoatModel:
 
         components = {
             "Cash and Cash Equivalents": cash_series,
-            "Current Assets": df.get("Current Assets"),
-            "Non-current Assets": df.get("Non-current Assets"),
-            "Current Liabilities": df.get("Current Liabilities"),
+            "Current Assets": (
+                df.get("Current Assets_adj")
+                if "Current Assets_adj" in df
+                else df.get("Current Assets")
+            ),
+            "Non-current Assets": (
+                df.get("Non-current Assets_adj")
+                if "Non-current Assets_adj" in df
+                else df.get("Non-current Assets")
+            ),
+            "Current Liabilities": (
+                df.get("Current Liabilities_adj")
+                if "Current Liabilities_adj" in df
+                else df.get("Current Liabilities")
+            ),
             "Non-current Liabilities": (
                 df.get("Non-current Liabilities_adj")
                 if "Non-current Liabilities_adj" in df
                 else df.get("Non-current Liabilities")
             ),
-            "Equity": df.get("Equity"),
+            "Equity": df.get("Equity_adj") if "Equity_adj" in df else df.get("Equity"),
             "Term Debt": df.get("Term Debt_adj") if "Term Debt_adj" in df else df.get("Term Debt"),
         }
 

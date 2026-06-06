@@ -116,6 +116,28 @@ def _build_model_with_loan_facilities(
     ).to_model()
 
 
+def _build_model_with_equity_facilities(
+    *, start_period: Optional[pd.Timestamp] = None
+) -> GoatModel:
+    schedule = _build_sample_schedule()
+    first_period = start_period if start_period is not None else schedule.index[0]
+    facilities = pd.DataFrame(
+        {
+            "Investor Name": ["Growth Investor"],
+            "Start Period": [first_period],
+            "Contribution Amount": [1500.0],
+            "Ownership %": [30.0],
+            "Share Class": ["Ordinary"],
+            "Issue Costs": [50.0],
+            "Active": [True],
+        }
+    )
+    return InputSchedule(
+        data=schedule,
+        supplementary_tables={"Equity Facilities": facilities},
+    ).to_model()
+
+
 def test_scenario_and_statements_pipeline():
     model = _build_model()
 
@@ -305,6 +327,54 @@ def test_loan_facilities_flow_into_scenario_outputs():
 
     assert pytest.approx(12.0, rel=1e-6) == scenario.iloc[0]["Interest Expense_adj"]
     assert pytest.approx(1100.0, rel=1e-6) == scenario.iloc[0]["CFF_adj"]
+    expected_close = (
+        scenario.iloc[0]["Opening Cash Balance"]
+        + scenario.iloc[0]["CFO_adj"]
+        + scenario.iloc[0]["CFI_adj"]
+        + scenario.iloc[0]["CFF_adj"]
+    )
+    assert pytest.approx(expected_close, rel=1e-6) == scenario.iloc[0]["Closing Cash Balance_adj"]
+
+
+def test_equity_facilities_drive_tidy_schedule_and_equity_schedule():
+    model = _build_model_with_equity_facilities()
+    baseline = _build_sample_schedule()
+
+    tidy = model.to_tidy()
+    equity_schedule = model.equity_schedule(annual=False)
+
+    assert not equity_schedule.empty
+    assert pytest.approx(1500.0, rel=1e-6) == tidy.iloc[0]["Equity Contribution"]
+    assert pytest.approx(50.0, rel=1e-6) == tidy.iloc[0]["Equity Issue Costs"]
+    assert pytest.approx(1450.0, rel=1e-6) == tidy.iloc[0]["Net Equity Proceeds"]
+    assert pytest.approx(1450.0, rel=1e-6) == tidy.iloc[0]["CFF"]
+    assert pytest.approx(1450.0 - baseline.iloc[0]["CFF"], rel=1e-6) == (
+        tidy.iloc[0]["Equity"] - baseline.iloc[0]["Equity"]
+    )
+
+
+def test_equity_facilities_support_mid_horizon_contribution():
+    schedule = _build_sample_schedule()
+    model = _build_model_with_equity_facilities(start_period=schedule.index[2])
+
+    tidy = model.to_tidy()
+
+    assert pytest.approx(0.0, rel=1e-6) == tidy.iloc[0]["Equity Contribution"]
+    assert pytest.approx(0.0, rel=1e-6) == tidy.iloc[1]["Equity Contribution"]
+    assert pytest.approx(1500.0, rel=1e-6) == tidy.iloc[2]["Equity Contribution"]
+    assert pytest.approx(1450.0, rel=1e-6) == tidy.iloc[2]["CFF"]
+
+
+def test_equity_facilities_flow_into_scenario_outputs():
+    model = _build_model_with_equity_facilities()
+    baseline = _build_sample_schedule()
+
+    scenario = model.scenario()
+
+    assert pytest.approx(1450.0, rel=1e-6) == scenario.iloc[0]["CFF_adj"]
+    assert pytest.approx(1450.0 - baseline.iloc[0]["CFF"], rel=1e-6) == (
+        scenario.iloc[0]["Equity_adj"] - scenario.iloc[0]["Equity"]
+    )
     expected_close = (
         scenario.iloc[0]["Opening Cash Balance"]
         + scenario.iloc[0]["CFO_adj"]
