@@ -1969,6 +1969,54 @@ def _valuation_diagnostic_messages(model: GoatModel) -> List[str]:
     return messages
 
 
+def _render_model_audit(audit: Dict[str, Any]) -> None:
+    if not isinstance(audit, dict):
+        st.info("Model audit is not available for this scenario.")
+        return
+
+    status = str(audit.get("status", "")).strip().lower()
+    headline = str(audit.get("headline", "Model audit is not available.")).strip()
+    if status == "critical":
+        st.error(headline)
+    elif status == "warning":
+        st.warning(headline)
+    else:
+        st.success(headline)
+
+    summary = audit.get("summary")
+    if isinstance(summary, pd.DataFrame) and not summary.empty:
+        row = summary.iloc[0]
+        cols = st.columns(4)
+        cols[0].metric("Audit Score", f"{int(row.get('Score', 0))}/100")
+        cols[1].metric("Critical", f"{int(row.get('Critical Issues', 0))}")
+        cols[2].metric("Warnings", f"{int(row.get('Warnings', 0))}")
+        cols[3].metric("Info", f"{int(row.get('Info', 0))}")
+
+    reasoning = audit.get("reasoning")
+    if isinstance(reasoning, list) and reasoning:
+        st.markdown("**Audit reasoning**")
+        for note in reasoning:
+            st.write(f"- {note}")
+
+    issues = audit.get("issues")
+    if isinstance(issues, pd.DataFrame) and not issues.empty:
+        display_columns = [
+            col
+            for col in [
+                "Severity",
+                "Category",
+                "Metric",
+                "Message",
+                "Reasoning",
+                "Recommendation",
+                "Periods",
+            ]
+            if col in issues.columns
+        ]
+        st.markdown("**Audit findings**")
+        st.dataframe(issues[display_columns], use_container_width=True)
+
+
 def _scenario_viability_table(
     scenario_results: Dict[str, Dict[str, Any]]
 ) -> pd.DataFrame:
@@ -2074,6 +2122,7 @@ def _execute_scenario_suite(
             key: value.copy() for key, value in base_supplementary.items()
         }
         valuation_summary = scenario_model.valuation_summary(scenario_df)
+        model_audit = scenario_model.model_audit(scenario_df, annual=True)
         scenario_kpis = scenario_model.kpis(scenario_df, annual=True)
         debt_schedule_detail = scenario_model.debt_schedule(annual=False)
         debt_schedule_annual = scenario_model.debt_schedule(annual=True)
@@ -2101,6 +2150,12 @@ def _execute_scenario_suite(
             scenario_supplementary["Debt Capacity Schedule"] = debt_capacity_annual
         if not ufcf_annual.empty:
             scenario_supplementary["UFCF Schedule"] = ufcf_annual
+        audit_summary = model_audit.get("summary")
+        if isinstance(audit_summary, pd.DataFrame) and not audit_summary.empty:
+            scenario_supplementary["Model Audit Summary"] = audit_summary
+        audit_issues = model_audit.get("issues")
+        if isinstance(audit_issues, pd.DataFrame) and not audit_issues.empty:
+            scenario_supplementary["Model Audit Findings"] = audit_issues
         if not scenario_pricing.empty:
             scenario_supplementary["Commercial Revenue by Product"] = _pricing_family_summary(
                 scenario_pricing
@@ -2124,6 +2179,7 @@ def _execute_scenario_suite(
             "kpis": scenario_kpis,
             "break_even": scenario_model.break_even(scenario_df, annual=True),
             "valuation": valuation_summary,
+            "model_audit": model_audit,
             "debt_schedule": debt_schedule_detail,
             "debt_schedule_annual": debt_schedule_annual,
             "equity_schedule": equity_schedule_detail,
@@ -11080,10 +11136,15 @@ def main() -> None:
         break_even = results["break_even"]
         selected_scenario = results.get("selected_scenario", "Scenario")
         model.scenario_name = selected_scenario
+        model_audit = results.get("model_audit")
+        if not isinstance(model_audit, dict):
+            model_audit = model.model_audit(scenario, annual=True)
 
         valuation_issues = _valuation_diagnostic_messages(model)
         if valuation_issues:
             st.warning("Valuation diagnostics: " + " ".join(f"- {msg}" for msg in valuation_issues))
+
+        _render_model_audit(model_audit)
 
         valuation_summary = results.get("valuation", {}) or {}
         debt_capacity_annual = results.get("debt_capacity_annual")
@@ -11166,6 +11227,9 @@ def main() -> None:
             st.info("Supplementary schedules will appear once a scenario has been run.")
         else:
             valuation_summary = results.get("valuation", {}) or {}
+            model_audit = results.get("model_audit")
+            if not isinstance(model_audit, dict):
+                model_audit = results["model"].model_audit(results["scenario"], annual=True)
             working_capital_annual = results.get("working_capital_annual")
             if not isinstance(working_capital_annual, pd.DataFrame):
                 working_capital_annual = pd.DataFrame()
@@ -11220,6 +11284,9 @@ def main() -> None:
             if not scenario_comparison.empty:
                 st.markdown("#### Scenario Viability Comparison")
                 st.dataframe(_format_kpis_for_display(scenario_comparison))
+
+            st.markdown("#### Model Audit")
+            _render_model_audit(model_audit)
 
             if not pricing_assumptions.empty:
                 st.markdown("#### Commercial Product View")
@@ -11349,6 +11416,8 @@ def main() -> None:
                 "Working Capital Schedule",
                 "Debt Capacity Schedule",
                 "UFCF Schedule",
+                "Model Audit Summary",
+                "Model Audit Findings",
             ]:
                 _render_table(name, supplementary_render.get(name))
 

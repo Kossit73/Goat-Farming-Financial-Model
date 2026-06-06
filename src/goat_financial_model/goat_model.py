@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -2008,6 +2008,489 @@ class GoatModel:
                 "Break-even Revenue": be_rev,
             }
         )
+
+    # ---------- Model audit ----------
+    @staticmethod
+    def _series_from_candidates(
+        df: pd.DataFrame, *candidates: str
+    ) -> Optional[pd.Series]:
+        for candidate in candidates:
+            if candidate in df.columns:
+                return pd.to_numeric(df[candidate], errors="coerce")
+        return None
+
+    @staticmethod
+    def _materiality_tolerance(*series: Optional[pd.Series]) -> float:
+        scale = 1.0
+        for series_item in series:
+            if series_item is None:
+                continue
+            numeric = pd.to_numeric(series_item, errors="coerce")
+            if numeric.notna().any():
+                scale = max(scale, float(numeric.abs().max()))
+        return max(1e-6, scale * 1e-4)
+
+    @staticmethod
+    def _format_audit_periods(index: pd.Index, limit: int = 3) -> str:
+        labels: List[str] = []
+        for value in list(index[:limit]):
+            if isinstance(value, pd.Timestamp):
+                labels.append(value.strftime("%Y-%m-%d"))
+            else:
+                labels.append(str(value))
+        if len(index) > limit:
+            labels.append("...")
+        return ", ".join(labels)
+
+    @staticmethod
+    def _audit_issue(
+        issues: List[Dict[str, Any]],
+        *,
+        severity: str,
+        category: str,
+        metric: str,
+        message: str,
+        reasoning: str,
+        recommendation: str,
+        periods: str = "",
+        value: Optional[float] = None,
+        threshold: Optional[float] = None,
+    ) -> None:
+        issues.append(
+            {
+                "Severity": severity,
+                "Category": category,
+                "Metric": metric,
+                "Message": message,
+                "Reasoning": reasoning,
+                "Recommendation": recommendation,
+                "Periods": periods,
+                "Value": value,
+                "Threshold": threshold,
+            }
+        )
+
+    def model_audit(
+        self, df: Optional[pd.DataFrame] = None, annual: bool = True
+    ) -> Dict[str, object]:
+        if df is None:
+            df = self.to_tidy()
+        if df is None or df.empty:
+            empty_issues = pd.DataFrame(
+                columns=[
+                    "Severity",
+                    "Category",
+                    "Metric",
+                    "Message",
+                    "Reasoning",
+                    "Recommendation",
+                    "Periods",
+                    "Value",
+                    "Threshold",
+                ]
+            )
+            return {
+                "status": "critical",
+                "score": 0,
+                "headline": "Model audit could not run because the operating schedule is empty.",
+                "summary": pd.DataFrame(
+                    [{"Status": "critical", "Critical Issues": 1, "Warnings": 0, "Info": 0}]
+                ),
+                "issues": empty_issues,
+                "reasoning": [
+                    "The model has no time-series data, so statements, cash flow, and valuation cannot be validated."
+                ],
+            }
+
+        work = df.copy()
+        issues: List[Dict[str, Any]] = []
+
+        def _check_reconciliation(
+            *,
+            metric: str,
+            lhs: Optional[pd.Series],
+            rhs: Optional[pd.Series],
+            message: str,
+            reasoning: str,
+            recommendation: str,
+            severity: str = "Critical",
+        ) -> None:
+            if lhs is None or rhs is None:
+                return
+            lhs_aligned, rhs_aligned = lhs.align(rhs, join="inner")
+            valid = lhs_aligned.notna() & rhs_aligned.notna()
+            if not valid.any():
+                return
+            residual = lhs_aligned[valid] - rhs_aligned[valid]
+            tolerance = self._materiality_tolerance(lhs_aligned[valid], rhs_aligned[valid])
+            breaches = residual.abs() > tolerance
+            if breaches.any():
+                self._audit_issue(
+                    issues,
+                    severity=severity,
+                    category="Reconciliation",
+                    metric=metric,
+                    message=message,
+                    reasoning=reasoning,
+                    recommendation=recommendation,
+                    periods=self._format_audit_periods(residual.index[breaches]),
+                    value=float(residual.abs()[breaches].max()),
+                    threshold=tolerance,
+                )
+
+        revenue = self._series_from_candidates(work, "Revenue_adj", "Revenue")
+        cogs = self._series_from_candidates(work, "COGS_adj", "COGS")
+        gross_margin = self._series_from_candidates(
+            work, "Gross Margin_adj", "Gross Margin"
+        )
+        ebitda = self._series_from_candidates(work, "EBITDA_adj", "EBITDA")
+        depreciation = self._series_from_candidates(
+            work,
+            "Depreciation & Amortization_adj",
+            "Depreciation & Amortization",
+            "Depreciation",
+        )
+        ebit = self._series_from_candidates(work, "EBIT_adj", "EBIT")
+        interest = self._series_from_candidates(
+            work, "Interest Expense_adj", "Interest Expense"
+        )
+        npbt = self._series_from_candidates(work, "NPBT_adj", "NPBT")
+        tax = self._series_from_candidates(work, "Tax Expense_adj", "Tax Expense")
+        npat = self._series_from_candidates(work, "NPAT_adj", "NPAT")
+        cfo = self._series_from_candidates(work, "CFO_adj", "CFO")
+        cfi = self._series_from_candidates(work, "CFI_adj", "CFI")
+        cff = self._series_from_candidates(work, "CFF_adj", "CFF")
+        net_cash_flow = self._series_from_candidates(
+            work, "Net Cash Flow_adj", "Net Cash Flow"
+        )
+        opening_cash = self._series_from_candidates(
+            work, "Opening Cash Balance_adj", "Opening Cash Balance"
+        )
+        closing_cash = self._series_from_candidates(
+            work,
+            "Closing Cash Balance_adj",
+            "Cash and Cash Equivalents_adj",
+            "Closing Cash Balance",
+            "Cash and Cash Equivalents",
+        )
+        current_assets = self._series_from_candidates(
+            work, "Current Assets_adj", "Current Assets"
+        )
+        non_current_assets = self._series_from_candidates(
+            work, "Non-current Assets_adj", "Non-current Assets"
+        )
+        current_liabilities = self._series_from_candidates(
+            work, "Current Liabilities_adj", "Current Liabilities"
+        )
+        non_current_liabilities = self._series_from_candidates(
+            work, "Non-current Liabilities_adj", "Non-current Liabilities"
+        )
+        equity = self._series_from_candidates(work, "Equity_adj", "Equity")
+
+        _check_reconciliation(
+            metric="Gross Margin",
+            lhs=gross_margin,
+            rhs=revenue.subtract(cogs, fill_value=np.nan)
+            if revenue is not None and cogs is not None
+            else None,
+            message="Gross margin does not reconcile to revenue minus COGS.",
+            reasoning="This indicates the operating profit build is internally inconsistent, so downstream EBITDA and valuation metrics may be unreliable.",
+            recommendation="Inspect the revenue, COGS, and gross margin series for manual overrides or missing mapping.",
+        )
+        _check_reconciliation(
+            metric="EBIT",
+            lhs=ebit,
+            rhs=ebitda.subtract(depreciation, fill_value=np.nan)
+            if ebitda is not None and depreciation is not None
+            else None,
+            message="EBIT does not reconcile to EBITDA less depreciation and amortization.",
+            reasoning="The operating earnings bridge is broken, so profitability ratios and tax calculations can drift away from the model structure.",
+            recommendation="Review EBITDA, depreciation, and EBIT lines for duplicate or missing expense treatment.",
+        )
+        _check_reconciliation(
+            metric="NPBT",
+            lhs=npbt,
+            rhs=ebit.subtract(interest, fill_value=np.nan)
+            if ebit is not None and interest is not None
+            else None,
+            message="Profit before tax does not reconcile to EBIT less interest expense.",
+            reasoning="Financing charges are not flowing cleanly into pre-tax profit, which can distort both tax and investor-return outputs.",
+            recommendation="Check interest expense sourcing and any manual NPBT overrides.",
+        )
+        _check_reconciliation(
+            metric="NPAT",
+            lhs=npat,
+            rhs=npbt.subtract(tax, fill_value=np.nan)
+            if npbt is not None and tax is not None
+            else None,
+            message="Net profit after tax does not reconcile to pre-tax profit less tax expense.",
+            reasoning="After-tax profitability is inconsistent, so retained earnings and valuation metrics may not represent the modeled economics.",
+            recommendation="Review tax expense logic and any direct NPAT inputs.",
+        )
+        _check_reconciliation(
+            metric="Net Cash Flow",
+            lhs=net_cash_flow,
+            rhs=(cfo + cfi + cff) if cfo is not None and cfi is not None and cff is not None else None,
+            message="Net cash flow does not reconcile to CFO plus CFI plus CFF.",
+            reasoning="Cash flow statement sections are not summing to the reported net movement in cash, which breaks liquidity analysis.",
+            recommendation="Inspect the operating, investing, and financing cash flow lines for missing adjustments or sign errors.",
+        )
+        _check_reconciliation(
+            metric="Closing Cash",
+            lhs=closing_cash,
+            rhs=opening_cash.add(net_cash_flow, fill_value=np.nan)
+            if opening_cash is not None and net_cash_flow is not None
+            else None,
+            message="Closing cash does not reconcile to opening cash plus net cash flow.",
+            reasoning="The cash roll-forward is broken, so balance-sheet liquidity and funding headroom cannot be trusted.",
+            recommendation="Review opening cash, cash flow totals, and any direct closing-cash overrides.",
+        )
+        _check_reconciliation(
+            metric="Balance Sheet",
+            lhs=current_assets.add(non_current_assets, fill_value=np.nan)
+            if current_assets is not None and non_current_assets is not None
+            else None,
+            rhs=current_liabilities.add(non_current_liabilities, fill_value=np.nan).add(
+                equity, fill_value=np.nan
+            )
+            if current_liabilities is not None
+            and non_current_liabilities is not None
+            and equity is not None
+            else None,
+            message="The balance sheet does not balance between assets and equity plus liabilities.",
+            reasoning="This is a core structural model error; valuation, leverage, and liquidity outputs should be treated as unreliable until the balance sheet balances.",
+            recommendation="Check asset, liability, and equity roll-forwards, especially cash and financing schedules.",
+        )
+
+        if closing_cash is not None and closing_cash.notna().any():
+            negative_cash = closing_cash < -self._materiality_tolerance(closing_cash)
+            if negative_cash.any():
+                self._audit_issue(
+                    issues,
+                    severity="Warning",
+                    category="Liquidity",
+                    metric="Closing Cash",
+                    message="Closing cash turns negative in one or more periods.",
+                    reasoning="The model indicates a funding gap, so the operation cannot sustain its planned cash outflows without additional financing or working-capital improvement.",
+                    recommendation="Add funding, reduce capex or costs, or revise operating assumptions to restore positive cash coverage.",
+                    periods=self._format_audit_periods(closing_cash.index[negative_cash]),
+                    value=float(closing_cash[negative_cash].min()),
+                    threshold=0.0,
+                )
+
+        if revenue is not None and gross_margin is not None:
+            gross_margin_pct = self._safe_divide(gross_margin, revenue)
+            if gross_margin_pct.notna().any():
+                excessive = gross_margin_pct > 1.0 + 1e-6
+                negative = gross_margin_pct < -1.0 - 1e-6
+                if excessive.any():
+                    self._audit_issue(
+                        issues,
+                        severity="Warning",
+                        category="Ratio",
+                        metric="Gross Margin %",
+                        message="Gross margin exceeds 100% in one or more periods.",
+                        reasoning="This usually means COGS is negative or revenue/gross-profit mapping is broken, which is rarely economically valid for this operating model.",
+                        recommendation="Review pricing, production, and COGS inputs for sign or linkage errors.",
+                        periods=self._format_audit_periods(gross_margin_pct.index[excessive]),
+                        value=float(gross_margin_pct[excessive].max()),
+                        threshold=1.0,
+                    )
+                if negative.any():
+                    self._audit_issue(
+                        issues,
+                        severity="Info",
+                        category="Ratio",
+                        metric="Gross Margin %",
+                        message="Gross margin is worse than -100% in one or more periods.",
+                        reasoning="The model is showing losses materially larger than revenue, which may be possible under stress but usually merits assumption review.",
+                        recommendation="Inspect pricing and variable-cost assumptions for severe downside or bad input mapping.",
+                        periods=self._format_audit_periods(gross_margin_pct.index[negative]),
+                        value=float(gross_margin_pct[negative].min()),
+                        threshold=-1.0,
+                    )
+
+        valuation_summary = self.valuation_summary(work)
+        discount_rate = self._valuation_rate()
+        terminal_growth_rate = self._terminal_growth_rate()
+        enterprise_value = pd.to_numeric(
+            pd.Series([valuation_summary.get("enterprise_value")]), errors="coerce"
+        ).iloc[0]
+        terminal_value_pv = pd.to_numeric(
+            pd.Series([valuation_summary.get("terminal_value_pv")]), errors="coerce"
+        ).iloc[0]
+        irr_value = pd.to_numeric(
+            pd.Series([valuation_summary.get("irr")]), errors="coerce"
+        ).iloc[0]
+
+        if self.wacc() is None:
+            self._audit_issue(
+                issues,
+                severity="Info",
+                category="Valuation",
+                metric="WACC",
+                message="WACC is not explicitly set, so the model is using the internal default discount rate.",
+                reasoning="Valuation still computes, but investor-return outputs may not reflect the intended capital cost assumptions.",
+                recommendation="Set WACC in the valuation inputs if you want valuation to reflect a specific hurdle rate.",
+            )
+        if (
+            discount_rate is not None
+            and terminal_growth_rate is not None
+            and float(discount_rate) <= float(terminal_growth_rate) + 1e-9
+        ):
+            self._audit_issue(
+                issues,
+                severity="Critical",
+                category="Valuation",
+                metric="Terminal Growth Rate",
+                message="Terminal growth is at or above the discount rate.",
+                reasoning="That assumption makes a perpetuity valuation structurally unstable and can overstate enterprise value.",
+                recommendation="Set terminal growth below WACC to keep the DCF mathematically and economically credible.",
+                value=float(terminal_growth_rate),
+                threshold=float(discount_rate),
+            )
+        if pd.notna(enterprise_value) and enterprise_value <= 0:
+            self._audit_issue(
+                issues,
+                severity="Warning",
+                category="Valuation",
+                metric="Enterprise Value",
+                message="Computed enterprise value is non-positive.",
+                reasoning="The current free-cash-flow profile does not support positive economic value under the modeled assumptions.",
+                recommendation="Review profitability, capex, working-capital, and discount-rate assumptions.",
+                value=float(enterprise_value),
+                threshold=0.0,
+            )
+        if (
+            pd.notna(enterprise_value)
+            and enterprise_value > 0
+            and pd.notna(terminal_value_pv)
+        ):
+            terminal_share = float(terminal_value_pv / enterprise_value)
+            if terminal_share > 0.85:
+                self._audit_issue(
+                    issues,
+                    severity="Warning",
+                    category="Valuation",
+                    metric="Terminal Value Share",
+                    message="Terminal value drives more than 85% of enterprise value.",
+                    reasoning="The valuation is highly back-loaded, so small changes in long-run growth or discount rate can move NPV materially.",
+                    recommendation="Stress-test WACC, terminal growth, and near-term cash generation to reduce valuation concentration in the terminal period.",
+                    value=terminal_share,
+                    threshold=0.85,
+                )
+        if pd.isna(irr_value):
+            self._audit_issue(
+                issues,
+                severity="Info",
+                category="Valuation",
+                metric="IRR",
+                message="IRR could not be solved from the current unlevered cash-flow profile.",
+                reasoning="This usually means the cash flows do not cross the zero-NPV threshold within a reasonable discount-rate range or remain one-sided in sign.",
+                recommendation="Review the UFCF profile, terminal value assumptions, and whether the project ever recovers its initial investment.",
+            )
+
+        debt_capacity = self.debt_capacity_schedule(work, annual=annual)
+        if not debt_capacity.empty:
+            if "Covenant Breach" in debt_capacity.columns:
+                breaches = debt_capacity["Covenant Breach"].fillna(False).astype(bool)
+                if breaches.any():
+                    self._audit_issue(
+                        issues,
+                        severity="Warning",
+                        category="Financing",
+                        metric="Covenant Breach",
+                        message="One or more debt covenant periods are breached.",
+                        reasoning="The forecast violates lender protection thresholds, which implies refinancing risk or a need for remedial funding action.",
+                        recommendation="Review debt sizing, repayment profile, cash generation, and reserve assumptions.",
+                        periods=self._format_audit_periods(debt_capacity.index[breaches]),
+                        value=float(breaches.sum()),
+                        threshold=0.0,
+                    )
+            if "DSCR" in debt_capacity.columns:
+                dscr = pd.to_numeric(debt_capacity["DSCR"], errors="coerce")
+                weak_dscr = dscr < 1.0 - 1e-6
+                if weak_dscr.any():
+                    self._audit_issue(
+                        issues,
+                        severity="Warning",
+                        category="Financing",
+                        metric="DSCR",
+                        message="Debt service coverage falls below 1.0x in one or more periods.",
+                        reasoning="Operating cash flow is insufficient to cover scheduled debt service, signaling structural debt stress.",
+                        recommendation="Restructure debt service, increase cash generation, or add equity support.",
+                        periods=self._format_audit_periods(dscr.index[weak_dscr]),
+                        value=float(dscr[weak_dscr].min()),
+                        threshold=1.0,
+                    )
+
+        severity_order = {"Critical": 0, "Warning": 1, "Info": 2}
+        issues_df = pd.DataFrame(issues)
+        if not issues_df.empty:
+            issues_df["Severity Rank"] = issues_df["Severity"].map(severity_order).fillna(99)
+            issues_df = issues_df.sort_values(
+                ["Severity Rank", "Category", "Metric"], kind="stable"
+            ).drop(columns=["Severity Rank"])
+
+        critical_count = int((issues_df["Severity"] == "Critical").sum()) if not issues_df.empty else 0
+        warning_count = int((issues_df["Severity"] == "Warning").sum()) if not issues_df.empty else 0
+        info_count = int((issues_df["Severity"] == "Info").sum()) if not issues_df.empty else 0
+
+        if critical_count > 0:
+            status = "critical"
+            headline = (
+                f"Model audit found {critical_count} critical issue(s) and {warning_count} warning(s)."
+            )
+        elif warning_count > 0:
+            status = "warning"
+            headline = f"Model audit found {warning_count} warning(s)."
+        else:
+            status = "pass"
+            headline = "Model audit found no material structural issues."
+
+        score = max(0, 100 - critical_count * 35 - warning_count * 10 - info_count * 3)
+        reasoning_notes: List[str] = []
+        if critical_count:
+            reasoning_notes.append(
+                "Core reconciliations or valuation assumptions are broken, so headline outputs should be reviewed before using the model for decisions."
+            )
+        if not issues_df.empty and (issues_df["Category"] == "Liquidity").any():
+            reasoning_notes.append(
+                "Liquidity risk is present because the cash roll-forward shows periods with insufficient cash coverage."
+            )
+        if not issues_df.empty and (issues_df["Category"] == "Financing").any():
+            reasoning_notes.append(
+                "The financing structure is under pressure because covenant headroom or debt service coverage falls below acceptable levels."
+            )
+        if not issues_df.empty and (issues_df["Category"] == "Valuation").any():
+            reasoning_notes.append(
+                "Valuation is assumption-sensitive, so NPV and IRR should be interpreted alongside the terminal-value and discount-rate diagnostics."
+            )
+        if not reasoning_notes:
+            reasoning_notes.append(
+                "The model is internally coherent on the tested checks, so the key statements, cash flow, and valuation outputs reconcile."
+            )
+
+        summary = pd.DataFrame(
+            [
+                {
+                    "Status": status,
+                    "Score": score,
+                    "Critical Issues": critical_count,
+                    "Warnings": warning_count,
+                    "Info": info_count,
+                }
+            ]
+        )
+
+        return {
+            "status": status,
+            "score": score,
+            "headline": headline,
+            "summary": summary,
+            "issues": issues_df,
+            "reasoning": reasoning_notes,
+        }
 
     # ---------- Financial statements ----------
     def _aggregate(self, df: pd.DataFrame, annual: bool) -> pd.DataFrame:

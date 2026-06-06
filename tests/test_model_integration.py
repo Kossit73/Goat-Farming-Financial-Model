@@ -353,6 +353,47 @@ def test_discounted_cash_flow_irr_matches_explicit_cash_flows():
     assert summary["irr"] == pytest.approx(expected_irr, rel=1e-6)
 
 
+def test_model_audit_returns_structured_results():
+    model = _build_model()
+
+    audit = model.model_audit()
+
+    assert {"status", "score", "headline", "summary", "issues", "reasoning"}.issubset(
+        audit.keys()
+    )
+    assert isinstance(audit["summary"], pd.DataFrame)
+    assert isinstance(audit["issues"], pd.DataFrame)
+    assert isinstance(audit["reasoning"], list)
+
+
+def test_model_audit_detects_reconciliation_and_valuation_errors():
+    schedule = _build_sample_schedule()
+    schedule["Gross Margin"] = schedule["Gross Margin"] + 500.0
+    schedule["Closing Cash Balance"] = schedule["Closing Cash Balance"] + 2000.0
+
+    model = InputSchedule(
+        data=schedule,
+        valuation_inputs={"WACC": 0.02, "Terminal Growth Rate": 0.03},
+    ).to_model()
+
+    audit = model.model_audit()
+    issues = audit["issues"]
+
+    assert audit["status"] == "critical"
+    assert not issues.empty
+    assert (
+        (issues["Category"] == "Reconciliation") & (issues["Metric"] == "Gross Margin")
+    ).any()
+    assert (
+        (issues["Category"] == "Reconciliation") & (issues["Metric"] == "Closing Cash")
+    ).any()
+    assert (
+        (issues["Category"] == "Valuation")
+        & (issues["Metric"] == "Terminal Growth Rate")
+    ).any()
+    assert any("structurally unstable" in str(note).lower() for note in issues["Reasoning"])
+
+
 def test_execute_scenario_suite_runs_presets():
     schedule = _build_sample_schedule()
     suite = streamlit_app._build_scenario_suite()
@@ -373,7 +414,9 @@ def test_execute_scenario_suite_runs_presets():
 
     for payload in results.values():
         assert "scenario" in payload
+        assert "model_audit" in payload
         assert "Revenue_adj" in payload["scenario"].columns
+        assert "Model Audit Summary" in payload["supplementary"]
 
 
 def test_loan_facilities_drive_tidy_schedule_and_debt_schedule():
