@@ -34,6 +34,13 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from goat_financial_model import GoatModel, InputSchedule
+from goat_financial_model.assumption_bundle import AssumptionBundle, build_assumption_bundle
+from goat_financial_model.editor_registry import ScheduleEditorSpec, render_incremental_schedule_editor
+from goat_financial_model.pages.assumptions_page import BiologicalEditorDefinition, render_biological_assumption_editor
+from goat_financial_model.pages.input_schedule_page import render_schedule_summary
+from goat_financial_model.pricing_engine import build_pricing_context, derive_pricing_quantities
+from goat_financial_model.scenario_runner import ScenarioOutputSpec, collect_supplementary_outputs
+from goat_financial_model.table_registry import ColumnSchema, TableSchema, build_default_table, ensure_table
 
 
 try:
@@ -2080,6 +2087,20 @@ def _scenario_viability_table(
     return comparison.set_index("Scenario")
 
 
+def _scenario_output_specs() -> list[ScenarioOutputSpec]:
+    return [
+        ScenarioOutputSpec("Outputs", lambda ctx: _dynamic_outputs_table(ctx["model"], ctx["scenario_df"])),
+        ScenarioOutputSpec("Benchmark KPIs", lambda ctx: _dynamic_benchmark_kpis_table(ctx["scenario_kpis"])),
+        ScenarioOutputSpec("Debt Schedule", lambda ctx: ctx["debt_schedule_annual"]),
+        ScenarioOutputSpec("Equity Schedule", lambda ctx: ctx["equity_schedule_annual"]),
+        ScenarioOutputSpec("Working Capital Schedule", lambda ctx: ctx["working_capital_annual"]),
+        ScenarioOutputSpec("Debt Capacity Schedule", lambda ctx: ctx["debt_capacity_annual"]),
+        ScenarioOutputSpec("UFCF Schedule", lambda ctx: ctx["ufcf_annual"]),
+        ScenarioOutputSpec("Model Audit Summary", lambda ctx: ctx["model_audit"].get("summary")),
+        ScenarioOutputSpec("Model Audit Findings", lambda ctx: ctx["model_audit"].get("issues")),
+    ]
+
+
 def _execute_scenario_suite(
     schedule_df: pd.DataFrame,
     valuation_inputs: Dict[str, float],
@@ -2186,31 +2207,23 @@ def _execute_scenario_suite(
         debt_capacity_annual = scenario_model.debt_capacity_schedule(scenario_df, annual=True)
         ufcf_detail = scenario_model.ufcf_schedule(scenario_df, annual=False)
         ufcf_annual = scenario_model.ufcf_schedule(scenario_df, annual=True)
-        outputs_table = _dynamic_outputs_table(scenario_model, scenario_df)
-        if not outputs_table.empty:
-            scenario_supplementary["Outputs"] = outputs_table
-        benchmark_table = _dynamic_benchmark_kpis_table(scenario_kpis)
-        if not benchmark_table.empty:
-            scenario_supplementary["Benchmark KPIs"] = benchmark_table
-        if not debt_schedule_annual.empty:
-            scenario_supplementary["Debt Schedule"] = debt_schedule_annual
-        if not equity_schedule_annual.empty:
-            scenario_supplementary["Equity Schedule"] = equity_schedule_annual
-        if not working_capital_annual.empty:
-            scenario_supplementary["Working Capital Schedule"] = working_capital_annual
-        if not debt_capacity_annual.empty:
-            scenario_supplementary["Debt Capacity Schedule"] = debt_capacity_annual
-        if not ufcf_annual.empty:
-            scenario_supplementary["UFCF Schedule"] = ufcf_annual
+        scenario_output_context = {
+            "model": scenario_model,
+            "scenario_df": scenario_df,
+            "scenario_kpis": scenario_kpis,
+            "debt_schedule_annual": debt_schedule_annual,
+            "equity_schedule_annual": equity_schedule_annual,
+            "working_capital_annual": working_capital_annual,
+            "debt_capacity_annual": debt_capacity_annual,
+            "ufcf_annual": ufcf_annual,
+            "model_audit": model_audit,
+        }
+        scenario_supplementary.update(
+            collect_supplementary_outputs(_scenario_output_specs(), scenario_output_context)
+        )
         for schedule_name, biological_table in biological_bundle.items():
             if isinstance(biological_table, pd.DataFrame) and not biological_table.empty:
                 scenario_supplementary[schedule_name] = biological_table
-        audit_summary = model_audit.get("summary")
-        if isinstance(audit_summary, pd.DataFrame) and not audit_summary.empty:
-            scenario_supplementary["Model Audit Summary"] = audit_summary
-        audit_issues = model_audit.get("issues")
-        if isinstance(audit_issues, pd.DataFrame) and not audit_issues.empty:
-            scenario_supplementary["Model Audit Findings"] = audit_issues
         if not scenario_pricing.empty:
             scenario_supplementary["Commercial Revenue by Product"] = _pricing_family_summary(
                 scenario_pricing
@@ -3181,54 +3194,36 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
 ]
 
 
-def _default_biological_system_settings_table() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_BIOLOGICAL_SYSTEM_SETTINGS)
-
-
-def _ensure_biological_system_settings_table(
-    table: Optional[pd.DataFrame],
+def _merge_missing_default_rows(
+    table: pd.DataFrame,
+    default_rows: Sequence[dict[str, Any]],
+    key_field: str,
 ) -> pd.DataFrame:
-    if table is None or table.empty:
-        work = _default_biological_system_settings_table()
-    else:
-        work = table.copy()
+    work = table.copy()
+    existing = {
+        str(row.get(key_field, "")).strip().casefold()
+        for _, row in work.iterrows()
+        if str(row.get(key_field, "")).strip()
+    }
+    for row in default_rows:
+        if str(row[key_field]).strip().casefold() not in existing:
+            work = pd.concat([work, pd.DataFrame([row])], ignore_index=True)
+    return work
 
+
+def _normalize_biological_system_settings_table(table: pd.DataFrame) -> pd.DataFrame:
+    work = table.copy()
     for column in ["Setting", "Value"]:
         if column not in work.columns:
             work[column] = ""
     work["Setting"] = work.get("Setting", "").astype(str).str.strip()
     work["Value"] = work.get("Value", "").astype(str).str.strip()
     work.loc[work["Setting"] == "", "Setting"] = "Setting"
-
-    existing = {
-        str(row.get("Setting", "")).strip().casefold()
-        for _, row in work.iterrows()
-        if str(row.get("Setting", "")).strip()
-    }
-    for row in DEFAULT_BIOLOGICAL_SYSTEM_SETTINGS:
-        if str(row["Setting"]).casefold() not in existing:
-            work = pd.concat([work, pd.DataFrame([row])], ignore_index=True)
-
-    return work[["Setting", "Value"]].reset_index(drop=True)
+    return _merge_missing_default_rows(work, DEFAULT_BIOLOGICAL_SYSTEM_SETTINGS, "Setting")
 
 
-def _default_breeding_reproduction_biology_table() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_BREEDING_REPRODUCTION_ROWS)
-
-
-def _ensure_breeding_reproduction_biology_table(
-    table: Optional[pd.DataFrame],
-) -> pd.DataFrame:
-    if table is None or table.empty:
-        work = _default_breeding_reproduction_biology_table()
-    else:
-        work = table.copy()
-
-    defaults = _default_breeding_reproduction_biology_table()
-    for column in defaults.columns:
-        if column not in work.columns:
-            work[column] = defaults.iloc[0][column]
-
+def _normalize_breeding_reproduction_biology_table(table: pd.DataFrame) -> pd.DataFrame:
+    work = table.copy()
     work["Breeding Group"] = work.get("Breeding Group", "").fillna("").astype(str).str.strip()
     work.loc[work["Breeding Group"] == "", "Breeding Group"] = "Breeding Group"
     for column in [
@@ -3246,27 +3241,11 @@ def _ensure_breeding_reproduction_biology_table(
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
     work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
-
-    ordered = list(defaults.columns)
-    remainder = [column for column in work.columns if column not in ordered]
-    return work[ordered + remainder].reset_index(drop=True)
+    return work
 
 
-def _default_lactation_biology_table() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_LACTATION_BIOLOGY_ROWS)
-
-
-def _ensure_lactation_biology_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
-    if table is None or table.empty:
-        work = _default_lactation_biology_table()
-    else:
-        work = table.copy()
-
-    defaults = _default_lactation_biology_table()
-    for column in defaults.columns:
-        if column not in work.columns:
-            work[column] = defaults.iloc[0][column]
-
+def _normalize_lactation_biology_table(table: pd.DataFrame) -> pd.DataFrame:
+    work = table.copy()
     work["Parity Group"] = work.get("Parity Group", "").fillna("").astype(str).str.strip()
     work.loc[work["Parity Group"] == "", "Parity Group"] = "1"
     for column in [
@@ -3281,29 +3260,11 @@ def _ensure_lactation_biology_table(table: Optional[pd.DataFrame]) -> pd.DataFra
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
     work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
-
-    ordered = list(defaults.columns)
-    remainder = [column for column in work.columns if column not in ordered]
-    return work[ordered + remainder].reset_index(drop=True)
+    return work
 
 
-def _default_finishing_slaughter_biology_table() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_FINISHING_SLAUGHTER_ROWS)
-
-
-def _ensure_finishing_slaughter_biology_table(
-    table: Optional[pd.DataFrame],
-) -> pd.DataFrame:
-    if table is None or table.empty:
-        work = _default_finishing_slaughter_biology_table()
-    else:
-        work = table.copy()
-
-    defaults = _default_finishing_slaughter_biology_table()
-    for column in defaults.columns:
-        if column not in work.columns:
-            work[column] = defaults.iloc[0][column]
-
+def _normalize_finishing_slaughter_biology_table(table: pd.DataFrame) -> pd.DataFrame:
+    work = table.copy()
     work["Product Group"] = work.get("Product Group", "").fillna("").astype(str).str.strip()
     work.loc[work["Product Group"] == "", "Product Group"] = "Default Livestock Stream"
     for column in [
@@ -3321,89 +3282,36 @@ def _ensure_finishing_slaughter_biology_table(
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
     work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
-
-    ordered = list(defaults.columns)
-    remainder = [column for column in work.columns if column not in ordered]
-    return work[ordered + remainder].reset_index(drop=True)
+    return work
 
 
-def _default_opening_herd_cohorts_table() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_OPENING_HERD_COHORTS)
-
-
-def _ensure_opening_herd_cohorts_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
-    if table is None or table.empty:
-        work = _default_opening_herd_cohorts_table()
-    else:
-        work = table.copy()
-
-    defaults = _default_opening_herd_cohorts_table()
-    for column in defaults.columns:
-        if column not in work.columns:
-            work[column] = defaults.iloc[0][column]
-
+def _normalize_opening_herd_cohorts_table(table: pd.DataFrame) -> pd.DataFrame:
+    work = table.copy()
     for column in ["Cohort ID", "Sex", "Purpose"]:
         work[column] = work[column].fillna("").astype(str).str.strip()
     work.loc[work["Cohort ID"] == "", "Cohort ID"] = "COHORT"
     work.loc[work["Sex"] == "", "Sex"] = "Female"
     work.loc[work["Purpose"] == "", "Purpose"] = "replacement_doe"
-
     for column in ["Age in Months", "Head Count", "Parity", "Days in Milk"]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
     work["Pregnant"] = work.get("Pregnant", False).map(lambda value: _coerce_bool_value(value, False))
     work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
-
-    ordered = list(defaults.columns)
-    remainder = [column for column in work.columns if column not in ordered]
-    return work[ordered + remainder].reset_index(drop=True)
+    return work
 
 
-def _default_cohort_allocation_rules_table() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_COHORT_ALLOCATION_RULES)
-
-
-def _ensure_cohort_allocation_rules_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
-    if table is None or table.empty:
-        work = _default_cohort_allocation_rules_table()
-    else:
-        work = table.copy()
-
+def _normalize_cohort_allocation_rules_table(table: pd.DataFrame) -> pd.DataFrame:
+    work = table.copy()
     for column in ["Rule", "Value"]:
         if column not in work.columns:
             work[column] = np.nan
     work["Rule"] = work.get("Rule", "").astype(str).str.strip()
     work.loc[work["Rule"] == "", "Rule"] = "Rule"
     work["Value"] = pd.to_numeric(work.get("Value"), errors="coerce")
-
-    existing = {
-        str(row.get("Rule", "")).strip().casefold()
-        for _, row in work.iterrows()
-        if str(row.get("Rule", "")).strip()
-    }
-    for row in DEFAULT_COHORT_ALLOCATION_RULES:
-        if str(row["Rule"]).casefold() not in existing:
-            work = pd.concat([work, pd.DataFrame([row])], ignore_index=True)
-
-    return work[["Rule", "Value"]].reset_index(drop=True)
+    return _merge_missing_default_rows(work, DEFAULT_COHORT_ALLOCATION_RULES, "Rule")
 
 
-def _default_biological_cost_drivers_table() -> pd.DataFrame:
-    return pd.DataFrame(DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS)
-
-
-def _ensure_biological_cost_drivers_table(
-    table: Optional[pd.DataFrame],
-) -> pd.DataFrame:
-    if table is None or table.empty:
-        work = _default_biological_cost_drivers_table()
-    else:
-        work = table.copy()
-
-    defaults = _default_biological_cost_drivers_table()
-    for column in defaults.columns:
-        if column not in work.columns:
-            work[column] = defaults.iloc[0][column]
-
+def _normalize_biological_cost_drivers_table(table: pd.DataFrame) -> pd.DataFrame:
+    work = table.copy()
     for column in ["Field", "Category", "Applies To"]:
         work[column] = work.get(column, "").fillna("").astype(str).str.strip()
     work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
@@ -3415,10 +3323,133 @@ def _ensure_biological_cost_drivers_table(
     )
     work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
     work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+    return work
 
-    ordered = list(defaults.columns)
-    remainder = [column for column in work.columns if column not in ordered]
-    return work[ordered + remainder].reset_index(drop=True)
+
+BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA = TableSchema(
+    name="Biological System Settings",
+    columns=(
+        ColumnSchema("Setting", ""),
+        ColumnSchema("Value", ""),
+    ),
+    default_rows=tuple(DEFAULT_BIOLOGICAL_SYSTEM_SETTINGS),
+    normalizer=_normalize_biological_system_settings_table,
+)
+
+
+BREEDING_REPRODUCTION_BIOLOGY_SCHEMA = TableSchema(
+    name="Breeding & Reproduction Biology",
+    columns=tuple(ColumnSchema(column, value) for column, value in DEFAULT_BREEDING_REPRODUCTION_ROWS[0].items()),
+    default_rows=tuple(DEFAULT_BREEDING_REPRODUCTION_ROWS),
+    normalizer=_normalize_breeding_reproduction_biology_table,
+)
+
+
+LACTATION_BIOLOGY_SCHEMA = TableSchema(
+    name="Lactation Biology",
+    columns=tuple(ColumnSchema(column, value) for column, value in DEFAULT_LACTATION_BIOLOGY_ROWS[0].items()),
+    default_rows=tuple(DEFAULT_LACTATION_BIOLOGY_ROWS),
+    normalizer=_normalize_lactation_biology_table,
+)
+
+
+FINISHING_SLAUGHTER_BIOLOGY_SCHEMA = TableSchema(
+    name="Finishing & Slaughter Biology",
+    columns=tuple(ColumnSchema(column, value) for column, value in DEFAULT_FINISHING_SLAUGHTER_ROWS[0].items()),
+    default_rows=tuple(DEFAULT_FINISHING_SLAUGHTER_ROWS),
+    normalizer=_normalize_finishing_slaughter_biology_table,
+)
+
+
+OPENING_HERD_COHORTS_SCHEMA = TableSchema(
+    name="Opening Herd Cohorts",
+    columns=tuple(ColumnSchema(column, value) for column, value in DEFAULT_OPENING_HERD_COHORTS[0].items()),
+    default_rows=tuple(DEFAULT_OPENING_HERD_COHORTS),
+    normalizer=_normalize_opening_herd_cohorts_table,
+)
+
+
+COHORT_ALLOCATION_RULES_SCHEMA = TableSchema(
+    name="Cohort Allocation Rules",
+    columns=(
+        ColumnSchema("Rule", ""),
+        ColumnSchema("Value", np.nan),
+    ),
+    default_rows=tuple(DEFAULT_COHORT_ALLOCATION_RULES),
+    normalizer=_normalize_cohort_allocation_rules_table,
+)
+
+
+BIOLOGICAL_COST_DRIVERS_SCHEMA = TableSchema(
+    name="Biological Cost Drivers",
+    columns=tuple(ColumnSchema(column, value) for column, value in DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS[0].items()),
+    default_rows=tuple(DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS),
+    normalizer=_normalize_biological_cost_drivers_table,
+)
+
+
+def _default_biological_system_settings_table() -> pd.DataFrame:
+    return build_default_table(BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA)
+
+
+def _ensure_biological_system_settings_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    return ensure_table(BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA, table)
+
+
+def _default_breeding_reproduction_biology_table() -> pd.DataFrame:
+    return build_default_table(BREEDING_REPRODUCTION_BIOLOGY_SCHEMA)
+
+
+def _ensure_breeding_reproduction_biology_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    return ensure_table(BREEDING_REPRODUCTION_BIOLOGY_SCHEMA, table)
+
+
+def _default_lactation_biology_table() -> pd.DataFrame:
+    return build_default_table(LACTATION_BIOLOGY_SCHEMA)
+
+
+def _ensure_lactation_biology_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    return ensure_table(LACTATION_BIOLOGY_SCHEMA, table)
+
+
+def _default_finishing_slaughter_biology_table() -> pd.DataFrame:
+    return build_default_table(FINISHING_SLAUGHTER_BIOLOGY_SCHEMA)
+
+
+def _ensure_finishing_slaughter_biology_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    return ensure_table(FINISHING_SLAUGHTER_BIOLOGY_SCHEMA, table)
+
+
+def _default_opening_herd_cohorts_table() -> pd.DataFrame:
+    return build_default_table(OPENING_HERD_COHORTS_SCHEMA)
+
+
+def _ensure_opening_herd_cohorts_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    return ensure_table(OPENING_HERD_COHORTS_SCHEMA, table)
+
+
+def _default_cohort_allocation_rules_table() -> pd.DataFrame:
+    return build_default_table(COHORT_ALLOCATION_RULES_SCHEMA)
+
+
+def _ensure_cohort_allocation_rules_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    return ensure_table(COHORT_ALLOCATION_RULES_SCHEMA, table)
+
+
+def _default_biological_cost_drivers_table() -> pd.DataFrame:
+    return build_default_table(BIOLOGICAL_COST_DRIVERS_SCHEMA)
+
+
+def _ensure_biological_cost_drivers_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    return ensure_table(BIOLOGICAL_COST_DRIVERS_SCHEMA, table)
 
 
 def _string_to_bool(value: Any, default: bool = False) -> bool:
@@ -3430,6 +3461,31 @@ def _string_to_bool(value: Any, default: bool = False) -> bool:
     if cleaned in {"false", "0", "no", "n"}:
         return False
     return default
+
+
+def _assumption_bundle_ensure_map() -> dict[str, Callable[[Optional[pd.DataFrame]], pd.DataFrame]]:
+    return {
+        "Biological System Settings": _ensure_biological_system_settings_table,
+        "Breeding & Reproduction Biology": _ensure_breeding_reproduction_biology_table,
+        "Lactation Biology": _ensure_lactation_biology_table,
+        "Finishing & Slaughter Biology": _ensure_finishing_slaughter_biology_table,
+        "Opening Herd Cohorts": _ensure_opening_herd_cohorts_table,
+        "Cohort Allocation Rules": _ensure_cohort_allocation_rules_table,
+        "Biological Cost Drivers": _ensure_biological_cost_drivers_table,
+        "Pricing": _ensure_pricing_table,
+        "Production Drivers": _ensure_production_driver_table,
+        "Scenario Controls": _ensure_scenario_controls_table,
+        "Operating Costs": _ensure_operating_cost_table,
+        "Capital & Financing": _ensure_capital_financing_table,
+        "Loan Facilities": _ensure_loan_facilities_table,
+        "Equity Facilities": _ensure_equity_facilities_table,
+        "Valuation Inputs": _ensure_valuation_inputs_table,
+        "Herd Plan": _ensure_herd_plan_table,
+    }
+
+
+def _build_app_assumption_bundle(assumptions: Optional[dict[str, pd.DataFrame]]) -> AssumptionBundle:
+    return build_assumption_bundle(dict(assumptions or {}), _assumption_bundle_ensure_map())
 
 
 def _setting_lookup(table: Optional[pd.DataFrame]) -> Dict[str, str]:
@@ -3461,17 +3517,11 @@ def _apply_biological_scenario_shocks(
         for key, value in (assumptions or {}).items()
         if isinstance(value, pd.DataFrame)
     }
-
-    reproduction = _ensure_breeding_reproduction_biology_table(
-        shocked.get("Breeding & Reproduction Biology")
-    )
-    lactation = _ensure_lactation_biology_table(shocked.get("Lactation Biology"))
-    finishing = _ensure_finishing_slaughter_biology_table(
-        shocked.get("Finishing & Slaughter Biology")
-    )
-    allocation = _ensure_cohort_allocation_rules_table(
-        shocked.get("Cohort Allocation Rules")
-    )
+    bundle = _build_app_assumption_bundle(shocked)
+    reproduction = bundle.biological.breeding_reproduction.copy()
+    lactation = bundle.biological.lactation.copy()
+    finishing = bundle.biological.finishing_slaughter.copy()
+    allocation = bundle.biological.cohort_allocation_rules.copy()
 
     def _pct_adjust(table: pd.DataFrame, column: str, driver: str) -> None:
         if column not in table.columns:
@@ -3649,20 +3699,14 @@ def _derive_biological_schedules(
         return {}
 
     assumption_map = assumptions or {}
-    settings_lookup = _setting_lookup(assumption_map.get("Biological System Settings"))
-    rules_lookup = _rule_lookup(assumption_map.get("Cohort Allocation Rules"))
-    reproduction = _ensure_breeding_reproduction_biology_table(
-        assumption_map.get("Breeding & Reproduction Biology")
-    )
-    lactation_lookup = _build_lactation_lookup(assumption_map.get("Lactation Biology"))
-    finishing = _ensure_finishing_slaughter_biology_table(
-        assumption_map.get("Finishing & Slaughter Biology")
-    )
-    opening_cohorts = _ensure_opening_herd_cohorts_table(
-        assumption_map.get("Opening Herd Cohorts")
-    )
-    herd_plan = assumption_map.get("Herd Plan")
-    herd_plan_df = _ensure_herd_plan_table(herd_plan) if isinstance(herd_plan, pd.DataFrame) else _default_herd_plan_table()
+    bundle = _build_app_assumption_bundle(assumption_map)
+    settings_lookup = _setting_lookup(bundle.biological.system_settings)
+    rules_lookup = _rule_lookup(bundle.biological.cohort_allocation_rules)
+    reproduction = bundle.biological.breeding_reproduction
+    lactation_lookup = _build_lactation_lookup(bundle.biological.lactation)
+    finishing = bundle.biological.finishing_slaughter
+    opening_cohorts = bundle.biological.opening_herd_cohorts
+    herd_plan_df = bundle.get("Herd Plan", _default_herd_plan_table())
 
     reproduction_row = _active_first_row(reproduction, reproduction.iloc[0] if not reproduction.empty else None)
     finishing_row = _active_first_row(finishing, finishing.iloc[0] if not finishing.empty else None)
@@ -5452,28 +5496,15 @@ def _sync_commercial_assumptions_to_core(
     business_config = _ensure_business_configuration_table(synced.get("Business Configuration"))
     business_type = _selected_business_type(business_config)
     active_products = _active_products_for_business_type(business_type)
+    bundle = _build_app_assumption_bundle(synced)
     synced["Business Configuration"] = business_config
-    synced["Biological System Settings"] = _ensure_biological_system_settings_table(
-        synced.get("Biological System Settings")
-    )
-    synced["Breeding & Reproduction Biology"] = _ensure_breeding_reproduction_biology_table(
-        synced.get("Breeding & Reproduction Biology")
-    )
-    synced["Lactation Biology"] = _ensure_lactation_biology_table(
-        synced.get("Lactation Biology")
-    )
-    synced["Finishing & Slaughter Biology"] = _ensure_finishing_slaughter_biology_table(
-        synced.get("Finishing & Slaughter Biology")
-    )
-    synced["Opening Herd Cohorts"] = _ensure_opening_herd_cohorts_table(
-        synced.get("Opening Herd Cohorts")
-    )
-    synced["Cohort Allocation Rules"] = _ensure_cohort_allocation_rules_table(
-        synced.get("Cohort Allocation Rules")
-    )
-    synced["Biological Cost Drivers"] = _ensure_biological_cost_drivers_table(
-        synced.get("Biological Cost Drivers")
-    )
+    synced["Biological System Settings"] = bundle.biological.system_settings
+    synced["Breeding & Reproduction Biology"] = bundle.biological.breeding_reproduction
+    synced["Lactation Biology"] = bundle.biological.lactation
+    synced["Finishing & Slaughter Biology"] = bundle.biological.finishing_slaughter
+    synced["Opening Herd Cohorts"] = bundle.biological.opening_herd_cohorts
+    synced["Cohort Allocation Rules"] = bundle.biological.cohort_allocation_rules
+    synced["Biological Cost Drivers"] = bundle.biological.biological_cost_drivers
     synced["Production Drivers"] = _sync_production_driver_table_to_products(
         synced.get("Production Drivers"),
         active_products,
@@ -5534,205 +5565,13 @@ def _derive_pricing_quantities_from_production(
 
     work = pricing.copy()
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
-    work["Period_dt"] = pd.to_datetime(work["Period"], errors="coerce")
-    schedule_index = pd.to_datetime(schedule_df.index, errors="coerce")
-    period_days_map = dict(
-        zip(
-            schedule_index.strftime("%Y-%m-%d"),
-            _period_days_from_index(schedule_index).tolist(),
-        )
+    context = build_pricing_context(
+        schedule_df,
+        driver_lookup,
+        tuple(_PRODUCTION_DRIVER_SLAUGHTER_PRODUCTS),
     )
-    def _schedule_numeric_series(column: str) -> pd.Series:
-        series = schedule_df.get(column)
-        if series is None:
-            return pd.Series(np.nan, index=schedule_df.index, dtype=float)
-        return pd.to_numeric(series, errors="coerce")
-
-    biological_milk_map = {
-        idx.strftime("%Y-%m-%d"): float(value)
-        for idx, value in zip(
-            schedule_index,
-            _schedule_numeric_series("Milk Production (L)"),
-        )
-        if pd.notna(idx) and pd.notna(value)
-    }
-    biological_live_herd_map = {
-        idx.strftime("%Y-%m-%d"): float(value)
-        for idx, value in zip(
-            schedule_index,
-            _schedule_numeric_series("Live Herd Sales (heads)"),
-        )
-        if pd.notna(idx) and pd.notna(value)
-    }
-    biological_slaughter_map = {
-        idx.strftime("%Y-%m-%d"): float(value)
-        for idx, value in zip(
-            schedule_index,
-            _schedule_numeric_series("Slaughter Heads"),
-        )
-        if pd.notna(idx) and pd.notna(value)
-    }
-    biological_meat_map = {
-        idx.strftime("%Y-%m-%d"): float(value)
-        for idx, value in zip(
-            schedule_index,
-            _schedule_numeric_series("Meat Output Kg"),
-        )
-        if pd.notna(idx) and pd.notna(value)
-    }
-    biological_offal_map = {
-        idx.strftime("%Y-%m-%d"): float(value)
-        for idx, value in zip(
-            schedule_index,
-            _schedule_numeric_series("Offal Output Kg"),
-        )
-        if pd.notna(idx) and pd.notna(value)
-    }
-    biological_pelt_map = {
-        idx.strftime("%Y-%m-%d"): float(value)
-        for idx, value in zip(
-            schedule_index,
-            _schedule_numeric_series("Pelt Output Units"),
-        )
-        if pd.notna(idx) and pd.notna(value)
-    }
-    herd_series = schedule_df.get("Herd Size (heads)")
-    if herd_series is None:
-        herd_series = pd.Series(np.nan, index=schedule_df.index, dtype=float)
-    else:
-        herd_series = pd.to_numeric(herd_series, errors="coerce")
-    herd_map = {
-        idx.strftime("%Y-%m-%d"): float(value)
-        for idx, value in zip(
-            schedule_index,
-            herd_series,
-        )
-        if pd.notna(idx) and pd.notna(value)
-    }
-    base_year = int(schedule_index.min().year) if len(schedule_index) else pd.Timestamp.today().year
-
-    for period, period_group in work.groupby("Period", sort=False):
-        herd_size = herd_map.get(period, 0.0)
-        period_days = period_days_map.get(period, 30.44)
-        period_dt = pd.to_datetime(period, errors="coerce")
-        year_offset = max(0, int(period_dt.year) - base_year) if pd.notna(period_dt) else 0
-
-        milk_driver = driver_lookup.get("Milk", {})
-        cheese_driver = driver_lookup.get("Cheese", {})
-        milk_growth = 1 + (
-            float(pd.to_numeric(pd.Series([milk_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
-            / 100.0
-        )
-        cheese_growth = 1 + (
-            float(pd.to_numeric(pd.Series([cheese_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
-            / 100.0
-        )
-
-        lactating_share = float(
-            pd.to_numeric(pd.Series([milk_driver.get("Lactating Herd Share %")]), errors="coerce").iloc[0] or 0.0
-        ) / 100.0
-        litres_per_day = float(
-            pd.to_numeric(pd.Series([milk_driver.get("Litres per Lactating Doe per Day")]), errors="coerce").iloc[0] or 0.0
-        )
-        base_milk_output = herd_size * lactating_share * litres_per_day * period_days * (milk_growth ** year_offset)
-        biological_milk_output = biological_milk_map.get(period)
-        if pd.notna(biological_milk_output):
-            base_milk_output = float(biological_milk_output)
-
-        cheese_allocation = float(
-            pd.to_numeric(pd.Series([cheese_driver.get("Milk Allocation to Cheese %")]), errors="coerce").iloc[0] or 0.0
-        ) / 100.0
-        cheese_yield = float(
-            pd.to_numeric(pd.Series([cheese_driver.get("Cheese Yield Kg per Litre")]), errors="coerce").iloc[0] or 0.0
-        ) * (cheese_growth ** year_offset)
-
-        cheese_active = bool(
-            period_group.loc[period_group["Product"].astype(str).str.strip() == "Cheese", "Active"].fillna(False).any()
-        )
-        milk_available_for_sale = base_milk_output * (1.0 - cheese_allocation if cheese_active else 1.0)
-        cheese_milk_input = base_milk_output * cheese_allocation if cheese_active else 0.0
-
-        livestock_driver = next(
-            (driver_lookup.get(product, {}) for product in _PRODUCTION_DRIVER_SLAUGHTER_PRODUCTS if driver_lookup.get(product)),
-            {},
-        )
-        slaughter_growth = 1 + (
-            float(pd.to_numeric(pd.Series([livestock_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
-            / 100.0
-        )
-        slaughter_rate = float(
-            pd.to_numeric(
-                pd.Series([livestock_driver.get("Slaughter Rate % of Herd per Period")]),
-                errors="coerce",
-            ).iloc[0]
-            or 0.0
-        ) / 100.0
-        live_herd_share = float(
-            pd.to_numeric(
-                pd.Series([driver_lookup.get("Live Herd", livestock_driver).get("Live Herd Sales Share %")]),
-                errors="coerce",
-            ).iloc[0]
-            or 0.0
-        ) / 100.0
-        saleable_goats = herd_size * slaughter_rate * (slaughter_growth ** year_offset)
-        live_herd_units = saleable_goats * live_herd_share
-        goats_for_slaughter = max(0.0, saleable_goats - live_herd_units)
-        if period in biological_live_herd_map or period in biological_slaughter_map:
-            live_herd_units = max(0.0, float(biological_live_herd_map.get(period, 0.0)))
-            goats_for_slaughter = max(0.0, float(biological_slaughter_map.get(period, 0.0)))
-            saleable_goats = live_herd_units + goats_for_slaughter
-
-        for idx, row in period_group.iterrows():
-            product = str(row.get("Product", "")).strip()
-            quantity_mode = str(row.get("Quantity Mode", "Derived")).strip()
-            if quantity_mode == "Manual Override":
-                manual_qty = pd.to_numeric(
-                    pd.Series([row.get("Manual Quantity Override")]), errors="coerce"
-                ).iloc[0]
-                work.at[idx, "Quantity per Period"] = 0.0 if pd.isna(manual_qty) else float(manual_qty)
-                continue
-
-            active = bool(row.get("Active", False))
-            if not active:
-                work.at[idx, "Quantity per Period"] = 0.0
-                continue
-
-            if product == "Milk":
-                work.at[idx, "Quantity per Period"] = max(0.0, milk_available_for_sale)
-                continue
-            if product == "Cheese":
-                work.at[idx, "Quantity per Period"] = max(0.0, cheese_milk_input * cheese_yield)
-                continue
-
-            driver = driver_lookup.get(product, {})
-            if product == "Meat":
-                if period in biological_meat_map:
-                    work.at[idx, "Quantity per Period"] = max(0.0, float(biological_meat_map.get(period, 0.0)))
-                    continue
-                meat_yield = float(
-                    pd.to_numeric(pd.Series([driver.get("Meat Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0
-                )
-                work.at[idx, "Quantity per Period"] = max(0.0, goats_for_slaughter * meat_yield)
-            elif product == "Offal":
-                if period in biological_offal_map:
-                    work.at[idx, "Quantity per Period"] = max(0.0, float(biological_offal_map.get(period, 0.0)))
-                    continue
-                offal_yield = float(
-                    pd.to_numeric(pd.Series([driver.get("Offal Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0
-                )
-                work.at[idx, "Quantity per Period"] = max(0.0, goats_for_slaughter * offal_yield)
-            elif product == "Pelt":
-                if period in biological_pelt_map:
-                    work.at[idx, "Quantity per Period"] = max(0.0, float(biological_pelt_map.get(period, 0.0)))
-                    continue
-                pelt_units = float(
-                    pd.to_numeric(pd.Series([driver.get("Pelt Units per Goat")]), errors="coerce").iloc[0] or 0.0
-                )
-                work.at[idx, "Quantity per Period"] = max(0.0, goats_for_slaughter * pelt_units)
-            elif product == "Live Herd":
-                work.at[idx, "Quantity per Period"] = max(0.0, live_herd_units)
-
-    return _ensure_pricing_table(work.drop(columns="Period_dt"))
+    derived = derive_pricing_quantities(work, context)
+    return _ensure_pricing_table(derived)
 
 
 def _pricing_schedule_context(
@@ -7013,6 +6852,87 @@ def _aggregate_variable_expenses(
     else:
         result["Variable Expenses"] = 0.0
     return result
+
+
+def _schedule_editor_save_table(schedule_name: str, table: pd.DataFrame) -> None:
+    st.session_state.detail_schedules[schedule_name] = table
+
+
+def _schedule_editor_target_options(
+    table: pd.DataFrame,
+    label_column: str,
+    all_label: str,
+) -> list[str]:
+    return [all_label] + sorted(
+        {
+            str(value)
+            for value in table.get(label_column, pd.Series(dtype=str)).dropna().unique().tolist()
+            if str(value).strip()
+        }
+    )
+
+
+def _variable_expense_schedule_editor_spec() -> ScheduleEditorSpec:
+    return ScheduleEditorSpec(
+        schedule_name="Variable Expenses Schedule",
+        editor_key="detail::variable_expenses",
+        remove_choice_key="var_exp_remove_choice",
+        increment_target_key="var_exp_increment_target",
+        increment_pct_key="var_exp_increment_pct",
+        add_button_key="var_exp_add_row",
+        remove_button_key="var_exp_remove_row",
+        increment_button_key="var_exp_apply_increment",
+        ensure_fn=_ensure_variable_expense_table,
+        add_row_fn=_add_variable_expense_row,
+        remove_row_fn=_remove_variable_expense_row,
+        apply_increment_fn=_apply_variable_expense_increment,
+        aggregate_fn=_aggregate_variable_expenses,
+        label_builder=lambda row: f"{row.get('Period') or 'Unknown Period'} - {row.get('Item') or 'Item'}",
+        target_options_builder=lambda table: _schedule_editor_target_options(table, "Item", "All items"),
+        all_items_label="All items",
+    )
+
+
+def _direct_wage_schedule_editor_spec() -> ScheduleEditorSpec:
+    return ScheduleEditorSpec(
+        schedule_name="Direct Wages Schedule",
+        editor_key="detail::direct_wages",
+        remove_choice_key="direct_wage_remove_choice",
+        increment_target_key="direct_wage_increment_target",
+        increment_pct_key="direct_wage_increment_pct",
+        add_button_key="direct_wage_add_row",
+        remove_button_key="direct_wage_remove_row",
+        increment_button_key="direct_wage_apply_increment",
+        ensure_fn=_ensure_direct_wage_table,
+        add_row_fn=_add_direct_wage_row,
+        remove_row_fn=_remove_direct_wage_row,
+        apply_increment_fn=_apply_direct_wage_increment,
+        aggregate_fn=_aggregate_direct_wages,
+        label_builder=lambda row: f"{row.get('Period') or 'Unknown Period'} - {row.get('Position') or row.get('Role') or 'Position'}",
+        target_options_builder=lambda table: _schedule_editor_target_options(table, "Position", "All positions"),
+        all_items_label="All positions",
+    )
+
+
+def _admin_wage_schedule_editor_spec() -> ScheduleEditorSpec:
+    return ScheduleEditorSpec(
+        schedule_name="Admin Wages Schedule",
+        editor_key="detail::admin_wages",
+        remove_choice_key="admin_wage_remove_choice",
+        increment_target_key="admin_wage_increment_target",
+        increment_pct_key="admin_wage_increment_pct",
+        add_button_key="admin_wage_add_row",
+        remove_button_key="admin_wage_remove_row",
+        increment_button_key="admin_wage_apply_increment",
+        ensure_fn=_ensure_admin_wage_table,
+        add_row_fn=_add_admin_wage_row,
+        remove_row_fn=_remove_admin_wage_row,
+        apply_increment_fn=_apply_admin_wage_increment,
+        aggregate_fn=_aggregate_admin_wages,
+        label_builder=lambda row: f"{row.get('Period') or 'Unknown Period'} - {row.get('Position') or row.get('Function') or 'Position'}",
+        target_options_builder=lambda table: _schedule_editor_target_options(table, "Position", "All positions"),
+        all_items_label="All positions",
+    )
 
 
 def _apply_cogs_percentage(
@@ -11004,11 +10924,16 @@ def main() -> None:
                         "to quickly escalate recurring expenses. Amounts roll up into the income statement automatically."
                     )
 
-                    variable_table = _ensure_variable_expense_table(
-                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        st.session_state.core_schedule,
+                    variable_spec = _variable_expense_schedule_editor_spec()
+                    variable_table, aggregated_variable = render_incremental_schedule_editor(
+                        spec=variable_spec,
+                        table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        core_schedule=st.session_state.core_schedule,
+                        save_table=_schedule_editor_save_table,
+                        render_row_editor=_render_schedule_row_editor,
+                        clear_editor_state=_clear_schedule_editor_state,
                     )
-                    st.session_state.detail_schedules[name] = variable_table
+                    """
 
                     st.session_state.setdefault("var_exp_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("var_exp_increment_target", "All items")
@@ -11085,19 +11010,16 @@ def main() -> None:
                     )
 
                     variable_table = st.session_state.detail_schedules[name]
+                    """
                     st.info(
                         "Master variable-expense inputs now live on the Assumptions page. Use `Apply to Schedule` "
                         "there to regenerate this schedule across the full production horizon, then refine period "
                         "rows here only when needed."
                     )
 
-                    aggregated_variable = _aggregate_variable_expenses(
-                        variable_table, st.session_state.core_schedule
-                    )
                     detail_tables_for_run[name] = aggregated_variable
 
-                    st.markdown("##### Variable Expenses Summary")
-                    st.dataframe(aggregated_variable)
+                    render_schedule_summary("Variable Expenses Summary", aggregated_variable)
                 elif name == "Direct Wages Schedule":
                     st.markdown("#### Direct Wages Schedule")
                     st.caption(
@@ -11105,11 +11027,16 @@ def main() -> None:
                         "roll up automatically into the model's EBITDA calculations."
                     )
 
-                    direct_table = _ensure_direct_wage_table(
-                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        st.session_state.core_schedule,
+                    direct_spec = _direct_wage_schedule_editor_spec()
+                    direct_table, aggregated_direct = render_incremental_schedule_editor(
+                        spec=direct_spec,
+                        table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        core_schedule=st.session_state.core_schedule,
+                        save_table=_schedule_editor_save_table,
+                        render_row_editor=_render_schedule_row_editor,
+                        clear_editor_state=_clear_schedule_editor_state,
                     )
-                    st.session_state.detail_schedules[name] = direct_table
+                    """
 
                     st.session_state.setdefault("direct_wage_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("direct_wage_increment_target", "All positions")
@@ -11193,19 +11120,16 @@ def main() -> None:
                     )
 
                     direct_table = st.session_state.detail_schedules[name]
+                    """
                     st.info(
                         "Master direct-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
                         "to rebuild labour rows across the full horizon, then use this schedule for downstream "
                         "refinements only."
                     )
 
-                    aggregated_direct = _aggregate_direct_wages(
-                        direct_table, st.session_state.core_schedule
-                    )
                     detail_tables_for_run[name] = aggregated_direct
 
-                    st.markdown("##### Direct Wages Summary")
-                    st.dataframe(aggregated_direct)
+                    render_schedule_summary("Direct Wages Summary", aggregated_direct)
                 elif name == "Admin Wages Schedule":
                     st.markdown("#### Admin Wages Schedule")
                     st.caption(
@@ -11213,11 +11137,16 @@ def main() -> None:
                         "roll up automatically into the income statement."
                     )
 
-                    admin_table = _ensure_admin_wage_table(
-                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        st.session_state.core_schedule,
+                    admin_spec = _admin_wage_schedule_editor_spec()
+                    admin_table, aggregated_admin = render_incremental_schedule_editor(
+                        spec=admin_spec,
+                        table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                        core_schedule=st.session_state.core_schedule,
+                        save_table=_schedule_editor_save_table,
+                        render_row_editor=_render_schedule_row_editor,
+                        clear_editor_state=_clear_schedule_editor_state,
                     )
-                    st.session_state.detail_schedules[name] = admin_table
+                    """
 
                     st.session_state.setdefault("admin_wage_remove_choice", "-- Select Row --")
                     st.session_state.setdefault("admin_wage_increment_target", "All positions")
@@ -11301,19 +11230,16 @@ def main() -> None:
                     )
 
                     admin_table = st.session_state.detail_schedules[name]
+                    """
                     st.info(
                         "Master admin-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
                         "to regenerate this schedule across the active production horizon, then fine-tune rows here "
                         "if the live plan needs adjustments."
                     )
 
-                    aggregated_admin = _aggregate_admin_wages(
-                        admin_table, st.session_state.core_schedule
-                    )
                     detail_tables_for_run[name] = aggregated_admin
 
-                    st.markdown("##### Admin Wages Summary")
-                    st.dataframe(aggregated_admin)
+                    render_schedule_summary("Admin Wages Summary", aggregated_admin)
                 else:
                     table = st.session_state.detail_schedules.get(name, pd.DataFrame())
                     if not isinstance(table, pd.DataFrame):
@@ -11602,77 +11528,57 @@ def main() -> None:
             "These tables drive herd reproduction, lactation, finishing, slaughter, and replacement logic. "
             "They now sit upstream of pricing quantities and herd-linked operating costs."
         )
-        biological_editors: list[tuple[str, str, Callable[[Optional[pd.DataFrame]], pd.DataFrame], str]] = [
-            (
+        biological_editors = [
+            BiologicalEditorDefinition(
                 "Biological System Settings",
                 "Manage model grain, herd-plan control mode, and biological timing settings.",
                 _ensure_biological_system_settings_table,
                 "assump::biological_settings",
             ),
-            (
+            BiologicalEditorDefinition(
                 "Breeding & Reproduction Biology",
                 "Defines age at first kidding, gestation timing, fertility, kidding rates, mortality, culling, and replacement retention.",
                 _ensure_breeding_reproduction_biology_table,
                 "assump::breeding_biology",
             ),
-            (
+            BiologicalEditorDefinition(
                 "Lactation Biology",
                 "Defines lactation length, dry period, peak month, parity yield factors, and the curve shape used for milk output.",
                 _ensure_lactation_biology_table,
                 "assump::lactation_biology",
             ),
-            (
+            BiologicalEditorDefinition(
                 "Finishing & Slaughter Biology",
                 "Defines months to market weight, slaughter timing, live-sale mix, yield assumptions, and finishing mortality.",
                 _ensure_finishing_slaughter_biology_table,
                 "assump::finishing_biology",
             ),
-            (
+            BiologicalEditorDefinition(
                 "Opening Herd Cohorts",
                 "Provide the opening biological starting herd by cohort, age, sex, purpose, parity, and current lactation state.",
                 _ensure_opening_herd_cohorts_table,
                 "assump::opening_herd_cohorts",
             ),
-            (
+            BiologicalEditorDefinition(
                 "Cohort Allocation Rules",
                 "Controls how surviving kids are retained into replacements versus routed into finishing and sale streams.",
                 _ensure_cohort_allocation_rules_table,
                 "assump::cohort_allocation_rules",
             ),
-            (
+            BiologicalEditorDefinition(
                 "Biological Cost Drivers",
                 "Maps feed, healthcare, and utilities to breeding, replacement, finishing, lactating, or total-herd stage bases.",
                 _ensure_biological_cost_drivers_table,
                 "assump::biological_cost_drivers",
             ),
         ]
-
-        for assumption_name, _, ensure_fn, _ in biological_editors:
-            st.session_state.assumptions[assumption_name] = ensure_fn(
-                st.session_state.assumptions.get(assumption_name)
-            )
-            assumption_tables[assumption_name] = st.session_state.assumptions[assumption_name]
-
-        biological_editor_name = st.selectbox(
-            "Biological assumption table",
-            options=[name for name, _, _, _ in biological_editors],
-            key="biological_editor_name",
+        st.session_state.assumptions = render_biological_assumption_editor(
+            definitions=biological_editors,
+            assumptions=st.session_state.assumptions,
+            render_row_editor=_render_schedule_row_editor,
         )
-        selected_editor = next(
-            editor for editor in biological_editors if editor[0] == biological_editor_name
-        )
-        selected_name, selected_caption, selected_ensure_fn, selected_key = selected_editor
-        st.markdown(f"#### {selected_name}")
-        st.caption(selected_caption)
-        _render_schedule_row_editor(
-            selected_key,
-            st.session_state.assumptions[selected_name],
-            lambda updated, assumption_name=selected_name, ensure_fn=selected_ensure_fn: st.session_state.assumptions.__setitem__(
-                assumption_name,
-                ensure_fn(updated),
-            ),
-        )
-        assumption_tables[selected_name] = st.session_state.assumptions[selected_name]
+        for definition in biological_editors:
+            assumption_tables[definition.name] = st.session_state.assumptions[definition.name]
 
         st.markdown("### 3. Commercial Drivers")
         st.caption(
