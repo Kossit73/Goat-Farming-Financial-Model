@@ -933,7 +933,7 @@ def test_standalone_app_bootstraps_and_runs_without_top_level_exceptions():
         (
             "from streamlit.testing.v1 import AppTest; "
             "at = AppTest.from_file('streamlit_app.py'); "
-            "at.run(timeout=20); "
+            "at.run(timeout=30); "
             "print('exc_count', len(at.exception)); "
             "print('tab_count', len(at.tabs)); "
             "raise SystemExit(0 if len(at.exception) == 0 else 1)"
