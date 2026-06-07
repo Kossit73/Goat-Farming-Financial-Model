@@ -417,6 +417,61 @@ def test_execute_scenario_suite_runs_presets():
         assert "model_audit" in payload
         assert "Revenue_adj" in payload["scenario"].columns
         assert "Model Audit Summary" in payload["supplementary"]
+        assert "Biological Herd Summary" in payload["supplementary"]
+
+
+def test_biological_engine_drives_schedule_and_pricing_quantities():
+    assumptions = streamlit_app._default_assumption_tables()
+    pricing = streamlit_app._ensure_pricing_table(assumptions["Pricing"])
+    pricing.loc[pricing["Product"] == "Cheese", "Active"] = False
+    pricing.loc[pricing["Product"] == "Milk", "Active"] = True
+    pricing.loc[pricing["Product"] == "Live Herd", "Active"] = True
+    pricing.loc[pricing["Product"] == "Meat", "Active"] = True
+    assumptions["Pricing"] = pricing
+
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions["Production Horizon"],
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+    synced = streamlit_app._sync_commercial_assumptions_to_core(assumptions, core)
+    pricing_output = synced["Pricing"]
+
+    first_period = schedule.index[0].strftime("%Y-%m-%d")
+    first_schedule_row = schedule.iloc[0]
+
+    assert {
+        "Breeding Does",
+        "Pregnant Does",
+        "Milk Production (L)",
+        "Slaughter Heads",
+        "Live Herd Sales (heads)",
+    }.issubset(schedule.columns)
+    assert first_schedule_row["Herd Size (heads)"] > 0
+    assert first_schedule_row["Milk Production (L)"] >= 0
+
+    milk_row = pricing_output.loc[
+        (pricing_output["Period"] == first_period)
+        & (pricing_output["Product"] == "Milk")
+    ].iloc[0]
+    live_row = pricing_output.loc[
+        (pricing_output["Period"] == first_period)
+        & (pricing_output["Product"] == "Live Herd")
+    ].iloc[0]
+    meat_row = pricing_output.loc[
+        (pricing_output["Period"] == first_period)
+        & (pricing_output["Product"] == "Meat")
+    ].iloc[0]
+
+    assert milk_row["Quantity per Period"] == pytest.approx(
+        first_schedule_row["Milk Production (L)"], rel=1e-6
+    )
+    assert live_row["Quantity per Period"] == pytest.approx(
+        first_schedule_row["Live Herd Sales (heads)"], rel=1e-6
+    )
+    assert meat_row["Quantity per Period"] == pytest.approx(
+        first_schedule_row["Meat Output Kg"], rel=1e-6
+    )
 
 
 def test_loan_facilities_drive_tidy_schedule_and_debt_schedule():

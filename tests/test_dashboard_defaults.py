@@ -57,6 +57,25 @@ def test_default_schedule_uses_builtin_horizon():
     assert len(periods) == (end_year - start_year + 1) * 12
 
 
+def test_default_assumptions_include_biological_engine_tables():
+    assumptions = streamlit_app._default_assumption_tables()
+
+    required = {
+        "Biological System Settings",
+        "Breeding & Reproduction Biology",
+        "Lactation Biology",
+        "Finishing & Slaughter Biology",
+        "Opening Herd Cohorts",
+        "Cohort Allocation Rules",
+    }
+
+    assert required.issubset(assumptions.keys())
+    assert not assumptions["Opening Herd Cohorts"].empty
+    assert "Age at First Kidding (months)" in assumptions[
+        "Breeding & Reproduction Biology"
+    ].columns
+
+
 def test_scenario_presets_cover_key_cases():
     names = set(streamlit_app.SCENARIO_PRESETS.keys())
     assert {"Base Case Scenario", "Best Case Scenario", "Worst Case Scenario"}.issubset(
