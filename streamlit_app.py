@@ -10119,32 +10119,30 @@ def main() -> None:
             "Use these simpler editors for routine updates. Product and Unit stay fixed here to keep the core driver rows stable."
         )
         if visible_dairy_products and visible_livestock_products:
-            dairy_col, slaughter_col = st.columns(2)
-            with dairy_col:
-                st.markdown("**Dairy Drivers**")
-                dairy_editor = st.data_editor(
-                    dairy_drivers,
-                    use_container_width=True,
-                    hide_index=True,
-                    key="assump::production_drivers::dairy",
-                    column_config=_production_driver_column_config(dairy_drivers, visible_dairy_products),
-                    disabled=driver_disabled_columns,
-                )
-                _save_production_driver_subset(visible_dairy_products, dairy_editor)
-            with slaughter_col:
-                st.markdown("**Livestock & Slaughter Drivers**")
-                slaughter_editor = st.data_editor(
-                    slaughter_drivers,
-                    use_container_width=True,
-                    hide_index=True,
-                    key="assump::production_drivers::slaughter",
-                    column_config=_production_driver_column_config(slaughter_drivers, visible_livestock_products),
-                    disabled=driver_disabled_columns,
-                )
-                _save_production_driver_subset(
-                    visible_livestock_products,
-                    slaughter_editor,
-                )
+            st.markdown("**Dairy Drivers**")
+            dairy_editor = st.data_editor(
+                dairy_drivers,
+                use_container_width=True,
+                hide_index=True,
+                key="assump::production_drivers::dairy",
+                column_config=_production_driver_column_config(dairy_drivers, visible_dairy_products),
+                disabled=driver_disabled_columns,
+            )
+            _save_production_driver_subset(visible_dairy_products, dairy_editor)
+
+            st.markdown("**Livestock & Slaughter Drivers**")
+            slaughter_editor = st.data_editor(
+                slaughter_drivers,
+                use_container_width=True,
+                hide_index=True,
+                key="assump::production_drivers::slaughter",
+                column_config=_production_driver_column_config(slaughter_drivers, visible_livestock_products),
+                disabled=driver_disabled_columns,
+            )
+            _save_production_driver_subset(
+                visible_livestock_products,
+                slaughter_editor,
+            )
         elif visible_dairy_products:
             st.markdown("**Dairy Drivers**")
             dairy_editor = st.data_editor(
