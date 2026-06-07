@@ -8667,6 +8667,15 @@ def _ensure_default_results_loaded() -> None:
 
     try:
         scenario_suite = _build_scenario_suite()
+        scenario_suite = {
+            "Base Case Scenario": scenario_suite.get(
+                "Base Case Scenario",
+                {
+                    "adjustments": dict(DEFAULT_SCENARIO_ADJUSTMENTS),
+                    "description": "Baseline view using the model inputs without additional shocks.",
+                },
+            )
+        }
         model, _, scenario_results = _execute_scenario_suite(
             schedule_df,
             valuation_inputs,
