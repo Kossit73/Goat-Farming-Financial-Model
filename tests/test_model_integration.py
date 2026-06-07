@@ -554,6 +554,35 @@ def test_stage_aware_biological_cost_drivers_override_flat_herd_costing():
     assert cohort_costed["COGS"].iloc[0] != pytest.approx(flat_costed["COGS"].iloc[0], rel=1e-6)
 
 
+def test_biological_cost_drivers_work_without_legacy_operating_cost_table():
+    assumptions = streamlit_app._default_assumption_tables()
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions["Production Horizon"],
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+
+    stage_costs = pd.DataFrame(
+        {
+            "Year": [2024],
+            "Field": ["variable_feed_cost_per_herd"],
+            "Category": ["Feed"],
+            "Applies To": ["lactating_doe"],
+            "unit_cost_per_head_per_month": [25.0],
+            "Inflation %": [0.0],
+            "Active": [True],
+        }
+    )
+
+    costed = streamlit_app._apply_operating_cost_assumptions_to_schedule(
+        schedule,
+        None,
+        stage_costs,
+    )
+
+    assert costed["COGS"].fillna(0.0).sum() > 0
+
+
 def test_biological_scenario_shocks_flow_into_results():
     assumptions = streamlit_app._default_assumption_tables()
     core, detail_tables = streamlit_app._default_schedule_components(

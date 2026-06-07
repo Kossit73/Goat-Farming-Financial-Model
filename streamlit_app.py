@@ -6008,11 +6008,26 @@ def _apply_operating_cost_assumptions_to_schedule(
     operating_table: Optional[pd.DataFrame],
     biological_cost_table: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    if schedule_df.empty or operating_table is None or operating_table.empty:
+    if schedule_df.empty:
         return schedule_df
 
-    assumptions = _ensure_operating_cost_table(operating_table)
-    if assumptions.empty:
+    biological_costs = (
+        _ensure_biological_cost_drivers_table(biological_cost_table)
+        if isinstance(biological_cost_table, pd.DataFrame) and not biological_cost_table.empty
+        else pd.DataFrame()
+    )
+    biological_active = (
+        not biological_costs.empty
+        and "Applies To" in biological_costs.columns
+        and biological_costs["Active"].fillna(True).astype(bool).any()
+    )
+
+    if operating_table is None or operating_table.empty:
+        assumptions = pd.DataFrame(columns=["Year", "Field", "Category", "unit_cost_per_head_per_month", "Inflation %"])
+    else:
+        assumptions = _ensure_operating_cost_table(operating_table)
+
+    if assumptions.empty and not biological_active:
         return schedule_df
 
     work = schedule_df.copy()
@@ -6031,16 +6046,6 @@ def _apply_operating_cost_assumptions_to_schedule(
     year_values = work.index.year
 
     field_period_costs: Dict[str, pd.Series] = {}
-    biological_costs = (
-        _ensure_biological_cost_drivers_table(biological_cost_table)
-        if isinstance(biological_cost_table, pd.DataFrame) and not biological_cost_table.empty
-        else pd.DataFrame()
-    )
-    biological_active = (
-        not biological_costs.empty
-        and "Applies To" in biological_costs.columns
-        and biological_costs["Active"].fillna(True).astype(bool).any()
-    )
     if biological_active:
         active_rows = biological_costs.loc[biological_costs["Active"].fillna(True).astype(bool)].copy()
         for field in active_rows["Field"].dropna().astype(str).unique().tolist():
