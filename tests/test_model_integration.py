@@ -474,6 +474,124 @@ def test_biological_engine_drives_schedule_and_pricing_quantities():
     )
 
 
+def test_biological_engine_uses_age_band_weight_and_missing_schedules():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Biological System Settings"] = pd.DataFrame(
+        {
+            "Setting": [
+                "Model Grain",
+                "Opening Biological Start Date",
+                "Age Band Width (months)",
+                "Use Herd Plan as Target",
+                "Use Herd Plan as Hard Override",
+            ],
+            "Value": ["monthly", "2023-01-31", "3", "True", "False"],
+        }
+    )
+    finishing = assumptions["Finishing & Slaughter Biology"].copy()
+    finishing.loc[:, "Months to Market Weight"] = 2.0
+    finishing.loc[:, "Age at Slaughter (months)"] = 12.0
+    finishing.loc[:, "Target Live Weight Kg"] = 6.0
+    finishing.loc[:, "Monthly Weight Gain Kg"] = 3.0
+    assumptions["Finishing & Slaughter Biology"] = finishing
+
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions["Production Horizon"],
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+    biological = streamlit_app._derive_biological_schedules(schedule, assumptions)
+
+    assert "Average Sale Weight Kg" in schedule.columns
+    assert "Kidding Schedule" in biological
+    assert "Kid Cohort Schedule" in biological
+    assert "Days in Milk Schedule" in biological
+    assert "Breeding Herd Schedule" in biological
+    assert not biological["Kid Cohort Schedule"].empty
+    assert schedule["Average Sale Weight Kg"].fillna(0.0).max() > 0
+
+
+def test_stage_aware_biological_cost_drivers_override_flat_herd_costing():
+    assumptions = streamlit_app._default_assumption_tables()
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions["Production Horizon"],
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+
+    operating = pd.DataFrame(
+        {
+            "Year": [2024],
+            "Field": ["variable_feed_cost_per_herd"],
+            "Category": ["Feed"],
+            "unit_cost_per_head_per_month": [10.0],
+            "Inflation %": [0.0],
+        }
+    )
+    stage_costs = pd.DataFrame(
+        {
+            "Year": [2024, 2024],
+            "Field": ["variable_feed_cost_per_herd", "variable_feed_cost_per_herd"],
+            "Category": ["Feed", "Feed"],
+            "Applies To": ["lactating_doe", "finishing_male"],
+            "unit_cost_per_head_per_month": [30.0, 5.0],
+            "Inflation %": [0.0, 0.0],
+            "Active": [True, True],
+        }
+    )
+
+    cohort_costed = streamlit_app._apply_operating_cost_assumptions_to_schedule(
+        schedule,
+        operating,
+        stage_costs,
+    )
+    flat_costed = streamlit_app._apply_operating_cost_assumptions_to_schedule(
+        schedule,
+        operating,
+        None,
+    )
+
+    assert cohort_costed["COGS"].iloc[0] != pytest.approx(flat_costed["COGS"].iloc[0], rel=1e-6)
+
+
+def test_biological_scenario_shocks_flow_into_results():
+    assumptions = streamlit_app._default_assumption_tables()
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions["Production Horizon"],
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+    supplementary = {
+        f"Assumptions - {name}": table.copy()
+        for name, table in assumptions.items()
+        if isinstance(table, pd.DataFrame)
+    }
+    suite = {
+        "Bio Shock": {
+            "adjustments": {
+                **streamlit_app.DEFAULT_SCENARIO_ADJUSTMENTS,
+                "Conception rate change (%)": -20.0,
+                "Peak yield change (%)": -10.0,
+            },
+            "description": "Biological downside",
+        }
+    }
+
+    _, _, results = streamlit_app._execute_scenario_suite(
+        schedule,
+        {},
+        supplementary,
+        suite,
+    )
+
+    payload = results["Bio Shock"]
+    bio_summary = payload["supplementary"]["Biological Herd Summary"]
+
+    assert "Kidding Schedule" in payload["supplementary"]
+    assert "Days in Milk Schedule" in payload["supplementary"]
+    assert bio_summary["Milk Production (L)"].sum() < schedule["Milk Production (L)"].sum()
+
+
 def test_loan_facilities_drive_tidy_schedule_and_debt_schedule():
     model = _build_model_with_loan_facilities()
 

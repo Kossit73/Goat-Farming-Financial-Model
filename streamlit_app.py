@@ -1440,6 +1440,20 @@ def _quantity_change_driver(product: str) -> str:
     return f"{product} quantity change (%)"
 
 
+BIOLOGICAL_SCENARIO_DRIVER_DEFAULTS: Dict[str, float] = {
+    "Conception rate change (%)": 0.0,
+    "Kid mortality change (%)": 0.0,
+    "Doe mortality change (%)": 0.0,
+    "Cull rate change (%)": 0.0,
+    "Kids per kidding change (%)": 0.0,
+    "Age at slaughter change (months)": 0.0,
+    "Months to market weight change (months)": 0.0,
+    "Peak yield change (%)": 0.0,
+    "Lactation length change (days)": 0.0,
+    "Replacement retention change (%)": 0.0,
+}
+
+
 DEFAULT_SCENARIO_ADJUSTMENTS: Dict[str, float] = {
     **{
         _price_change_driver(product): 0.0
@@ -1449,6 +1463,7 @@ DEFAULT_SCENARIO_ADJUSTMENTS: Dict[str, float] = {
         _quantity_change_driver(product): 0.0
         for product in ALL_MODEL_PRODUCTS
     },
+    **BIOLOGICAL_SCENARIO_DRIVER_DEFAULTS,
     "Feed cost change (%)": 0.0,
 }
 
@@ -2097,19 +2112,46 @@ def _execute_scenario_suite(
     for name, config in scenario_suite.items():
         adjustments = config.get("adjustments", {})
         feed_pct = float(adjustments.get("Feed cost change (%)", 0.0))
-        scenario_seed = schedule_df.copy()
+        has_biological_adjustment = any(
+            abs(float(adjustments.get(driver, 0.0) or 0.0)) > 1e-9
+            for driver in BIOLOGICAL_SCENARIO_DRIVER_DEFAULTS
+        )
+        if has_biological_adjustment:
+            scenario_assumptions = _apply_biological_scenario_shocks(
+                biological_assumptions,
+                adjustments,
+            )
+            scenario_seed = _apply_biological_assumptions_to_schedule(
+                schedule_df.copy(),
+                scenario_assumptions,
+            )
+            operating_costs = scenario_assumptions.get("Operating Costs")
+            if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
+                scenario_seed = _apply_operating_cost_assumptions_to_schedule(
+                    scenario_seed,
+                    operating_costs,
+                    scenario_assumptions.get("Biological Cost Drivers"),
+                )
+        else:
+            scenario_assumptions = biological_assumptions
+            scenario_seed = schedule_df.copy()
         scenario_pricing = pd.DataFrame()
-        if isinstance(assumption_pricing, pd.DataFrame) and not assumption_pricing.empty:
+        scenario_pricing_source = scenario_assumptions.get("Pricing", assumption_pricing)
+        scenario_production_drivers = scenario_assumptions.get(
+            "Production Drivers",
+            production_drivers,
+        )
+        if isinstance(scenario_pricing_source, pd.DataFrame) and not scenario_pricing_source.empty:
             scenario_pricing = _apply_commercial_shocks_to_pricing(
-                assumption_pricing,
+                scenario_pricing_source,
                 scenario_seed,
-                production_drivers,
+                scenario_production_drivers if isinstance(scenario_production_drivers, pd.DataFrame) else None,
                 adjustments,
             )
             scenario_seed = _apply_pricing_assumptions_to_schedule(
                 scenario_seed,
                 scenario_pricing,
-                production_drivers,
+                scenario_production_drivers if isinstance(scenario_production_drivers, pd.DataFrame) else None,
             )
 
         scenario_schedule = InputSchedule(
@@ -2129,7 +2171,7 @@ def _execute_scenario_suite(
         }
         biological_bundle = _derive_biological_schedules(
             scenario_seed,
-            biological_assumptions,
+            scenario_assumptions,
         )
         valuation_summary = scenario_model.valuation_summary(scenario_df)
         model_audit = scenario_model.model_audit(scenario_df, annual=True)
@@ -2586,6 +2628,16 @@ OPERATING_COST_FIELD_TO_CATEGORY = {
     "variable_feed_cost_per_herd": "Feed",
     "variable_healthcare_cost_per_herd": "Healthcare",
     "fixed_utility_cost_per_herd": "Utilities",
+}
+
+BIOLOGICAL_COST_APPLIES_TO_MAP = {
+    "breeding_doe": "Breeding Does",
+    "breeding_buck": "Breeding Bucks",
+    "replacement_doe": "Replacement Does",
+    "finishing_female": "Finishing Females",
+    "finishing_male": "Finishing Males",
+    "lactating_doe": "Lactating Does",
+    "total_herd": "Herd Size (heads)",
 }
 
 
@@ -3053,6 +3105,82 @@ DEFAULT_COHORT_ALLOCATION_RULES = [
 ]
 
 
+DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
+    {
+        "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Applies To": "breeding_doe",
+        "unit_cost_per_head_per_month": 22.0,
+        "Inflation %": 4.0,
+        "Active": True,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Applies To": "breeding_buck",
+        "unit_cost_per_head_per_month": 20.0,
+        "Inflation %": 4.0,
+        "Active": True,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Applies To": "replacement_doe",
+        "unit_cost_per_head_per_month": 17.0,
+        "Inflation %": 4.0,
+        "Active": True,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Applies To": "finishing_female",
+        "unit_cost_per_head_per_month": 16.0,
+        "Inflation %": 4.0,
+        "Active": True,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Applies To": "finishing_male",
+        "unit_cost_per_head_per_month": 16.5,
+        "Inflation %": 4.0,
+        "Active": True,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_feed_cost_per_herd",
+        "Category": "Feed",
+        "Applies To": "lactating_doe",
+        "unit_cost_per_head_per_month": 8.0,
+        "Inflation %": 4.0,
+        "Active": True,
+    },
+    {
+        "Year": 2024,
+        "Field": "variable_healthcare_cost_per_herd",
+        "Category": "Healthcare",
+        "Applies To": "total_herd",
+        "unit_cost_per_head_per_month": 5.63,
+        "Inflation %": 3.5,
+        "Active": True,
+    },
+    {
+        "Year": 2024,
+        "Field": "fixed_utility_cost_per_herd",
+        "Category": "Utilities",
+        "Applies To": "total_herd",
+        "unit_cost_per_head_per_month": 3.75,
+        "Inflation %": 2.0,
+        "Active": True,
+    },
+]
+
+
 def _default_biological_system_settings_table() -> pd.DataFrame:
     return pd.DataFrame(DEFAULT_BIOLOGICAL_SYSTEM_SETTINGS)
 
@@ -3259,6 +3387,40 @@ def _ensure_cohort_allocation_rules_table(table: Optional[pd.DataFrame]) -> pd.D
     return work[["Rule", "Value"]].reset_index(drop=True)
 
 
+def _default_biological_cost_drivers_table() -> pd.DataFrame:
+    return pd.DataFrame(DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS)
+
+
+def _ensure_biological_cost_drivers_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_biological_cost_drivers_table()
+    else:
+        work = table.copy()
+
+    defaults = _default_biological_cost_drivers_table()
+    for column in defaults.columns:
+        if column not in work.columns:
+            work[column] = defaults.iloc[0][column]
+
+    for column in ["Field", "Category", "Applies To"]:
+        work[column] = work.get(column, "").fillna("").astype(str).str.strip()
+    work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
+    work.loc[work["Category"] == "", "Category"] = "Feed"
+    work.loc[work["Applies To"] == "", "Applies To"] = "total_herd"
+    work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce").round().astype("Int64")
+    work["unit_cost_per_head_per_month"] = pd.to_numeric(
+        work.get("unit_cost_per_head_per_month"), errors="coerce"
+    )
+    work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
+    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+
+    ordered = list(defaults.columns)
+    remainder = [column for column in work.columns if column not in ordered]
+    return work[ordered + remainder].reset_index(drop=True)
+
+
 def _string_to_bool(value: Any, default: bool = False) -> bool:
     if pd.isna(value):
         return default
@@ -3288,6 +3450,68 @@ def _rule_lookup(table: Optional[pd.DataFrame]) -> Dict[str, float]:
         if rule and pd.notna(value):
             lookup[rule] = float(value)
     return lookup
+
+
+def _apply_biological_scenario_shocks(
+    assumptions: Dict[str, pd.DataFrame],
+    adjustments: Dict[str, Any],
+) -> Dict[str, pd.DataFrame]:
+    shocked = {
+        key: value.copy()
+        for key, value in (assumptions or {}).items()
+        if isinstance(value, pd.DataFrame)
+    }
+
+    reproduction = _ensure_breeding_reproduction_biology_table(
+        shocked.get("Breeding & Reproduction Biology")
+    )
+    lactation = _ensure_lactation_biology_table(shocked.get("Lactation Biology"))
+    finishing = _ensure_finishing_slaughter_biology_table(
+        shocked.get("Finishing & Slaughter Biology")
+    )
+    allocation = _ensure_cohort_allocation_rules_table(
+        shocked.get("Cohort Allocation Rules")
+    )
+
+    def _pct_adjust(table: pd.DataFrame, column: str, driver: str) -> None:
+        if column not in table.columns:
+            return
+        shock = float(adjustments.get(driver, 0.0) or 0.0)
+        if shock == 0.0:
+            return
+        table[column] = pd.to_numeric(table.get(column), errors="coerce") * (1.0 + shock / 100.0)
+
+    def _abs_adjust(table: pd.DataFrame, column: str, driver: str) -> None:
+        if column not in table.columns:
+            return
+        shock = float(adjustments.get(driver, 0.0) or 0.0)
+        if shock == 0.0:
+            return
+        table[column] = pd.to_numeric(table.get(column), errors="coerce") + shock
+
+    _pct_adjust(reproduction, "Conception Rate %", "Conception rate change (%)")
+    _pct_adjust(reproduction, "Kid Mortality %", "Kid mortality change (%)")
+    _pct_adjust(reproduction, "Doe Mortality %", "Doe mortality change (%)")
+    _pct_adjust(reproduction, "Cull Rate %", "Cull rate change (%)")
+    _pct_adjust(reproduction, "Kids per Kidding", "Kids per kidding change (%)")
+    _pct_adjust(lactation, "Peak Yield Litres per Day", "Peak yield change (%)")
+    _abs_adjust(lactation, "Lactation Length Days", "Lactation length change (days)")
+    _abs_adjust(finishing, "Age at Slaughter (months)", "Age at slaughter change (months)")
+    _abs_adjust(finishing, "Months to Market Weight", "Months to market weight change (months)")
+
+    retention_shock = float(adjustments.get("Replacement retention change (%)", 0.0) or 0.0)
+    if retention_shock != 0.0:
+        mask = allocation["Rule"].astype(str).str.casefold() == "female replacement retention %".casefold()
+        if mask.any():
+            allocation.loc[mask, "Value"] = (
+                pd.to_numeric(allocation.loc[mask, "Value"], errors="coerce") * (1.0 + retention_shock / 100.0)
+            )
+
+    shocked["Breeding & Reproduction Biology"] = _ensure_breeding_reproduction_biology_table(reproduction)
+    shocked["Lactation Biology"] = _ensure_lactation_biology_table(lactation)
+    shocked["Finishing & Slaughter Biology"] = _ensure_finishing_slaughter_biology_table(finishing)
+    shocked["Cohort Allocation Rules"] = _ensure_cohort_allocation_rules_table(allocation)
+    return shocked
 
 
 def _active_first_row(table: pd.DataFrame, default_row: Optional[pd.Series] = None) -> pd.Series:
@@ -3331,10 +3555,54 @@ def _monthly_rate_from_annual_pct(percent: float, months_factor: float = 1.0) ->
     return max(0.0, 1.0 - ((1.0 - annual_rate) ** max(months_factor / 12.0, 1e-9)))
 
 
-def _age_bucket_index(age_months: float, max_age: int) -> int:
+def _age_bucket_index(age_months: float, max_age: int, age_band_width: float = 1.0) -> int:
     if not np.isfinite(age_months):
         return 0
-    return int(min(max(round(float(age_months)), 0), max_age))
+    width = max(float(age_band_width), 1.0)
+    max_bucket = int(np.ceil(max_age / width))
+    return int(min(max(np.floor(float(age_months) / width), 0), max_bucket))
+
+
+def _bucket_mid_age(bucket_index: int, age_band_width: float) -> float:
+    width = max(float(age_band_width), 1.0)
+    return (float(bucket_index) * width) + (width / 2.0)
+
+
+def _advance_age_buckets(
+    buckets: np.ndarray,
+    *,
+    months_factor: float,
+    age_band_width: float,
+    mature_age_months: float,
+    weight_gain_per_month: float = 0.0,
+    market_weight_kg: float = 0.0,
+    months_to_market_weight: float = 0.0,
+) -> tuple[np.ndarray, float, float]:
+    next_buckets = np.zeros_like(buckets, dtype=float)
+    matured_heads = 0.0
+    matured_weight_total = 0.0
+    for bucket_index, head_count in enumerate(buckets.tolist()):
+        if head_count <= 0:
+            continue
+        new_age = _bucket_mid_age(bucket_index, age_band_width) + max(months_factor, 0.0)
+        estimated_weight = max(new_age * max(weight_gain_per_month, 0.0), 0.0)
+        meets_weight_condition = (
+            months_to_market_weight > 0
+            and market_weight_kg > 0
+            and weight_gain_per_month > 0
+            and new_age >= months_to_market_weight
+            and estimated_weight >= market_weight_kg
+        )
+        if new_age >= max(mature_age_months, 0.0) or meets_weight_condition:
+            matured_heads += head_count
+            matured_weight_total += head_count * estimated_weight
+            continue
+        next_index = min(
+            _age_bucket_index(new_age, int(np.ceil(len(buckets) * age_band_width)), age_band_width),
+            len(buckets) - 1,
+        )
+        next_buckets[next_index] += head_count
+    return next_buckets, matured_heads, matured_weight_total
 
 
 def _calculate_lactation_curve_yield(
@@ -3398,6 +3666,26 @@ def _derive_biological_schedules(
 
     reproduction_row = _active_first_row(reproduction, reproduction.iloc[0] if not reproduction.empty else None)
     finishing_row = _active_first_row(finishing, finishing.iloc[0] if not finishing.empty else None)
+    model_grain = str(settings_lookup.get("Model Grain", "monthly")).strip().lower()
+    grain_months = {"monthly": 1.0, "quarterly": 3.0, "annual": 12.0}.get(model_grain, 1.0)
+    opening_start = pd.to_datetime(
+        settings_lookup.get("Opening Biological Start Date", ""),
+        errors="coerce",
+    )
+    if pd.isna(opening_start):
+        opening_start = work_index.min()
+    pre_roll_months = max(0.0, (work_index.min() - opening_start).days / 30.44)
+    pre_roll_days = max(0.0, (work_index.min() - opening_start).days)
+    age_band_width = max(
+        float(
+            pd.to_numeric(
+                pd.Series([settings_lookup.get("Age Band Width (months)", 1.0)]),
+                errors="coerce",
+            ).iloc[0]
+            or 1.0
+        ),
+        1.0,
+    )
 
     age_at_first_kidding = max(
         1,
@@ -3450,32 +3738,95 @@ def _derive_biological_schedules(
             )
         ),
     )
+    months_to_market_weight = max(
+        float(
+            pd.to_numeric(
+                pd.Series([finishing_row.get("Months to Market Weight")]),
+                errors="coerce",
+            ).iloc[0]
+            or 8.0
+        ),
+        1.0,
+    )
+    slaughter_age = max(
+        float(
+            pd.to_numeric(
+                pd.Series([finishing_row.get("Age at Slaughter (months)")]),
+                errors="coerce",
+            ).iloc[0]
+            or sale_age
+        ),
+        1.0,
+    )
+    target_live_weight = max(
+        float(
+            pd.to_numeric(
+                pd.Series([finishing_row.get("Target Live Weight Kg")]),
+                errors="coerce",
+            ).iloc[0]
+            or 0.0
+        ),
+        0.0,
+    )
+    monthly_weight_gain = max(
+        float(
+            pd.to_numeric(
+                pd.Series([finishing_row.get("Monthly Weight Gain Kg")]),
+                errors="coerce",
+            ).iloc[0]
+            or 0.0
+        ),
+        0.0,
+    )
+    max_opening_age = pd.to_numeric(
+        opening_cohorts.get("Age in Months"),
+        errors="coerce",
+    ).dropna().max()
+    max_opening_age = float(max_opening_age) if pd.notna(max_opening_age) else 0.0
+    max_age_horizon = max(
+        age_at_first_kidding,
+        sale_age,
+        slaughter_age,
+        months_to_market_weight,
+        max_opening_age + pre_roll_months,
+    ) + (2.0 * age_band_width)
+    bucket_count = max(3, int(np.ceil(max_age_horizon / age_band_width)) + 2)
 
-    replacement_buckets = np.zeros(age_at_first_kidding + 1, dtype=float)
-    female_finishing_buckets = np.zeros(sale_age + 1, dtype=float)
-    male_finishing_buckets = np.zeros(sale_age + 1, dtype=float)
+    replacement_buckets = np.zeros(bucket_count, dtype=float)
+    female_finishing_buckets = np.zeros(bucket_count, dtype=float)
+    male_finishing_buckets = np.zeros(bucket_count, dtype=float)
     breeding_parity = {"1": 0.0, "2": 0.0, "3+": 0.0}
     breeding_bucks = 0.0
+    pregnancy_slots = max(1, int(np.ceil(gestation_months / max(grain_months, 1e-9))))
+    pregnancy_queue: list[dict[str, float]] = [{"1": 0.0, "2": 0.0, "3+": 0.0} for _ in range(pregnancy_slots)]
 
     for _, row in opening_cohorts.loc[opening_cohorts["Active"].fillna(True).astype(bool)].iterrows():
         purpose = str(row.get("Purpose", "")).strip().lower()
         age_idx = _age_bucket_index(
-            pd.to_numeric(pd.Series([row.get("Age in Months")]), errors="coerce").iloc[0],
-            max(age_at_first_kidding, sale_age),
+            float(pd.to_numeric(pd.Series([row.get("Age in Months")]), errors="coerce").iloc[0] or 0.0)
+            + pre_roll_months,
+            int(np.ceil(max_age_horizon)),
+            age_band_width,
         )
         head_count = float(
             pd.to_numeric(pd.Series([row.get("Head Count")]), errors="coerce").iloc[0] or 0.0
         )
         if purpose == "breeding_doe":
             breeding_parity[_parity_key(row.get("Parity"))] += head_count
+            if _coerce_bool_value(row.get("Pregnant"), False) and pregnancy_queue:
+                seed_slot = min(
+                    max(pregnancy_slots - 1 - int(np.floor(pre_roll_months / max(grain_months, 1e-9))), 0),
+                    pregnancy_slots - 1,
+                )
+                pregnancy_queue[seed_slot][_parity_key(row.get("Parity"))] += head_count
         elif purpose == "breeding_buck":
             breeding_bucks += head_count
         elif purpose == "replacement_doe":
-            replacement_buckets[min(age_idx, age_at_first_kidding)] += head_count
+            replacement_buckets[min(age_idx, bucket_count - 1)] += head_count
         elif purpose == "finishing_female":
-            female_finishing_buckets[min(age_idx, sale_age)] += head_count
+            female_finishing_buckets[min(age_idx, bucket_count - 1)] += head_count
         elif purpose == "finishing_male":
-            male_finishing_buckets[min(age_idx, sale_age)] += head_count
+            male_finishing_buckets[min(age_idx, bucket_count - 1)] += head_count
 
     if (
         breeding_bucks
@@ -3488,18 +3839,20 @@ def _derive_biological_schedules(
         first_target = float(pd.to_numeric(herd_plan_df["Herd Size (heads)"], errors="coerce").dropna().iloc[0] or 320.0)
         breeding_parity["2"] = first_target * 0.47
         breeding_bucks = first_target * 0.025
-        replacement_buckets[min(age_at_first_kidding // 2, age_at_first_kidding)] = first_target * 0.125
-        female_finishing_buckets[min(sale_age // 2, sale_age)] = first_target * 0.19
-        male_finishing_buckets[min(sale_age // 2, sale_age)] = first_target * 0.19
+        replacement_buckets[min(_age_bucket_index(age_at_first_kidding / 2.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)] = first_target * 0.125
+        female_finishing_buckets[min(_age_bucket_index(sale_age / 2.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)] = first_target * 0.19
+        male_finishing_buckets[min(_age_bucket_index(sale_age / 2.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)] = first_target * 0.19
 
-    pregnancy_queue: list[dict[str, float]] = [{"1": 0.0, "2": 0.0, "3+": 0.0} for _ in range(gestation_months)]
     lactation_cohorts: list[dict[str, float]] = []
     if not opening_cohorts.empty:
         initial_lactating = opening_cohorts.loc[
             opening_cohorts["Purpose"].astype(str).str.strip().str.lower() == "breeding_doe"
         ]
         for _, row in initial_lactating.iterrows():
-            days_in_milk = float(pd.to_numeric(pd.Series([row.get("Days in Milk")]), errors="coerce").iloc[0] or 0.0)
+            days_in_milk = (
+                float(pd.to_numeric(pd.Series([row.get("Days in Milk")]), errors="coerce").iloc[0] or 0.0)
+                + pre_roll_days
+            )
             if days_in_milk <= 0:
                 continue
             lactation_cohorts.append(
@@ -3598,29 +3951,23 @@ def _derive_biological_schedules(
 
     summary_rows: list[dict[str, Any]] = []
     pregnancy_rows: list[dict[str, Any]] = []
+    kidding_rows: list[dict[str, Any]] = []
     lactation_rows: list[dict[str, Any]] = []
+    days_in_milk_rows: list[dict[str, Any]] = []
     finishing_rows: list[dict[str, Any]] = []
     slaughter_rows: list[dict[str, Any]] = []
     replacement_rows: list[dict[str, Any]] = []
+    kid_cohort_rows: list[dict[str, Any]] = []
+    breeding_rows: list[dict[str, Any]] = []
 
     for idx, period in enumerate(work_index):
         period_key = period.strftime("%Y-%m-%d")
-        months_factor = float(period_days.iloc[idx] / 30.44) if idx < len(period_days) else 1.0
+        months_factor = grain_months
+        if idx < len(period_days):
+            actual_months = float(period_days.iloc[idx] / 30.44)
+            if model_grain not in {"monthly", "quarterly", "annual"}:
+                months_factor = max(actual_months, 1e-6)
         months_factor = max(months_factor, 1e-6)
-
-        matured_replacements = float(replacement_buckets[-1]) if len(replacement_buckets) else 0.0
-        replacement_buckets[1:] = replacement_buckets[:-1]
-        replacement_buckets[0] = 0.0
-
-        eligible_female = float(female_finishing_buckets[-1]) if len(female_finishing_buckets) else 0.0
-        female_finishing_buckets[1:] = female_finishing_buckets[:-1]
-        female_finishing_buckets[0] = 0.0
-
-        eligible_male = float(male_finishing_buckets[-1]) if len(male_finishing_buckets) else 0.0
-        male_finishing_buckets[1:] = male_finishing_buckets[:-1]
-        male_finishing_buckets[0] = 0.0
-
-        breeding_parity["1"] += matured_replacements
 
         doe_exit_rate = _monthly_rate_from_annual_pct(doe_exit_pct, months_factor)
         buck_exit_rate = _monthly_rate_from_annual_pct(buck_exit_pct, months_factor)
@@ -3634,6 +3981,32 @@ def _derive_biological_schedules(
         female_finishing_buckets *= max(0.0, 1.0 - finishing_exit_rate)
         male_finishing_buckets *= max(0.0, 1.0 - finishing_exit_rate)
 
+        replacement_buckets, matured_replacements, _ = _advance_age_buckets(
+            replacement_buckets,
+            months_factor=months_factor,
+            age_band_width=age_band_width,
+            mature_age_months=age_at_first_kidding,
+        )
+        female_finishing_buckets, eligible_female, female_sale_weight_total = _advance_age_buckets(
+            female_finishing_buckets,
+            months_factor=months_factor,
+            age_band_width=age_band_width,
+            mature_age_months=slaughter_age,
+            weight_gain_per_month=monthly_weight_gain,
+            market_weight_kg=target_live_weight,
+            months_to_market_weight=months_to_market_weight,
+        )
+        male_finishing_buckets, eligible_male, male_sale_weight_total = _advance_age_buckets(
+            male_finishing_buckets,
+            months_factor=months_factor,
+            age_band_width=age_band_width,
+            mature_age_months=slaughter_age,
+            weight_gain_per_month=monthly_weight_gain,
+            market_weight_kg=target_live_weight,
+            months_to_market_weight=months_to_market_weight,
+        )
+        breeding_parity["1"] += matured_replacements
+
         births_payload = pregnancy_queue.pop(0) if pregnancy_queue else {"1": 0.0, "2": 0.0, "3+": 0.0}
         kidding_does = float(sum(births_payload.values()))
         kids_born = kidding_does * kids_per_kidding
@@ -3643,9 +4016,9 @@ def _derive_biological_schedules(
 
         retained_female_kids = female_kids * max(0.0, replacement_retention)
         female_for_finishing = max(0.0, female_kids - retained_female_kids)
-        replacement_buckets[0] += retained_female_kids
-        female_finishing_buckets[0] += female_for_finishing
-        male_finishing_buckets[0] += male_kids
+        replacement_buckets[_age_bucket_index(0.0, int(np.ceil(max_age_horizon)), age_band_width)] += retained_female_kids
+        female_finishing_buckets[_age_bucket_index(0.0, int(np.ceil(max_age_horizon)), age_band_width)] += female_for_finishing
+        male_finishing_buckets[_age_bucket_index(0.0, int(np.ceil(max_age_horizon)), age_band_width)] += male_kids
 
         if kidding_does > 0:
             parity_one_births = float(births_payload.get("1", 0.0))
@@ -3668,7 +4041,8 @@ def _derive_biological_schedules(
 
         breeding_does = float(sum(breeding_parity.values()))
         monthly_kidding_rate = (kiddings_per_doe_year / 12.0) * (conception_rate / 100.0) * months_factor
-        total_conceptions = breeding_does * max(0.0, monthly_kidding_rate)
+        breeding_does_available = max(0.0, breeding_does - float(sum(sum(payload.values()) for payload in pregnancy_queue)))
+        total_conceptions = breeding_does_available * max(0.0, monthly_kidding_rate)
         parity_mix = {
             parity: (breeding_parity[parity] / breeding_does) if breeding_does > 0 else 0.0
             for parity in breeding_parity
@@ -3682,6 +4056,7 @@ def _derive_biological_schedules(
         milk_output = 0.0
         lactating_does = 0.0
         next_lactation_cohorts: list[dict[str, float]] = []
+        parity_days: Dict[str, dict[str, float]] = {}
         for cohort in lactation_cohorts:
             parity = _parity_key(cohort.get("parity"))
             config = lactation_lookup.get(parity, lactation_lookup.get("3+", {}))
@@ -3696,6 +4071,10 @@ def _derive_biological_schedules(
             heads = float(cohort.get("heads", 0.0))
             milk_output += heads * daily_yield * float(period_days.iloc[idx])
             lactating_does += heads
+            parity_days.setdefault(parity, {"heads": 0.0, "days": 0.0, "yield": 0.0})
+            parity_days[parity]["heads"] += heads
+            parity_days[parity]["days"] += heads * days_in_milk
+            parity_days[parity]["yield"] += heads * daily_yield
             cohort["days_in_milk"] = days_in_milk + float(period_days.iloc[idx])
             next_lactation_cohorts.append(cohort)
         lactation_cohorts = next_lactation_cohorts
@@ -3703,6 +4082,9 @@ def _derive_biological_schedules(
         saleable_goats = max(0.0, eligible_female + eligible_male)
         live_herd_sales = saleable_goats * max(0.0, live_sale_share)
         slaughter_heads = max(0.0, saleable_goats - live_herd_sales)
+        average_sale_weight = 0.0
+        if saleable_goats > 0:
+            average_sale_weight = (female_sale_weight_total + male_sale_weight_total) / saleable_goats
 
         herd_size = float(
             breeding_bucks
@@ -3752,6 +4134,7 @@ def _derive_biological_schedules(
                 "Saleable Goats (heads)": saleable_goats,
                 "Live Herd Sales (heads)": live_herd_sales,
                 "Slaughter Heads": slaughter_heads,
+                "Average Sale Weight Kg": average_sale_weight,
                 "Meat Output Kg": slaughter_heads * meat_yield,
                 "Offal Output Kg": slaughter_heads * offal_yield,
                 "Pelt Output Units": slaughter_heads * pelt_units,
@@ -3767,6 +4150,16 @@ def _derive_biological_schedules(
                 "Kids Born": kids_born,
             }
         )
+        kidding_rows.append(
+            {
+                "Period": period,
+                "Kidding Does": kidding_does,
+                "Kids Born": kids_born,
+                "Female Kids": female_kids,
+                "Male Kids": male_kids,
+                "Surviving Kids": surviving_kids,
+            }
+        )
         lactation_rows.append(
             {
                 "Period": period,
@@ -3779,6 +4172,19 @@ def _derive_biological_schedules(
                 ),
             }
         )
+        for parity, values in parity_days.items():
+            heads = values["heads"]
+            days_in_milk_avg = values["days"] / heads if heads > 0 else 0.0
+            yield_avg = values["yield"] / heads if heads > 0 else 0.0
+            days_in_milk_rows.append(
+                {
+                    "Period": period,
+                    "Parity Group": parity,
+                    "Lactating Does": heads,
+                    "Average Days in Milk": days_in_milk_avg,
+                    "Average Yield per Doe per Day": yield_avg,
+                }
+            )
         finishing_rows.append(
             {
                 "Period": period,
@@ -3786,6 +4192,7 @@ def _derive_biological_schedules(
                 "Finishing Females": female_finishing_buckets.sum(),
                 "Finishing Males": male_finishing_buckets.sum(),
                 "Saleable Goats (heads)": saleable_goats,
+                "Average Sale Weight Kg": average_sale_weight,
             }
         )
         slaughter_rows.append(
@@ -3794,6 +4201,7 @@ def _derive_biological_schedules(
                 "Saleable Goats (heads)": saleable_goats,
                 "Live Herd Sales (heads)": live_herd_sales,
                 "Slaughter Heads": slaughter_heads,
+                "Average Sale Weight Kg": average_sale_weight,
                 "Meat Output Kg": slaughter_heads * meat_yield,
                 "Offal Output Kg": slaughter_heads * offal_yield,
                 "Pelt Output Units": slaughter_heads * pelt_units,
@@ -3808,21 +4216,58 @@ def _derive_biological_schedules(
                 "Matured Replacements": matured_replacements,
             }
         )
+        breeding_rows.append(
+            {
+                "Period": period,
+                "Parity 1": breeding_parity["1"],
+                "Parity 2": breeding_parity["2"],
+                "Parity 3+": breeding_parity["3+"],
+                "Breeding Does": sum(breeding_parity.values()),
+                "Breeding Bucks": breeding_bucks,
+                "Pregnant Does": pregnant_does,
+            }
+        )
+        for bucket_index in range(bucket_count):
+            age_band_start = bucket_index * age_band_width
+            age_band_end = age_band_start + age_band_width
+            replacement_count = float(replacement_buckets[bucket_index])
+            finishing_female_count = float(female_finishing_buckets[bucket_index])
+            finishing_male_count = float(male_finishing_buckets[bucket_index])
+            if replacement_count <= 0 and finishing_female_count <= 0 and finishing_male_count <= 0:
+                continue
+            kid_cohort_rows.append(
+                {
+                    "Period": period,
+                    "Age Band Start (months)": age_band_start,
+                    "Age Band End (months)": age_band_end,
+                    "Replacement Does": replacement_count,
+                    "Finishing Females": finishing_female_count,
+                    "Finishing Males": finishing_male_count,
+                }
+            )
 
     summary = pd.DataFrame(summary_rows).set_index("Period")
     pregnancy_schedule = pd.DataFrame(pregnancy_rows).set_index("Period")
+    kidding_schedule = pd.DataFrame(kidding_rows).set_index("Period")
     lactation_schedule = pd.DataFrame(lactation_rows).set_index("Period")
+    days_in_milk_schedule = pd.DataFrame(days_in_milk_rows).set_index("Period")
     finishing_schedule = pd.DataFrame(finishing_rows).set_index("Period")
     slaughter_schedule = pd.DataFrame(slaughter_rows).set_index("Period")
     replacement_schedule = pd.DataFrame(replacement_rows).set_index("Period")
+    kid_cohort_schedule = pd.DataFrame(kid_cohort_rows).set_index("Period")
+    breeding_schedule = pd.DataFrame(breeding_rows).set_index("Period")
 
     return {
         "Biological Herd Summary": summary,
         "Pregnancy Schedule": pregnancy_schedule,
+        "Kidding Schedule": kidding_schedule,
+        "Kid Cohort Schedule": kid_cohort_schedule,
         "Lactation Schedule": lactation_schedule,
+        "Days in Milk Schedule": days_in_milk_schedule,
         "Finishing Cohort Schedule": finishing_schedule,
         "Slaughter Output Schedule": slaughter_schedule,
         "Replacement Schedule": replacement_schedule,
+        "Breeding Herd Schedule": breeding_schedule,
     }
 
 
@@ -5026,6 +5471,9 @@ def _sync_commercial_assumptions_to_core(
     synced["Cohort Allocation Rules"] = _ensure_cohort_allocation_rules_table(
         synced.get("Cohort Allocation Rules")
     )
+    synced["Biological Cost Drivers"] = _ensure_biological_cost_drivers_table(
+        synced.get("Biological Cost Drivers")
+    )
     synced["Production Drivers"] = _sync_production_driver_table_to_products(
         synced.get("Production Drivers"),
         active_products,
@@ -5556,7 +6004,9 @@ def _apply_operating_cost_increment(
 
 
 def _apply_operating_cost_assumptions_to_schedule(
-    schedule_df: pd.DataFrame, operating_table: Optional[pd.DataFrame]
+    schedule_df: pd.DataFrame,
+    operating_table: Optional[pd.DataFrame],
+    biological_cost_table: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if schedule_df.empty or operating_table is None or operating_table.empty:
         return schedule_df
@@ -5581,21 +6031,62 @@ def _apply_operating_cost_assumptions_to_schedule(
     year_values = work.index.year
 
     field_period_costs: Dict[str, pd.Series] = {}
-    for field in assumptions["Field"].dropna().astype(str).unique().tolist():
-        field_rows = assumptions[assumptions["Field"].astype(str) == field]
-        unit_map = {
-            int(row["Year"]): float(row["unit_cost_per_head_per_month"])
-            for _, row in field_rows.iterrows()
-            if pd.notna(row.get("Year")) and pd.notna(row.get("unit_cost_per_head_per_month"))
-        }
-        if not unit_map:
-            continue
-        unit_series = pd.Series(
-            [unit_map.get(int(y), np.nan) for y in year_values],
-            index=work.index,
-            dtype=float,
-        ).ffill()
-        field_period_costs[field] = unit_series * herd * months_factor
+    biological_costs = (
+        _ensure_biological_cost_drivers_table(biological_cost_table)
+        if isinstance(biological_cost_table, pd.DataFrame) and not biological_cost_table.empty
+        else pd.DataFrame()
+    )
+    biological_active = (
+        not biological_costs.empty
+        and "Applies To" in biological_costs.columns
+        and biological_costs["Active"].fillna(True).astype(bool).any()
+    )
+    if biological_active:
+        active_rows = biological_costs.loc[biological_costs["Active"].fillna(True).astype(bool)].copy()
+        for field in active_rows["Field"].dropna().astype(str).unique().tolist():
+            field_rows = active_rows.loc[active_rows["Field"].astype(str) == field]
+            field_cost = pd.Series(0.0, index=work.index, dtype=float)
+            for _, row in field_rows.iterrows():
+                applies_to = str(row.get("Applies To", "")).strip().lower()
+                basis_column = BIOLOGICAL_COST_APPLIES_TO_MAP.get(applies_to)
+                if not basis_column or basis_column not in work.columns:
+                    continue
+                basis_series = pd.to_numeric(work.get(basis_column), errors="coerce").fillna(0.0)
+                row_year = pd.to_numeric(pd.Series([row.get("Year")]), errors="coerce").iloc[0]
+                unit_cost = pd.to_numeric(
+                    pd.Series([row.get("unit_cost_per_head_per_month")]), errors="coerce"
+                ).iloc[0]
+                inflation = pd.to_numeric(pd.Series([row.get("Inflation %")]), errors="coerce").iloc[0]
+                if pd.isna(unit_cost):
+                    continue
+                base_year = int(row_year) if pd.notna(row_year) else int(year_values.min())
+                inflation_rate = float(inflation) / 100.0 if pd.notna(inflation) else 0.0
+                unit_series = pd.Series(
+                    [
+                        float(unit_cost) * ((1.0 + inflation_rate) ** max(int(year) - base_year, 0))
+                        for year in year_values
+                    ],
+                    index=work.index,
+                    dtype=float,
+                )
+                field_cost = field_cost.add(unit_series * basis_series * months_factor, fill_value=0.0)
+            field_period_costs[field] = field_cost
+    else:
+        for field in assumptions["Field"].dropna().astype(str).unique().tolist():
+            field_rows = assumptions[assumptions["Field"].astype(str) == field]
+            unit_map = {
+                int(row["Year"]): float(row["unit_cost_per_head_per_month"])
+                for _, row in field_rows.iterrows()
+                if pd.notna(row.get("Year")) and pd.notna(row.get("unit_cost_per_head_per_month"))
+            }
+            if not unit_map:
+                continue
+            unit_series = pd.Series(
+                [unit_map.get(int(y), np.nan) for y in year_values],
+                index=work.index,
+                dtype=float,
+            ).ffill()
+            field_period_costs[field] = unit_series * herd * months_factor
 
     if "variable_feed_cost_per_herd" in field_period_costs:
         work["COGS"] = field_period_costs["variable_feed_cost_per_herd"]
@@ -5812,7 +6303,12 @@ def _sync_cogs_from_operating_assumptions(
 
     if isinstance(herd_plan, pd.DataFrame) and not herd_plan.empty:
         projected = _apply_herd_plan_to_schedule(projected, herd_plan)
-    projected = _apply_operating_cost_assumptions_to_schedule(projected, operating_costs)
+    projected = _apply_biological_assumptions_to_schedule(projected, assumptions_map)
+    projected = _apply_operating_cost_assumptions_to_schedule(
+        projected,
+        operating_costs,
+        assumptions_map.get("Biological Cost Drivers"),
+    )
 
     mapped = cogs_table.copy()
     mapped["Period"] = _normalize_period(mapped.get("Period", pd.Series(dtype=str)))
@@ -7357,7 +7853,8 @@ def _sync_scenario_controls_to_products(
     )
     filtered = work.loc[keep_mask].copy()
     filtered_drivers = set(filtered["Driver"].astype(str))
-    for driver in list(active_drivers) + ["Feed cost change (%)"]:
+    biological_drivers = list(BIOLOGICAL_SCENARIO_DRIVER_DEFAULTS.keys())
+    for driver in list(active_drivers) + biological_drivers + ["Feed cost change (%)"]:
         if driver not in filtered_drivers:
             default_value = float(DEFAULT_SCENARIO_ADJUSTMENTS.get(driver, 0.0))
             filtered = pd.concat(
@@ -7371,6 +7868,7 @@ def _sync_scenario_controls_to_products(
     driver_order = [
         *[_price_change_driver(product) for product in active_products],
         *[_quantity_change_driver(product) for product in active_products],
+        *biological_drivers,
         "Feed cost change (%)",
     ]
     order_map = {driver: idx for idx, driver in enumerate(driver_order)}
@@ -7954,7 +8452,9 @@ def _build_schedule_dataframe(
         operating_costs = synced_assumptions.get("Operating Costs")
         if isinstance(operating_costs, pd.DataFrame) and not operating_costs.empty:
             schedule_df = _apply_operating_cost_assumptions_to_schedule(
-                schedule_df, operating_costs
+                schedule_df,
+                operating_costs,
+                synced_assumptions.get("Biological Cost Drivers"),
             )
         pricing = synced_assumptions.get("Pricing")
         if isinstance(pricing, pd.DataFrame) and not pricing.empty:
@@ -7986,6 +8486,7 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
             "Finishing & Slaughter Biology": _default_finishing_slaughter_biology_table(),
             "Opening Herd Cohorts": _default_opening_herd_cohorts_table(),
             "Cohort Allocation Rules": _default_cohort_allocation_rules_table(),
+            "Biological Cost Drivers": _default_biological_cost_drivers_table(),
             "Pricing": _default_pricing_table(),
             "Production Drivers": _default_production_driver_table(),
             "Operating Costs": _default_operating_cost_table(),
@@ -8111,6 +8612,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
         "Finishing & Slaughter Biology": _default_finishing_slaughter_biology_table(),
         "Opening Herd Cohorts": _default_opening_herd_cohorts_table(),
         "Cohort Allocation Rules": _default_cohort_allocation_rules_table(),
+        "Biological Cost Drivers": _default_biological_cost_drivers_table(),
         "Pricing": _default_pricing_table(),
         "Production Drivers": _default_production_driver_table(),
         "Operating Costs": _default_operating_cost_table(),
@@ -11122,6 +11624,12 @@ def main() -> None:
                 "Controls how surviving kids are retained into replacements versus routed into finishing and sale streams.",
                 _ensure_cohort_allocation_rules_table,
                 "assump::cohort_allocation_rules",
+            ),
+            (
+                "Biological Cost Drivers",
+                "Maps feed, healthcare, and utilities to breeding, replacement, finishing, lactating, or total-herd stage bases.",
+                _ensure_biological_cost_drivers_table,
+                "assump::biological_cost_drivers",
             ),
         ]
 

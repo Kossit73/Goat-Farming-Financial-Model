@@ -67,6 +67,7 @@ def test_default_assumptions_include_biological_engine_tables():
         "Finishing & Slaughter Biology",
         "Opening Herd Cohorts",
         "Cohort Allocation Rules",
+        "Biological Cost Drivers",
     }
 
     assert required.issubset(assumptions.keys())
