@@ -49,6 +49,7 @@ from goat_financial_model.pages.assumptions_page import (
 )
 from goat_financial_model.pages.input_schedule_page import render_cogs_schedule_editor, render_schedule_summary
 from goat_financial_model.pricing_engine import build_pricing_context, derive_pricing_quantities
+from goat_financial_model.reporting import generate_excel_workbook, prepare_export_bundle
 from goat_financial_model.scenario_runner import (
     ScenarioBuildHooks,
     ScenarioOutputSpec,
@@ -2291,108 +2292,18 @@ def _generate_excel_bytes(
     scenario_name: str,
     author_name: Optional[str] = None,
 ) -> bytes:
-    buffer = BytesIO()
-
-    scenario_df = results.get("scenario")
-    base_df = results.get("base")
-    kpis = results.get("kpis")
-    break_even = results.get("break_even")
-    supplementary = results.get("supplementary", {})
-    scenario_inputs = results.get("scenario_inputs", {})
-
-    used_sheets: set[str] = set()
-
-    def write_sheet(name: str, df: Optional[pd.DataFrame]) -> None:
-        if df is None:
-            return
-        frame = _prepare_dataframe_for_excel(df)
-        if frame.empty and frame.columns.empty:
-            return
-        frame.to_excel(
-            writer,
-            sheet_name=_sanitize_sheet_name(name, used_sheets),
-            index=False,
-        )
-
-    engine = _resolve_excel_writer_engine()
-    author = (author_name or "").strip() or DEFAULT_MODEL_AUTHOR
-
-    with pd.ExcelWriter(buffer, engine=engine) as writer:
-        workbook = getattr(writer, "book", None)
-        if workbook is not None and author:
-            if engine == "xlsxwriter" and hasattr(workbook, "set_properties"):
-                workbook.set_properties({"author": author})
-            elif engine == "openpyxl":
-                try:
-                    workbook.properties.creator = author
-                except Exception:  # pragma: no cover - best effort
-                    pass
-
-        if base_df is not None:
-            write_sheet("Input Schedule", base_df)
-
-        if scenario_df is not None:
-            write_sheet(f"{scenario_name} Timeline", scenario_df)
-            try:
-                annual = scenario_df.copy()
-                annual.index = pd.to_datetime(annual.index)
-                annual = annual.groupby(annual.index.year).sum(min_count=1)
-                annual.index.name = "Year"
-                write_sheet(f"{scenario_name} Annual", annual)
-            except Exception:
-                pass
-
-            try:
-                sop = model.statement_of_financial_performance(scenario_df, annual=True)
-                write_sheet("Statement of Financial Performance", sop)
-            except ValueError:
-                pass
-
-            try:
-                sofp = model.statement_of_financial_position(scenario_df, annual=True)
-                write_sheet("Statement of Financial Position", sofp)
-            except ValueError:
-                pass
-
-            try:
-                socf = model.statement_of_cash_flow(scenario_df, annual=True)
-                write_sheet("Statement of Cash Flows", socf)
-            except ValueError:
-                pass
-
-        if kpis is not None:
-            write_sheet("KPIs (Annual)", kpis.mul(100))
-
-        if break_even is not None:
-            write_sheet("Break-even Analysis", break_even)
-
-        if scenario_inputs:
-            inputs_df = pd.DataFrame(
-                {
-                    "Input": list(scenario_inputs.keys()),
-                    "Value": list(scenario_inputs.values()),
-                }
-            )
-            write_sheet("Scenario Inputs", inputs_df)
-
-        for name, table in supplementary.items():
-            if table is None:
-                continue
-            write_sheet(f"Supplementary - {name}", table)
-
-        metadata_df = pd.DataFrame(
-            {
-                "Scenario": [scenario_name],
-            }
-        )
-        write_sheet("Scenario Details", metadata_df)
-
-    buffer.seek(0)
-    return _style_professional_workbook(
-        buffer.getvalue(),
+    bundle = prepare_export_bundle(
+        model,
         scenario_name=scenario_name,
-        results=results,
+        author_name=author_name or DEFAULT_MODEL_AUTHOR,
+        base_df=results.get("base"),
+        scenario_df=results.get("scenario"),
+        kpis_df=results.get("kpis"),
+        break_even_df=results.get("break_even"),
+        supplementary=results.get("supplementary", {}),
+        scenario_inputs=results.get("scenario_inputs", {}),
     )
+    return generate_excel_workbook(bundle)
 
 
 DEFAULT_VARIABLE_ITEMS = [
