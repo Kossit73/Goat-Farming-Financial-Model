@@ -77,6 +77,58 @@ def test_default_assumptions_include_biological_engine_tables():
     ].columns
 
 
+def test_default_biological_start_date_matches_production_horizon_start():
+    assumptions = streamlit_app._default_assumption_tables()
+
+    production_horizon = assumptions["Production Horizon"]
+    biological_settings = assumptions["Biological System Settings"]
+    settings_lookup = dict(
+        zip(biological_settings["Setting"], biological_settings["Value"], strict=False)
+    )
+
+    expected_start = streamlit_app._opening_biological_start_date_for_horizon(
+        production_horizon
+    )
+
+    assert settings_lookup["Opening Biological Start Date"] == expected_start
+
+
+def test_sync_biological_start_date_updates_to_new_horizon_start():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Production Horizon"] = pd.DataFrame(
+        {"Start Year": [2027], "End Year": [2029]}
+    )
+    assumptions["Biological System Settings"] = pd.DataFrame(
+        {
+            "Setting": [
+                "Model Grain",
+                "Opening Biological Start Date",
+                "Age Band Width (months)",
+            ],
+            "Value": ["monthly", "2024-01-31", "1"],
+        }
+    )
+
+    synced = streamlit_app._sync_biological_start_date_in_assumptions(assumptions)
+    biological_settings = synced["Biological System Settings"]
+    settings_lookup = dict(
+        zip(biological_settings["Setting"], biological_settings["Value"], strict=False)
+    )
+
+    assert settings_lookup["Opening Biological Start Date"] == "2027-01-31"
+
+
+def test_opening_biological_start_date_uses_first_quarter_for_quarterly_horizon():
+    horizon = pd.DataFrame({"Start Year": [2026], "End Year": [2028]})
+
+    aligned = streamlit_app._opening_biological_start_date_for_horizon(
+        horizon,
+        period_type="quarterly",
+    )
+
+    assert aligned == "2026-03-31"
+
+
 def test_default_valuation_inputs_exclude_derived_metrics():
     valuation = streamlit_app._default_valuation_inputs_table()
 

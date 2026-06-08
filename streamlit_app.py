@@ -3276,13 +3276,17 @@ BIOLOGICAL_COST_DRIVERS_SCHEMA = TableSchema(
 
 
 def _default_biological_system_settings_table() -> pd.DataFrame:
-    return build_default_table(BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA)
+    return _align_biological_system_settings_to_horizon(
+        build_default_table(BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA)
+    )
 
 
 def _ensure_biological_system_settings_table(
     table: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
-    return ensure_table(BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA, table)
+    return _align_biological_system_settings_to_horizon(
+        ensure_table(BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA, table)
+    )
 
 
 def _default_breeding_reproduction_biology_table() -> pd.DataFrame:
@@ -7760,6 +7764,63 @@ def _ensure_production_horizon_table(
     return work[ordered_cols + remainder].reset_index(drop=True)
 
 
+def _opening_biological_start_date_for_horizon(
+    production_horizon: Optional[pd.DataFrame],
+    period_type: str = "monthly",
+) -> str:
+    start_year, end_year = _derive_horizon_years(
+        _ensure_production_horizon_table(production_horizon)
+    )
+    period_index = _period_index_for_horizon(start_year, end_year, period_type)
+    if period_index.empty:
+        aligned_start = pd.Timestamp(start_year, 1, 1) + MonthEnd(0)
+    else:
+        aligned_start = pd.Timestamp(period_index.min())
+    return aligned_start.strftime("%Y-%m-%d")
+
+
+def _align_biological_system_settings_to_horizon(
+    table: Optional[pd.DataFrame],
+    production_horizon: Optional[pd.DataFrame] = None,
+    period_type: str = "monthly",
+) -> pd.DataFrame:
+    work = ensure_table(BIOLOGICAL_SYSTEM_SETTINGS_SCHEMA, table)
+    aligned_start = _opening_biological_start_date_for_horizon(
+        production_horizon,
+        period_type=period_type,
+    )
+    setting_key = "Opening Biological Start Date"
+    mask = work["Setting"].astype(str).str.strip().eq(setting_key)
+    if mask.any():
+        work.loc[mask, "Value"] = aligned_start
+    else:
+        work = pd.concat(
+            [
+                work,
+                pd.DataFrame([{"Setting": setting_key, "Value": aligned_start}]),
+            ],
+            ignore_index=True,
+        )
+    return _normalize_biological_system_settings_table(work)
+
+
+def _sync_biological_start_date_in_assumptions(
+    assumptions: Optional[Dict[str, pd.DataFrame]],
+    period_type: str = "monthly",
+) -> Dict[str, pd.DataFrame]:
+    synced = dict(assumptions or {})
+    production_horizon = _ensure_production_horizon_table(
+        synced.get("Production Horizon")
+    )
+    synced["Production Horizon"] = production_horizon
+    synced["Biological System Settings"] = _align_biological_system_settings_to_horizon(
+        synced.get("Biological System Settings"),
+        production_horizon=production_horizon,
+        period_type=period_type,
+    )
+    return synced
+
+
 def _production_year_options(start_year: int, end_year: int) -> list[int]:
     """Return a flexible list of year options covering the supplied range."""
 
@@ -7893,6 +7954,11 @@ def _reset_cached_results() -> None:
 def _sync_production_horizon(start_year: int, end_year: int) -> None:
     """Ensure schedules and cached results reflect the selected horizon."""
 
+    st.session_state.assumptions = _sync_biological_start_date_in_assumptions(
+        st.session_state.get("assumptions"),
+        period_type=_normalize_period_type(st.session_state.get("schedule_period_type")),
+    )
+
     core_table = st.session_state.get("core_schedule")
     detail_tables = st.session_state.get("detail_schedules")
     period_type = _normalize_period_type(st.session_state.get("schedule_period_type"))
@@ -7925,6 +7991,10 @@ def _sync_schedule_period_type(period_type: str) -> None:
     )
     start_year, end_year = _derive_horizon_years(production_table)
     st.session_state["schedule_period_type"] = _normalize_period_type(period_type)
+    st.session_state.assumptions = _sync_biological_start_date_in_assumptions(
+        st.session_state.get("assumptions"),
+        period_type=st.session_state["schedule_period_type"],
+    )
 
     core_table = st.session_state.get("core_schedule")
     detail_tables = st.session_state.get("detail_schedules")
@@ -10130,6 +10200,11 @@ def main() -> None:
     st.session_state["schedule_period_type"] = _normalize_period_type(
         st.session_state.get("schedule_period_type")
     )
+    st.session_state.assumptions = _sync_biological_start_date_in_assumptions(
+        st.session_state.assumptions,
+        period_type=st.session_state["schedule_period_type"],
+    )
+    production_horizon_defaults = st.session_state.assumptions.get("Production Horizon")
 
     if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
         core_default, detail_defaults = _default_schedule_components(
@@ -11088,6 +11163,10 @@ def main() -> None:
             definitions=biological_editors,
             assumptions=st.session_state.assumptions,
             render_row_editor=_render_schedule_row_editor,
+        )
+        st.session_state.assumptions = _sync_biological_start_date_in_assumptions(
+            st.session_state.assumptions,
+            period_type=st.session_state.get("schedule_period_type", "monthly"),
         )
         for definition in biological_editors:
             assumption_tables[definition.name] = st.session_state.assumptions[definition.name]
