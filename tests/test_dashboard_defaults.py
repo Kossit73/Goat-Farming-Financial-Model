@@ -932,6 +932,77 @@ def test_default_assumptions_include_business_configuration():
     assert streamlit_app._selected_business_type(assumptions) == "Combined"
 
 
+def test_model_npv_and_irr_ignore_stored_fallback_values():
+    assumptions = streamlit_app._default_assumption_tables()
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions.get("Production Horizon"),
+        assumptions=assumptions,
+    )
+    schedule_df = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+
+    valuation_inputs = streamlit_app._valuation_table_to_inputs(assumptions["Valuation Inputs"])
+    valuation_inputs["NPV"] = -999.0
+    valuation_inputs["IRR"] = -0.99
+
+    supplementary_tables = streamlit_app._default_supplementary_tables()
+    supplementary_tables["Capital & Financing"] = streamlit_app._ensure_capital_financing_table(
+        assumptions.get("Capital & Financing")
+    )
+    for name, table in assumptions.items():
+        supplementary_tables[f"Assumptions - {name}"] = table.copy()
+    supplementary_tables["Assumptions - Pricing"] = pd.DataFrame()
+
+    model = streamlit_app.InputSchedule(
+        data=schedule_df,
+        valuation_inputs=valuation_inputs,
+        supplementary_tables=supplementary_tables,
+    ).to_model()
+
+    summary = model.valuation_summary()
+
+    assert model.npv() == pytest.approx(float(summary["npv"]))
+    assert model.irr() == pytest.approx(float(summary["irr"]))
+    assert model.npv() != pytest.approx(-999.0)
+    assert model.irr() != pytest.approx(-0.99)
+
+
+def test_kpis_use_computed_npv_and_irr_only():
+    assumptions = streamlit_app._default_assumption_tables()
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions.get("Production Horizon"),
+        assumptions=assumptions,
+    )
+    schedule_df = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+
+    valuation_inputs = streamlit_app._valuation_table_to_inputs(assumptions["Valuation Inputs"])
+    valuation_inputs["NPV"] = -999.0
+    valuation_inputs["IRR"] = -0.99
+
+    supplementary_tables = streamlit_app._default_supplementary_tables()
+    supplementary_tables["Capital & Financing"] = streamlit_app._ensure_capital_financing_table(
+        assumptions.get("Capital & Financing")
+    )
+    for name, table in assumptions.items():
+        supplementary_tables[f"Assumptions - {name}"] = table.copy()
+    supplementary_tables["Assumptions - Pricing"] = pd.DataFrame()
+
+    model = streamlit_app.InputSchedule(
+        data=schedule_df,
+        valuation_inputs=valuation_inputs,
+        supplementary_tables=supplementary_tables,
+    ).to_model()
+
+    kpis = model.kpis(schedule_df, annual=False)
+    summary = model.valuation_summary(schedule_df)
+
+    assert "NPV" in kpis.columns
+    assert "IRR" in kpis.columns
+    assert float(kpis["NPV"].iloc[0]) == pytest.approx(float(summary["npv"]))
+    assert float(kpis["IRR"].iloc[0]) == pytest.approx(float(summary["irr"]))
+    assert float(kpis["NPV"].iloc[0]) != pytest.approx(-999.0)
+    assert float(kpis["IRR"].iloc[0]) != pytest.approx(-0.99)
+
+
 def test_sync_commercial_assumptions_filters_rows_to_business_type():
     core = pd.DataFrame(
         {

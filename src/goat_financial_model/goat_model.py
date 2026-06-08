@@ -349,21 +349,19 @@ class GoatModel:
         return float(value)
 
     def npv(self) -> Optional[float]:
-        value = self.valuation_inputs.get("NPV")
-        if value is None:
+        """Return computed DCF-based NPV for the current model cash-flow profile."""
+
+        summary = self.valuation_summary()
+        value = summary.get("npv")
+        if value is None or pd.isna(value):
             return None
         return float(value)
 
     def irr(self) -> Optional[float]:
-        value = self.valuation_inputs.get("IRR")
-        if value is None:
-            outputs_table = self.outputs()
-            if outputs_table is not None and not outputs_table.empty and {"Metric", "Value"}.issubset(outputs_table.columns):
-                metrics = outputs_table.copy()
-                metrics["Metric"] = metrics["Metric"].astype(str).str.strip().str.casefold()
-                matched = metrics.loc[metrics["Metric"] == "irr", "Value"]
-                if not matched.empty:
-                    value = pd.to_numeric(matched, errors="coerce").iloc[0]
+        """Return computed IRR for the current model cash-flow profile."""
+
+        summary = self.valuation_summary()
+        value = summary.get("irr")
         if value is None or pd.isna(value):
             return None
         return float(value)
@@ -1608,15 +1606,11 @@ class GoatModel:
 
     def computed_npv(self) -> Optional[float]:
         """Return DCF-based NPV from UFCF timeline, WACC, and terminal value."""
-        summary = self.valuation_summary()
-        npv_value = summary.get("npv")
-        return float(npv_value) if npv_value is not None else None
+        return self.npv()
 
     def computed_irr(self) -> Optional[float]:
         """Solve an IRR from irregular UFCF timing using a bisection search."""
-        summary = self.valuation_summary()
-        irr_value = summary.get("irr")
-        return float(irr_value) if irr_value is not None else None
+        return self.irr()
 
     def payback_period_years(self) -> Optional[float]:
         """Estimate simple payback period (years) from UFCF timeline."""
@@ -1950,14 +1944,10 @@ class GoatModel:
 
         valuation_summary = self.valuation_summary(df)
         computed_npv = valuation_summary.get("npv")
-        if computed_npv is None:
-            computed_npv = self.npv()
         if computed_npv is not None:
             out["NPV"] = float(computed_npv)
 
         computed_irr = valuation_summary.get("irr")
-        if computed_irr is None:
-            computed_irr = self.irr()
         if computed_irr is not None:
             out["IRR"] = float(computed_irr)
         payback = valuation_summary.get("payback_years")
