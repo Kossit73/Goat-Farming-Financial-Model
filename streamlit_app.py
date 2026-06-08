@@ -172,18 +172,28 @@ st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 AI_PROVIDER_OPTIONS = ("OpenAI", "Azure OpenAI", "Anthropic")
 
 DEFAULT_VALUATION_INPUTS = {
-    "WACC": 0.12,
+    "WACC": 0.10,
     "NPV": 0.0,
     "IRR": 0.0,
     "Terminal Value": 0.0,
     "Terminal Growth Rate": 0.02,
-    "Receivable Days": 30.0,
-    "Inventory Days": 45.0,
-    "Payable Days": 30.0,
+    "Receivable Days": 12.0,
+    "Inventory Days": 20.0,
+    "Payable Days": 45.0,
     "Minimum Cash Reserve": 25000.0,
     "DSCR Covenant": 1.20,
     "Interest Coverage Covenant": 1.50,
 }
+
+DERIVED_VALUATION_METRICS = frozenset({"NPV", "IRR"})
+
+
+def _editable_valuation_input_defaults() -> Dict[str, float]:
+    return {
+        metric: value
+        for metric, value in DEFAULT_VALUATION_INPUTS.items()
+        if metric not in DERIVED_VALUATION_METRICS
+    }
 
 ML_METHOD_LABELS = {
     "linear_regression": "Linear Regression",
@@ -1281,39 +1291,39 @@ PRODUCT_FAMILY_MAP: Dict[str, str] = {
 PRODUCT_DEFAULTS: Dict[str, dict[str, Any]] = {
     "Milk": {
         "unit": "Litre",
-        "base_price": 1.85,
+        "base_price": 4.00,
         "price_growth_pct": 3.0,
         "default_active": True,
     },
     "Cheese": {
         "unit": "Kg",
-        "base_price": 12.50,
+        "base_price": 30.00,
         "price_growth_pct": 2.5,
-        "default_active": False,
+        "default_active": True,
     },
     "Meat": {
         "unit": "Kg",
-        "base_price": 10.50,
+        "base_price": 28.00,
         "price_growth_pct": 2.8,
-        "default_active": False,
+        "default_active": True,
     },
     "Offal": {
         "unit": "Kg",
-        "base_price": 4.75,
+        "base_price": 12.00,
         "price_growth_pct": 2.2,
-        "default_active": False,
+        "default_active": True,
     },
     "Pelt": {
         "unit": "Piece",
-        "base_price": 8.00,
+        "base_price": 20.00,
         "price_growth_pct": 2.0,
-        "default_active": False,
+        "default_active": True,
     },
     "Live Herd": {
         "unit": "Head",
-        "base_price": 85.00,
+        "base_price": 220.00,
         "price_growth_pct": 2.5,
-        "default_active": False,
+        "default_active": True,
     },
 }
 
@@ -1359,7 +1369,7 @@ def _default_production_driver_row_templates(
             "Unit": "Litre",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 55.0,
-            "Litres per Lactating Doe per Day": 1.6,
+            "Litres per Lactating Doe per Day": 4.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
             "Slaughter Rate % of Herd per Period": 0.0,
@@ -1374,9 +1384,9 @@ def _default_production_driver_row_templates(
             "Unit": "Kg",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 55.0,
-            "Litres per Lactating Doe per Day": 1.6,
-            "Milk Allocation to Cheese %": 20.0,
-            "Cheese Yield Kg per Litre": 0.12,
+            "Litres per Lactating Doe per Day": 4.0,
+            "Milk Allocation to Cheese %": 25.0,
+            "Cheese Yield Kg per Litre": 0.14,
             "Slaughter Rate % of Herd per Period": 0.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
@@ -1392,9 +1402,9 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 2.0,
+            "Slaughter Rate % of Herd per Period": 3.0,
             "Live Herd Sales Share %": 0.0,
-            "Meat Yield Kg per Goat": 18.0,
+            "Meat Yield Kg per Goat": 22.0,
             "Offal Yield Kg per Goat": 0.0,
             "Pelt Units per Goat": 0.0,
             "Driver Growth %": 0.0,
@@ -1407,10 +1417,10 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 2.0,
+            "Slaughter Rate % of Herd per Period": 3.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
-            "Offal Yield Kg per Goat": 3.5,
+            "Offal Yield Kg per Goat": 4.0,
             "Pelt Units per Goat": 0.0,
             "Driver Growth %": 0.0,
         },
@@ -1422,7 +1432,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 2.0,
+            "Slaughter Rate % of Herd per Period": 3.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1437,8 +1447,8 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 2.0,
-            "Live Herd Sales Share %": 100.0,
+            "Slaughter Rate % of Herd per Period": 3.0,
+            "Live Herd Sales Share %": 30.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
             "Pelt Units per Goat": 0.0,
@@ -2392,14 +2402,16 @@ DEFAULT_DIRECT_WAGE_ITEMS = [
     {
         "Position": "Operations Crew",
         "Head Count": 3.0,
-        "Monthly Salary per Head": 1800.0,
-        "Total Salary": 5400.0,
+        "Monthly Salary per Head": 630.0,
+        "Total Salary": 1890.0,
+        "Share %": 67.5,
     },
     {
         "Position": "Herd Supervisor",
         "Head Count": 1.0,
-        "Monthly Salary per Head": 2600.0,
-        "Total Salary": 2600.0,
+        "Monthly Salary per Head": 910.0,
+        "Total Salary": 910.0,
+        "Share %": 32.5,
     },
 ]
 
@@ -2408,20 +2420,23 @@ DEFAULT_ADMIN_WAGE_ITEMS = [
     {
         "Position": "Administration",
         "Head Count": 1.0,
-        "Monthly Salary per Head": 1400.0,
-        "Total Salary": 1400.0,
+        "Monthly Salary per Head": 490.0,
+        "Total Salary": 490.0,
+        "Share %": 40.0,
     },
     {
         "Position": "Finance & Compliance",
         "Head Count": 1.0,
-        "Monthly Salary per Head": 1200.0,
-        "Total Salary": 1200.0,
+        "Monthly Salary per Head": 420.0,
+        "Total Salary": 420.0,
+        "Share %": 34.0,
     },
     {
         "Position": "Sales & Support",
         "Head Count": 1.0,
-        "Monthly Salary per Head": 900.0,
-        "Total Salary": 900.0,
+        "Monthly Salary per Head": 315.0,
+        "Total Salary": 315.0,
+        "Share %": 26.0,
     },
 ]
 
@@ -2469,42 +2484,42 @@ DEFAULT_OPERATING_COST_ROWS = [
         "Year": 2024,
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
-        "unit_cost_per_head_per_month": 26.56,
+        "unit_cost_per_head_per_month": 6.64,
         "Inflation %": 4.0,
     },
     {
         "Year": 2025,
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
-        "unit_cost_per_head_per_month": 27.62,
+        "unit_cost_per_head_per_month": 6.91,
         "Inflation %": 4.0,
     },
     {
         "Year": 2024,
         "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "unit_cost_per_head_per_month": 5.63,
+        "unit_cost_per_head_per_month": 1.41,
         "Inflation %": 3.5,
     },
     {
         "Year": 2025,
         "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
-        "unit_cost_per_head_per_month": 5.83,
+        "unit_cost_per_head_per_month": 1.46,
         "Inflation %": 3.5,
     },
     {
         "Year": 2024,
         "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "unit_cost_per_head_per_month": 3.75,
+        "unit_cost_per_head_per_month": 0.94,
         "Inflation %": 2.0,
     },
     {
         "Year": 2025,
         "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
-        "unit_cost_per_head_per_month": 3.83,
+        "unit_cost_per_head_per_month": 0.96,
         "Inflation %": 2.0,
     },
 ]
@@ -2850,14 +2865,14 @@ DEFAULT_BREEDING_REPRODUCTION_ROWS = [
         "Age at First Kidding (months)": 18.0,
         "Gestation Months": 5.0,
         "Kiddings per Doe per Year": 1.3,
-        "Kids per Kidding": 1.8,
-        "Conception Rate %": 85.0,
+        "Kids per Kidding": 2.2,
+        "Conception Rate %": 92.0,
         "Female Birth Share %": 50.0,
-        "Kid Mortality %": 8.0,
-        "Doe Mortality %": 4.0,
-        "Buck Mortality %": 4.0,
-        "Cull Rate %": 10.0,
-        "Replacement Retention %": 35.0,
+        "Kid Mortality %": 4.0,
+        "Doe Mortality %": 2.5,
+        "Buck Mortality %": 2.5,
+        "Cull Rate %": 8.0,
+        "Replacement Retention %": 30.0,
         "Active": True,
     }
 ]
@@ -2867,11 +2882,11 @@ DEFAULT_LACTATION_BIOLOGY_ROWS = [
     {
         "Parity Group": "1",
         "Age at First Kidding (months)": 18.0,
-        "Lactation Length Days": 240.0,
+        "Lactation Length Days": 260.0,
         "Dry Period Days": 90.0,
         "Peak Lactation Month": 2.0,
-        "Peak Yield Litres per Day": 1.4,
-        "Base Yield Litres per Day": 0.95,
+        "Peak Yield Litres per Day": 3.08,
+        "Base Yield Litres per Day": 1.90,
         "Parity Yield Factor": 0.9,
         "Curve Shape Parameter": 1.2,
         "Active": True,
@@ -2879,11 +2894,11 @@ DEFAULT_LACTATION_BIOLOGY_ROWS = [
     {
         "Parity Group": "2",
         "Age at First Kidding (months)": 18.0,
-        "Lactation Length Days": 255.0,
+        "Lactation Length Days": 275.0,
         "Dry Period Days": 80.0,
         "Peak Lactation Month": 2.0,
-        "Peak Yield Litres per Day": 1.7,
-        "Base Yield Litres per Day": 1.15,
+        "Peak Yield Litres per Day": 3.74,
+        "Base Yield Litres per Day": 2.30,
         "Parity Yield Factor": 1.0,
         "Curve Shape Parameter": 1.15,
         "Active": True,
@@ -2891,11 +2906,11 @@ DEFAULT_LACTATION_BIOLOGY_ROWS = [
     {
         "Parity Group": "3+",
         "Age at First Kidding (months)": 18.0,
-        "Lactation Length Days": 270.0,
+        "Lactation Length Days": 290.0,
         "Dry Period Days": 75.0,
         "Peak Lactation Month": 2.0,
-        "Peak Yield Litres per Day": 1.85,
-        "Base Yield Litres per Day": 1.25,
+        "Peak Yield Litres per Day": 4.07,
+        "Base Yield Litres per Day": 2.50,
         "Parity Yield Factor": 1.08,
         "Curve Shape Parameter": 1.1,
         "Active": True,
@@ -2906,17 +2921,17 @@ DEFAULT_LACTATION_BIOLOGY_ROWS = [
 DEFAULT_FINISHING_SLAUGHTER_ROWS = [
     {
         "Product Group": "Default Livestock Stream",
-        "Months to Market Weight": 8.0,
-        "Age at Slaughter (months)": 10.0,
-        "Target Live Weight Kg": 38.0,
-        "Monthly Weight Gain Kg": 3.8,
-        "Breeding Retention %": 35.0,
-        "Live Herd Sales Share %": 22.5,
+        "Months to Market Weight": 7.0,
+        "Age at Slaughter (months)": 9.0,
+        "Target Live Weight Kg": 42.0,
+        "Monthly Weight Gain Kg": 4.4,
+        "Breeding Retention %": 30.0,
+        "Live Herd Sales Share %": 30.0,
         "Carcass Yield %": 47.0,
-        "Meat Yield Kg per Goat": 18.0,
-        "Offal Yield Kg per Goat": 3.5,
+        "Meat Yield Kg per Goat": 22.0,
+        "Offal Yield Kg per Goat": 4.0,
         "Pelt Units per Goat": 1.0,
-        "Mortality %": 6.0,
+        "Mortality %": 3.5,
         "Active": True,
     }
 ]
@@ -2996,7 +3011,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "Applies To": "breeding_doe",
-        "unit_cost_per_head_per_month": 22.0,
+        "unit_cost_per_head_per_month": 3.96,
         "Inflation %": 4.0,
         "Active": True,
     },
@@ -3005,7 +3020,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "Applies To": "breeding_buck",
-        "unit_cost_per_head_per_month": 20.0,
+        "unit_cost_per_head_per_month": 3.60,
         "Inflation %": 4.0,
         "Active": True,
     },
@@ -3014,7 +3029,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "Applies To": "replacement_doe",
-        "unit_cost_per_head_per_month": 17.0,
+        "unit_cost_per_head_per_month": 3.06,
         "Inflation %": 4.0,
         "Active": True,
     },
@@ -3023,7 +3038,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "Applies To": "finishing_female",
-        "unit_cost_per_head_per_month": 16.0,
+        "unit_cost_per_head_per_month": 2.88,
         "Inflation %": 4.0,
         "Active": True,
     },
@@ -3032,7 +3047,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "Applies To": "finishing_male",
-        "unit_cost_per_head_per_month": 16.5,
+        "unit_cost_per_head_per_month": 2.97,
         "Inflation %": 4.0,
         "Active": True,
     },
@@ -3041,7 +3056,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "Applies To": "lactating_doe",
-        "unit_cost_per_head_per_month": 8.0,
+        "unit_cost_per_head_per_month": 1.44,
         "Inflation %": 4.0,
         "Active": True,
     },
@@ -3050,7 +3065,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
         "Applies To": "total_herd",
-        "unit_cost_per_head_per_month": 5.63,
+        "unit_cost_per_head_per_month": 2.25,
         "Inflation %": 3.5,
         "Active": True,
     },
@@ -3059,7 +3074,7 @@ DEFAULT_BIOLOGICAL_COST_DRIVER_ROWS = [
         "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
         "Applies To": "total_herd",
-        "unit_cost_per_head_per_month": 3.75,
+        "unit_cost_per_head_per_month": 0.75,
         "Inflation %": 2.0,
         "Active": True,
     },
@@ -7539,9 +7554,9 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
             {
                 "Year": [2024, 2025],
                 "Category": ["Production Equipment", "Housing Upgrades"],
-                "Spend": [45000.0, 38000.0],
+                "Spend": [500000.0, 175000.0],
                 "Depreciation Rate %": [8.0, 6.5],
-                "Depreciation": [3600.0, 2470.0],
+                "Depreciation": [40000.0, 11375.0],
             }
         ),
         "Asset Schedules": pd.DataFrame(
@@ -8293,8 +8308,8 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
             "Capital & Financing": _default_capital_financing_table(),
             "Valuation Inputs": pd.DataFrame(
                 {
-                    "Metric": list(DEFAULT_VALUATION_INPUTS.keys()),
-                    "Value": list(DEFAULT_VALUATION_INPUTS.values()),
+                    "Metric": list(_editable_valuation_input_defaults().keys()),
+                    "Value": list(_editable_valuation_input_defaults().values()),
                 }
             ),
         }
@@ -8344,8 +8359,8 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
 def _default_valuation_inputs_table() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "Metric": list(DEFAULT_VALUATION_INPUTS.keys()),
-            "Value": list(DEFAULT_VALUATION_INPUTS.values()),
+            "Metric": list(_editable_valuation_input_defaults().keys()),
+            "Value": list(_editable_valuation_input_defaults().values()),
         }
     )
 
@@ -8362,6 +8377,10 @@ def _ensure_valuation_inputs_table(
         work["Metric"] = ""
     work["Metric"] = work.get("Metric", "").astype(str).str.strip()
     work.loc[work["Metric"] == "", "Metric"] = "Metric"
+    derived_metric_keys = {metric.casefold() for metric in DERIVED_VALUATION_METRICS}
+    work = work.loc[
+        ~work["Metric"].astype(str).str.casefold().isin(derived_metric_keys)
+    ].reset_index(drop=True)
 
     if "Value" not in work.columns:
         work["Value"] = np.nan
@@ -8370,7 +8389,7 @@ def _ensure_valuation_inputs_table(
     existing_metrics = set(work["Metric"].astype(str))
     missing_rows = [
         {"Metric": metric, "Value": value}
-        for metric, value in DEFAULT_VALUATION_INPUTS.items()
+        for metric, value in _editable_valuation_input_defaults().items()
         if metric not in existing_metrics
     ]
     if missing_rows:
@@ -8379,7 +8398,9 @@ def _ensure_valuation_inputs_table(
     ordered_cols = ["Metric", "Value"]
     remainder = [col for col in work.columns if col not in ordered_cols]
     ordered = work[ordered_cols + remainder].reset_index(drop=True)
-    metric_order = {metric: idx for idx, metric in enumerate(DEFAULT_VALUATION_INPUTS)}
+    metric_order = {
+        metric: idx for idx, metric in enumerate(_editable_valuation_input_defaults())
+    }
     ordered = ordered.assign(
         __metric_order=ordered["Metric"].map(metric_order).fillna(len(metric_order))
     ).sort_values(["__metric_order", "Metric"], kind="stable")
@@ -8388,11 +8409,12 @@ def _ensure_valuation_inputs_table(
 
 def _valuation_table_to_inputs(table: pd.DataFrame) -> Dict[str, float]:
     work = _ensure_valuation_inputs_table(table)
+    allowed_metrics = set(_editable_valuation_input_defaults().keys())
     inputs: Dict[str, float] = {}
     for _, row in work.iterrows():
         metric = str(row.get("Metric", "")).strip()
         value = pd.to_numeric(pd.Series([row.get("Value")]), errors="coerce").iloc[0]
-        if metric and not pd.isna(value):
+        if metric in allowed_metrics and not pd.isna(value):
             inputs[metric] = float(value)
     return inputs
 
@@ -8440,7 +8462,7 @@ def _ensure_default_results_loaded() -> None:
     except ValueError:
         return
 
-    valuation_inputs = dict(DEFAULT_VALUATION_INPUTS)
+    valuation_inputs = dict(_editable_valuation_input_defaults())
     if isinstance(assumptions, dict):
         valuation_table = assumptions.get("Valuation Inputs")
         if isinstance(valuation_table, pd.DataFrame) and not valuation_table.empty:
@@ -11625,8 +11647,9 @@ def main() -> None:
             "Capital & Financing"
         ]
     
-        st.markdown("#### Valuation Inputs")
-        include_valuation = st.checkbox("Include valuation inputs", value=True)
+        st.markdown("#### Valuation Assumptions")
+        st.caption("Discount rate, working-capital, liquidity, and covenant assumptions. IRR and NPV are computed outputs.")
+        include_valuation = st.checkbox("Include valuation assumptions", value=True)
         valuation_table = _ensure_valuation_inputs_table(
             st.session_state.assumptions.get("Valuation Inputs")
         )
@@ -11908,8 +11931,8 @@ def main() -> None:
             debt_capacity_annual = pd.DataFrame()
         valuation_metrics = {
             "WACC": valuation_summary.get("discount_rate", model.wacc()),
-            "NPV": valuation_summary.get("npv", model.npv()),
-            "IRR": valuation_summary.get("irr", model.irr() if hasattr(model, "irr") else None),
+            "NPV": valuation_summary.get("npv"),
+            "IRR": valuation_summary.get("irr"),
             "Terminal Value": valuation_summary.get("terminal_value", model.terminal_value()),
             "Min DSCR": (
                 pd.to_numeric(debt_capacity_annual.get("DSCR"), errors="coerce").min()

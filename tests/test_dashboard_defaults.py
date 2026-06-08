@@ -77,6 +77,29 @@ def test_default_assumptions_include_biological_engine_tables():
     ].columns
 
 
+def test_default_valuation_inputs_exclude_derived_metrics():
+    valuation = streamlit_app._default_valuation_inputs_table()
+
+    assert "IRR" not in valuation["Metric"].tolist()
+    assert "NPV" not in valuation["Metric"].tolist()
+
+
+def test_valuation_table_to_inputs_ignores_derived_metrics():
+    raw = pd.DataFrame(
+        {
+            "Metric": ["WACC", "IRR", "NPV", "Terminal Value"],
+            "Value": [0.1, 0.55, 123456.0, 999.0],
+        }
+    )
+
+    inputs = streamlit_app._valuation_table_to_inputs(raw)
+
+    assert inputs["WACC"] == 0.1
+    assert inputs["Terminal Value"] == 999.0
+    assert "IRR" not in inputs
+    assert "NPV" not in inputs
+
+
 def test_scenario_presets_cover_key_cases():
     names = set(streamlit_app.SCENARIO_PRESETS.keys())
     assert {"Base Case Scenario", "Best Case Scenario", "Worst Case Scenario"}.issubset(
