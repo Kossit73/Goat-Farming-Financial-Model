@@ -129,6 +129,46 @@ def test_opening_biological_start_date_uses_first_quarter_for_quarterly_horizon(
     assert aligned == "2026-03-31"
 
 
+def test_opening_herd_cohorts_sync_to_first_herd_plan_target():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Herd Plan"] = pd.DataFrame(
+        {"Year": [2026, 2027], "Herd Size (heads)": [500.0, 525.0], "Herd Growth %": [pd.NA, 5.0]}
+    )
+
+    synced = streamlit_app._sync_opening_herd_cohorts_in_assumptions(assumptions)
+    opening = synced["Opening Herd Cohorts"]
+    total_heads = pd.to_numeric(opening["Head Count"], errors="coerce").sum()
+
+    assert total_heads == pytest.approx(500.0)
+
+
+def test_opening_herd_cohorts_sync_preserves_relative_mix():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Herd Plan"] = pd.DataFrame(
+        {"Year": [2026], "Herd Size (heads)": [640.0], "Herd Growth %": [pd.NA]}
+    )
+    assumptions["Opening Herd Cohorts"] = pd.DataFrame(
+        {
+            "Cohort ID": ["A", "B", "C"],
+            "Sex": ["Female", "Male", "Female"],
+            "Purpose": ["breeding_doe", "breeding_buck", "replacement_doe"],
+            "Age in Months": [24.0, 36.0, 10.0],
+            "Head Count": [100.0, 20.0, 40.0],
+            "Parity": [2.0, 0.0, 0.0],
+            "Pregnant": [True, False, False],
+            "Days in Milk": [60.0, 0.0, 0.0],
+            "Active": [True, True, True],
+        }
+    )
+
+    synced = streamlit_app._sync_opening_herd_cohorts_in_assumptions(assumptions)
+    opening = synced["Opening Herd Cohorts"].set_index("Cohort ID")
+
+    assert opening.loc["A", "Head Count"] == pytest.approx(400.0)
+    assert opening.loc["B", "Head Count"] == pytest.approx(80.0)
+    assert opening.loc["C", "Head Count"] == pytest.approx(160.0)
+
+
 def test_default_valuation_inputs_exclude_derived_metrics():
     valuation = streamlit_app._default_valuation_inputs_table()
 

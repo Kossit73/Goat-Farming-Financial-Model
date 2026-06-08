@@ -3325,6 +3325,38 @@ def _ensure_opening_herd_cohorts_table(table: Optional[pd.DataFrame]) -> pd.Data
     return ensure_table(OPENING_HERD_COHORTS_SCHEMA, table)
 
 
+def _sync_opening_herd_cohorts_to_herd_plan(
+    table: Optional[pd.DataFrame],
+    herd_plan: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    work = _ensure_opening_herd_cohorts_table(table)
+    plan = _ensure_herd_plan_table(herd_plan)
+
+    target_heads = next(
+        (
+            float(value)
+            for value in pd.to_numeric(plan.get("Herd Size (heads)"), errors="coerce").tolist()
+            if pd.notna(value) and float(value) > 0
+        ),
+        np.nan,
+    )
+    if pd.isna(target_heads) or float(target_heads) <= 0:
+        return work
+
+    head_counts = pd.to_numeric(work.get("Head Count"), errors="coerce")
+    current_total = float(head_counts.fillna(0.0).sum())
+    if current_total <= 0:
+        work = _default_opening_herd_cohorts_table()
+        head_counts = pd.to_numeric(work.get("Head Count"), errors="coerce")
+        current_total = float(head_counts.fillna(0.0).sum())
+        if current_total <= 0:
+            return work
+
+    scale_factor = float(target_heads) / current_total
+    work["Head Count"] = head_counts.fillna(0.0) * scale_factor
+    return _ensure_opening_herd_cohorts_table(work)
+
+
 def _default_cohort_allocation_rules_table() -> pd.DataFrame:
     return build_default_table(COHORT_ALLOCATION_RULES_SCHEMA)
 
@@ -3376,7 +3408,8 @@ def _assumption_bundle_ensure_map() -> dict[str, Callable[[Optional[pd.DataFrame
 
 
 def _build_app_assumption_bundle(assumptions: Optional[dict[str, pd.DataFrame]]) -> AssumptionBundle:
-    return build_assumption_bundle(dict(assumptions or {}), _assumption_bundle_ensure_map())
+    synced_assumptions = _sync_opening_herd_cohorts_in_assumptions(assumptions)
+    return build_assumption_bundle(synced_assumptions, _assumption_bundle_ensure_map())
 
 
 def _setting_lookup(table: Optional[pd.DataFrame]) -> Dict[str, str]:
@@ -7821,6 +7854,26 @@ def _sync_biological_start_date_in_assumptions(
     return synced
 
 
+def _sync_opening_herd_cohorts_in_assumptions(
+    assumptions: Optional[Dict[str, pd.DataFrame]],
+) -> Dict[str, pd.DataFrame]:
+    synced = dict(assumptions or {})
+    herd_plan = _ensure_herd_plan_table(synced.get("Herd Plan"))
+    synced["Herd Plan"] = herd_plan
+    synced["Opening Herd Cohorts"] = _sync_opening_herd_cohorts_to_herd_plan(
+        synced.get("Opening Herd Cohorts"),
+        herd_plan,
+    )
+    return synced
+
+
+def _save_herd_plan_and_sync_opening_cohorts(table: pd.DataFrame) -> None:
+    assumptions = dict(st.session_state.get("assumptions", {}))
+    assumptions["Herd Plan"] = _ensure_herd_plan_table(table)
+    assumptions = _sync_opening_herd_cohorts_in_assumptions(assumptions)
+    st.session_state.assumptions = assumptions
+
+
 def _production_year_options(start_year: int, end_year: int) -> list[int]:
     """Return a flexible list of year options covering the supplied range."""
 
@@ -7958,6 +8011,9 @@ def _sync_production_horizon(start_year: int, end_year: int) -> None:
         st.session_state.get("assumptions"),
         period_type=_normalize_period_type(st.session_state.get("schedule_period_type")),
     )
+    st.session_state.assumptions = _sync_opening_herd_cohorts_in_assumptions(
+        st.session_state.assumptions
+    )
 
     core_table = st.session_state.get("core_schedule")
     detail_tables = st.session_state.get("detail_schedules")
@@ -7994,6 +8050,9 @@ def _sync_schedule_period_type(period_type: str) -> None:
     st.session_state.assumptions = _sync_biological_start_date_in_assumptions(
         st.session_state.get("assumptions"),
         period_type=st.session_state["schedule_period_type"],
+    )
+    st.session_state.assumptions = _sync_opening_herd_cohorts_in_assumptions(
+        st.session_state.assumptions
     )
 
     core_table = st.session_state.get("core_schedule")
@@ -8047,6 +8106,7 @@ def _sync_horizon_dependent_state(start_year: int, end_year: int) -> None:
     if isinstance(assumptions, dict):
         core_schedule = st.session_state.get("core_schedule", pd.DataFrame())
         assumptions = _sync_commercial_assumptions_to_core(assumptions, core_schedule)
+        assumptions = _sync_opening_herd_cohorts_in_assumptions(assumptions)
 
         for table_name in ["Operating Costs", "Herd Plan"]:
             table = assumptions.get(table_name)
@@ -10204,6 +10264,9 @@ def main() -> None:
         st.session_state.assumptions,
         period_type=st.session_state["schedule_period_type"],
     )
+    st.session_state.assumptions = _sync_opening_herd_cohorts_in_assumptions(
+        st.session_state.assumptions
+    )
     production_horizon_defaults = st.session_state.assumptions.get("Production Horizon")
 
     if "core_schedule" not in st.session_state or "detail_schedules" not in st.session_state:
@@ -11100,13 +11163,14 @@ def main() -> None:
         st.session_state.assumptions["Herd Plan"] = herd_plan
         herd_plan = render_herd_plan_editor(
             herd_plan=herd_plan,
-            save_table=lambda table: st.session_state.assumptions.__setitem__(
-                "Herd Plan", _ensure_herd_plan_table(table)
-            ),
+            save_table=_save_herd_plan_and_sync_opening_cohorts,
             render_row_editor=_render_schedule_row_editor,
             clear_editor_state=_clear_schedule_editor_state,
             apply_increment_fn=_apply_herd_yearly_increment,
             ensure_fn=_ensure_herd_plan_table,
+        )
+        st.session_state.assumptions = _sync_opening_herd_cohorts_in_assumptions(
+            st.session_state.assumptions
         )
         assumption_tables["Herd Plan"] = st.session_state.assumptions["Herd Plan"]
 
@@ -11167,6 +11231,9 @@ def main() -> None:
         st.session_state.assumptions = _sync_biological_start_date_in_assumptions(
             st.session_state.assumptions,
             period_type=st.session_state.get("schedule_period_type", "monthly"),
+        )
+        st.session_state.assumptions = _sync_opening_herd_cohorts_in_assumptions(
+            st.session_state.assumptions
         )
         for definition in biological_editors:
             assumption_tables[definition.name] = st.session_state.assumptions[definition.name]
