@@ -114,6 +114,29 @@ def test_pricing_engine_uses_biological_quantities_when_available() -> None:
     assert meat_qty == pytest.approx(90.0)
 
 
+def test_apply_product_base_price_updates_all_rows_for_selected_product() -> None:
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2024-01-31", "2024-02-29", "2024-01-31"],
+            "Product": ["Milk", "Milk", "Cheese"],
+            "Base Price": [4.0, 4.1, 30.0],
+        }
+    )
+
+    updated = assumptions_page._apply_product_base_price(pricing, "Milk", 4.75)
+
+    assert updated.loc[updated["Product"] == "Milk", "Base Price"].tolist() == [4.75, 4.75]
+    assert updated.loc[updated["Product"] == "Cheese", "Base Price"].tolist() == [30.0]
+
+
+def test_apply_product_base_price_is_noop_when_required_columns_are_missing() -> None:
+    pricing = pd.DataFrame({"Product": ["Milk"]})
+
+    updated = assumptions_page._apply_product_base_price(pricing, "Milk", 4.75)
+
+    assert updated.equals(pricing)
+
+
 class _FakeColumn:
     def __init__(self, streamlit: "_FakeStreamlit") -> None:
         self._streamlit = streamlit

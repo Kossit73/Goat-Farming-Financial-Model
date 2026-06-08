@@ -21,6 +21,25 @@ class BiologicalEditorDefinition:
     editor_key: str
 
 
+def _apply_product_base_price(
+    pricing_table: pd.DataFrame,
+    product: str,
+    base_price: float,
+) -> pd.DataFrame:
+    updated = pricing_table.copy()
+    if "Product" not in updated.columns or "Base Price" not in updated.columns:
+        return updated
+
+    product_key = str(product).strip()
+    if not product_key:
+        return updated
+
+    product_mask = updated["Product"].astype(str).str.strip() == product_key
+    if product_mask.any():
+        updated.loc[product_mask, "Base Price"] = float(base_price)
+    return updated
+
+
 def render_biological_assumption_editor(
     *,
     definitions: list[BiologicalEditorDefinition],
@@ -283,6 +302,68 @@ def render_pricing_manual_editor(
             refresh_context,
             assumptions.get("Production Drivers"),
         )
+
+    product_options = sorted(
+        {
+            str(product)
+            for product in assumptions["Pricing"].get("Product", pd.Series(dtype=str)).dropna().tolist()
+            if str(product).strip()
+        }
+    )
+    if not product_options:
+        product_options = sorted({product for product in active_products if str(product).strip()})
+
+    st.markdown("##### Base Price Update")
+    if product_options:
+        st.session_state.setdefault("pricing_base_price_product", product_options[0])
+        selected_product = st.session_state.get("pricing_base_price_product", "")
+        if selected_product not in product_options:
+            selected_product = product_options[0]
+            st.session_state.pricing_base_price_product = selected_product
+
+        default_base_price = 0.0
+        if selected_product and "Product" in assumptions["Pricing"].columns:
+            matching_rows = assumptions["Pricing"].loc[
+                assumptions["Pricing"]["Product"].astype(str).str.strip() == selected_product,
+                "Base Price",
+            ]
+            if not matching_rows.empty:
+                current_price = pd.to_numeric(matching_rows, errors="coerce").dropna()
+                if not current_price.empty:
+                    default_base_price = float(current_price.iloc[0])
+
+        last_product = st.session_state.get("pricing_base_price_last_product")
+        if last_product != selected_product:
+            st.session_state.pricing_base_price_amount = default_base_price
+            st.session_state.pricing_base_price_last_product = selected_product
+        else:
+            st.session_state.setdefault("pricing_base_price_amount", default_base_price)
+
+        st.caption("Choose a product and apply a new base price across its pricing rows.")
+        base_price_product_col, base_price_amount_col, base_price_apply_col = st.columns([2, 1.5, 1])
+        base_price_product_col.selectbox(
+            "Product",
+            options=product_options,
+            key="pricing_base_price_product",
+        )
+        base_price_amount_col.number_input(
+            "New base price",
+            min_value=0.0,
+            step=0.1,
+            format="%.2f",
+            key="pricing_base_price_amount",
+        )
+        if base_price_apply_col.button("Apply base price", key="pricing_apply_base_price"):
+            updated_assumptions = dict(assumptions)
+            updated_assumptions["Pricing"] = _apply_product_base_price(
+                assumptions["Pricing"],
+                str(st.session_state.get("pricing_base_price_product", "")),
+                float(st.session_state.get("pricing_base_price_amount", 0.0)),
+            )
+            assumptions.update(sync_assumptions_fn(updated_assumptions, core_schedule))
+            clear_editor_state("assump::pricing")
+    else:
+        st.caption("No products are available yet. Add pricing rows first to apply a base price update.")
 
     def _save_pricing_matrix(updated: pd.DataFrame) -> None:
         refreshed_assumptions = dict(assumptions)
