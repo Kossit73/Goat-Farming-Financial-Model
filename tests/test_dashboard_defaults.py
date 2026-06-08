@@ -169,6 +169,71 @@ def test_opening_herd_cohorts_sync_preserves_relative_mix():
     assert opening.loc["C", "Head Count"] == pytest.approx(160.0)
 
 
+def test_default_asset_schedule_is_derived_from_capex_schedule():
+    supplementary = streamlit_app._default_supplementary_tables()
+
+    capex = supplementary["Capex Schedule"]
+    assets = supplementary["Asset Schedules"]
+    derived = streamlit_app._derive_asset_schedule_from_capex(capex)
+
+    pd.testing.assert_frame_equal(
+        assets.reset_index(drop=True),
+        derived.reset_index(drop=True),
+        check_dtype=False,
+    )
+
+
+def test_asset_schedule_rolls_forward_from_capex_schedule():
+    capex = pd.DataFrame(
+        {
+            "Year": [2026, 2027, 2027],
+            "Category": ["Barn", "Barn", "Milking Line"],
+            "Spend": [1000.0, 200.0, 300.0],
+            "Depreciation Rate %": [10.0, 10.0, 20.0],
+            "Depreciation": [100.0, 20.0, 60.0],
+        }
+    )
+
+    assets = streamlit_app._derive_asset_schedule_from_capex(capex)
+
+    barn_2026 = assets.loc[(assets["Asset"] == "Barn") & (assets["Year"] == 2026)].iloc[0]
+    barn_2027 = assets.loc[(assets["Asset"] == "Barn") & (assets["Year"] == 2027)].iloc[0]
+    line_2027 = assets.loc[
+        (assets["Asset"] == "Milking Line") & (assets["Year"] == 2027)
+    ].iloc[0]
+
+    assert barn_2026["Opening NBV"] == pytest.approx(0.0)
+    assert barn_2026["Closing NBV"] == pytest.approx(900.0)
+    assert barn_2027["Opening NBV"] == pytest.approx(900.0)
+    assert barn_2027["Closing NBV"] == pytest.approx(1080.0)
+    assert line_2027["Opening NBV"] == pytest.approx(0.0)
+    assert line_2027["Closing NBV"] == pytest.approx(240.0)
+
+
+def test_capex_asset_reconciliation_has_no_issues_for_derived_schedule():
+    supplementary = streamlit_app._default_supplementary_tables()
+
+    issues = streamlit_app._capex_asset_reconciliation_issues(
+        supplementary["Capex Schedule"],
+        supplementary["Asset Schedules"],
+    )
+
+    assert issues == []
+
+
+def test_capex_asset_reconciliation_flags_asset_mismatch():
+    supplementary = streamlit_app._default_supplementary_tables()
+    broken_assets = supplementary["Asset Schedules"].copy()
+    broken_assets.loc[0, "Additions"] = float(broken_assets.loc[0, "Additions"]) + 1.0
+
+    issues = streamlit_app._capex_asset_reconciliation_issues(
+        supplementary["Capex Schedule"],
+        broken_assets,
+    )
+
+    assert any("do not reconcile" in issue for issue in issues)
+
+
 def test_default_valuation_inputs_exclude_derived_metrics():
     valuation = streamlit_app._default_valuation_inputs_table()
 

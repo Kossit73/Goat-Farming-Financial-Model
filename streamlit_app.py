@@ -7006,6 +7006,158 @@ def _recalculate_asset_schedule(table: pd.DataFrame) -> pd.DataFrame:
     return work
 
 
+def _derive_asset_schedule_from_capex(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    capex = _ensure_capex_schedule(table)
+    if capex.empty:
+        return pd.DataFrame(columns=ASSET_SCHEDULE_COLUMNS)
+
+    work = capex.copy()
+    work["Category"] = work["Category"].fillna("").astype(str).str.strip()
+    work["Year"] = pd.to_numeric(work["Year"], errors="coerce")
+    work["Spend"] = pd.to_numeric(work["Spend"], errors="coerce").fillna(0.0)
+    work["Depreciation"] = pd.to_numeric(work["Depreciation"], errors="coerce").fillna(0.0)
+
+    work = work.loc[
+        work["Category"].ne("") & work["Year"].notna()
+    ].copy()
+    if work.empty:
+        return pd.DataFrame(columns=ASSET_SCHEDULE_COLUMNS)
+
+    grouped = (
+        work.groupby(["Category", "Year"], as_index=False, sort=True)
+        .agg(
+            **{
+                "Additions": ("Spend", "sum"),
+                "Depreciation": ("Depreciation", "sum"),
+            }
+        )
+        .sort_values(["Category", "Year"], kind="stable")
+        .reset_index(drop=True)
+    )
+    grouped["Year"] = grouped["Year"].round().astype("Int64")
+
+    asset_rows: list[dict[str, Any]] = []
+    for asset, asset_group in grouped.groupby("Category", sort=False):
+        opening_nbv = 0.0
+        for _, row in asset_group.sort_values("Year", kind="stable").iterrows():
+            additions = float(row.get("Additions", 0.0) or 0.0)
+            depreciation = float(row.get("Depreciation", 0.0) or 0.0)
+            year = int(row["Year"]) if pd.notna(row.get("Year")) else pd.NA
+            rate = (depreciation / additions * 100.0) if additions else np.nan
+            closing_nbv = opening_nbv + additions - depreciation
+            asset_rows.append(
+                {
+                    "Asset": asset,
+                    "Year": year,
+                    "Opening NBV": opening_nbv,
+                    "Additions": additions,
+                    "Depreciation Rate %": rate,
+                    "Depreciation": depreciation,
+                    "Closing NBV": closing_nbv,
+                }
+            )
+            opening_nbv = closing_nbv
+
+    return _ensure_asset_schedule(pd.DataFrame(asset_rows, columns=ASSET_SCHEDULE_COLUMNS))
+
+
+def _capex_asset_reconciliation_issues(
+    capex_table: Optional[pd.DataFrame],
+    asset_table: Optional[pd.DataFrame],
+) -> list[str]:
+    issues: list[str] = []
+    capex = _ensure_capex_schedule(capex_table)
+    assets = _ensure_asset_schedule(asset_table)
+
+    if capex.empty and assets.empty:
+        return issues
+
+    capex_work = capex.copy()
+    capex_work["Category"] = capex_work["Category"].fillna("").astype(str).str.strip()
+    capex_work["Year"] = pd.to_numeric(capex_work["Year"], errors="coerce").round().astype("Int64")
+    capex_work["Spend"] = pd.to_numeric(capex_work["Spend"], errors="coerce").fillna(0.0)
+    capex_work["Depreciation"] = pd.to_numeric(capex_work["Depreciation"], errors="coerce").fillna(0.0)
+    capex_work = capex_work.loc[capex_work["Category"].ne("") & capex_work["Year"].notna()].copy()
+    capex_summary = (
+        capex_work.groupby(["Category", "Year"], as_index=False)
+        .agg(
+            **{
+                "Capex Spend": ("Spend", "sum"),
+                "Capex Depreciation": ("Depreciation", "sum"),
+            }
+        )
+        if not capex_work.empty
+        else pd.DataFrame(columns=["Category", "Year", "Capex Spend", "Capex Depreciation"])
+    )
+
+    asset_work = assets.copy()
+    asset_work["Asset"] = asset_work["Asset"].fillna("").astype(str).str.strip()
+    asset_work["Year"] = pd.to_numeric(asset_work["Year"], errors="coerce").round().astype("Int64")
+    asset_work["Additions"] = pd.to_numeric(asset_work["Additions"], errors="coerce").fillna(0.0)
+    asset_work["Depreciation"] = pd.to_numeric(asset_work["Depreciation"], errors="coerce").fillna(0.0)
+    asset_work = asset_work.loc[asset_work["Asset"].ne("") & asset_work["Year"].notna()].copy()
+    asset_summary = (
+        asset_work.groupby(["Asset", "Year"], as_index=False)
+        .agg(
+            **{
+                "Asset Additions": ("Additions", "sum"),
+                "Asset Depreciation": ("Depreciation", "sum"),
+            }
+        )
+        if not asset_work.empty
+        else pd.DataFrame(columns=["Asset", "Year", "Asset Additions", "Asset Depreciation"])
+    )
+    if not asset_summary.empty:
+        asset_summary = asset_summary.rename(columns={"Asset": "Category"})
+
+    merged = capex_summary.merge(
+        asset_summary,
+        how="outer",
+        on=["Category", "Year"],
+    ).fillna(0.0)
+
+    spend_mismatch = merged.loc[
+        ~np.isclose(
+            pd.to_numeric(merged["Capex Spend"], errors="coerce").fillna(0.0),
+            pd.to_numeric(merged["Asset Additions"], errors="coerce").fillna(0.0),
+            atol=1e-6,
+            rtol=0.0,
+        )
+    ]
+    if not spend_mismatch.empty:
+        issues.append("Asset Schedule additions do not reconcile to Capex Schedule spend by year/category.")
+
+    dep_mismatch = merged.loc[
+        ~np.isclose(
+            pd.to_numeric(merged["Capex Depreciation"], errors="coerce").fillna(0.0),
+            pd.to_numeric(merged["Asset Depreciation"], errors="coerce").fillna(0.0),
+            atol=1e-6,
+            rtol=0.0,
+        )
+    ]
+    if not dep_mismatch.empty:
+        issues.append("Asset Schedule depreciation does not reconcile to Capex Schedule depreciation by year/category.")
+
+    for asset, asset_group in asset_work.groupby("Asset", sort=False):
+        ordered = asset_group.sort_values("Year", kind="stable").reset_index(drop=True)
+        previous_closing = None
+        for _, row in ordered.iterrows():
+            opening = float(pd.to_numeric(pd.Series([row.get("Opening NBV")]), errors="coerce").iloc[0] or 0.0)
+            closing = float(pd.to_numeric(pd.Series([row.get("Closing NBV")]), errors="coerce").iloc[0] or 0.0)
+            additions = float(pd.to_numeric(pd.Series([row.get("Additions")]), errors="coerce").iloc[0] or 0.0)
+            depreciation = float(pd.to_numeric(pd.Series([row.get("Depreciation")]), errors="coerce").iloc[0] or 0.0)
+            expected_closing = opening + additions - depreciation
+            if not np.isclose(closing, expected_closing, atol=1e-6, rtol=0.0):
+                issues.append(f"Asset Schedule row for {asset} does not satisfy Opening NBV + Additions - Depreciation = Closing NBV.")
+                break
+            if previous_closing is not None and not np.isclose(opening, previous_closing, atol=1e-6, rtol=0.0):
+                issues.append(f"Asset Schedule opening NBV for {asset} does not roll forward from the prior closing NBV.")
+                break
+            previous_closing = closing
+
+    return issues
+
+
 def _apply_asset_rate(table: pd.DataFrame, rate: float) -> pd.DataFrame:
     work = _ensure_asset_schedule(table)
     work["Depreciation Rate %"] = rate
@@ -7577,6 +7729,15 @@ def _default_schedule_components(
 
 
 def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
+    capex_schedule = pd.DataFrame(
+        {
+            "Year": [2024, 2025],
+            "Category": ["Production Equipment", "Housing Upgrades"],
+            "Spend": [500000.0, 175000.0],
+            "Depreciation Rate %": [8.0, 6.5],
+            "Depreciation": [40000.0, 11375.0],
+        }
+    )
     return {
         "Loan Facilities": _default_loan_facilities_table(),
         "Equity Facilities": _default_equity_facilities_table(),
@@ -7587,26 +7748,8 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
                 "Investment": [0.0, 250000.0],
             }
         ),
-        "Capex Schedule": pd.DataFrame(
-            {
-                "Year": [2024, 2025],
-                "Category": ["Production Equipment", "Housing Upgrades"],
-                "Spend": [500000.0, 175000.0],
-                "Depreciation Rate %": [8.0, 6.5],
-                "Depreciation": [40000.0, 11375.0],
-            }
-        ),
-        "Asset Schedules": pd.DataFrame(
-            {
-                "Asset": ["Barn", "Processing Facility"],
-                "Year": [2024, 2025],
-                "Opening NBV": [120000.0, 65000.0],
-                "Additions": [10000.0, 5000.0],
-                "Depreciation Rate %": [6.0, 5.5],
-                "Depreciation": [8000.0, 3600.0],
-                "Closing NBV": [122000.0, 66400.0],
-            }
-        ),
+        "Capex Schedule": capex_schedule,
+        "Asset Schedules": _derive_asset_schedule_from_capex(capex_schedule),
         "Outputs": pd.DataFrame(
             {
                 "Metric": ["IRR", "Payback Period (Years)"],
@@ -7620,6 +7763,16 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
             }
         ),
     }
+
+
+def _sync_asset_schedule_from_capex_in_supplementary(
+    supplementary: Optional[Dict[str, pd.DataFrame]],
+) -> Dict[str, pd.DataFrame]:
+    synced = dict(supplementary or {})
+    capex = _ensure_capex_schedule(synced.get("Capex Schedule"))
+    synced["Capex Schedule"] = capex
+    synced["Asset Schedules"] = _derive_asset_schedule_from_capex(capex)
+    return synced
 
 
 def _default_scenario_controls_table() -> pd.DataFrame:
@@ -8602,6 +8755,9 @@ def _ensure_default_results_loaded() -> None:
         for name, table in (supplementary_tables or {}).items()
         if isinstance(table, pd.DataFrame)
     }
+    supplementary_copy = _sync_asset_schedule_from_capex_in_supplementary(
+        supplementary_copy
+    )
     if isinstance(assumptions, dict):
         cap_fin = assumptions.get("Capital & Financing")
         if isinstance(cap_fin, pd.DataFrame) and not cap_fin.empty:
@@ -8878,11 +9034,19 @@ def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) 
                 synced_assumptions.get("Production Drivers"),
             )
         )
+    supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+        st.session_state.get("supplementary", {})
+    )
+    capex_recon_issues = _capex_asset_reconciliation_issues(
+        supplementary.get("Capex Schedule"),
+        supplementary.get("Asset Schedules"),
+    )
+    issues.extend(capex_recon_issues)
 
     if issues:
         st.warning("Validation summary: " + " ".join(f"- {msg}" for msg in issues))
     else:
-        st.success("Validation summary: commercial and schedule keys are consistent.")
+        st.success("Validation summary: commercial, schedule, and capex-to-asset keys are consistent.")
 
 
 ANALYTICS_FRAMEWORK_TOOLS: List[Dict[str, str]] = [
@@ -10290,6 +10454,9 @@ def main() -> None:
     )
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
+    st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+        st.session_state.get("supplementary")
+    )
     if "all_scenario_results" not in st.session_state:
         st.session_state.all_scenario_results = {}
     if "selected_scenario_name" not in st.session_state:
@@ -10579,6 +10746,9 @@ def main() -> None:
                     if rate_btn_col.button("Apply rate to all", key="capex_apply_rate"):
                         capex_table = _apply_capex_rate(capex_table, rate_value)
                         st.session_state.supplementary[name] = capex_table
+                        st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+                            st.session_state.supplementary
+                        )
                         _clear_schedule_editor_state("supp::capex_schedule")
 
                     spend_default = spend_col.number_input(
@@ -10597,6 +10767,9 @@ def main() -> None:
                             default_spend=spend_default,
                         )
                         st.session_state.supplementary[name] = capex_table
+                        st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+                            st.session_state.supplementary
+                        )
                         _clear_schedule_editor_state("supp::capex_schedule")
 
                     option_labels: list[str] = []
@@ -10623,6 +10796,9 @@ def main() -> None:
                             )
                             st.session_state.capex_remove_choice = "-- Select Row --"
                             st.session_state.supplementary[name] = capex_table
+                            st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+                                st.session_state.supplementary
+                            )
                             _clear_schedule_editor_state("supp::capex_schedule")
 
                     inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
@@ -10644,6 +10820,9 @@ def main() -> None:
                             capex_table, increment_column, increment_pct
                         )
                         st.session_state.supplementary[name] = capex_table
+                        st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+                            st.session_state.supplementary
+                        )
                         _clear_schedule_editor_state("supp::capex_schedule")
 
                     capex_table = st.session_state.supplementary[name]
@@ -10651,6 +10830,9 @@ def main() -> None:
                     def _save_capex(updated: pd.DataFrame) -> None:
                         ensured = _ensure_capex_schedule(updated)
                         st.session_state.supplementary[name] = ensured
+                        st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+                            st.session_state.supplementary
+                        )
 
                     _render_schedule_row_editor(
                         "supp::capex_schedule", capex_table, _save_capex
@@ -10663,6 +10845,28 @@ def main() -> None:
                         supplementary_tables[name] = _ensure_capex_schedule(cleaned_capex)
                     continue
                 if name == "Asset Schedules":
+                    st.markdown("#### Asset Schedule")
+                    st.caption(
+                        "Derived automatically from the Capex Schedule. Edit capex rows above to change asset additions, depreciation, and NBV roll-forwards."
+                    )
+                    st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+                        st.session_state.supplementary
+                    )
+                    asset_table = _ensure_asset_schedule(
+                        st.session_state.supplementary.get(name)
+                    )
+                    recon_issues = _capex_asset_reconciliation_issues(
+                        st.session_state.supplementary.get("Capex Schedule"),
+                        asset_table,
+                    )
+                    if recon_issues:
+                        st.warning(" ".join(f"- {issue}" for issue in recon_issues))
+                    else:
+                        st.success("Asset Schedule reconciles to Capex Schedule by year/category.")
+                    st.dataframe(asset_table, use_container_width=True)
+                    supplementary_tables[name] = asset_table.copy()
+                    continue
+                if False and name == "Asset Schedules":
                     st.markdown("#### Asset Schedule")
                     asset_table = _ensure_asset_schedule(
                         st.session_state.supplementary.get(name)
@@ -11973,7 +12177,9 @@ def main() -> None:
                     )
                     return
                 schedule_df = horizon_filtered
-        combined_supplementary = dict(supplementary_tables)
+        combined_supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+            dict(supplementary_tables)
+        )
         for name, table in assumption_tables.items():
             cleaned = _clean_editor_table(table)
             if cleaned is not None:
