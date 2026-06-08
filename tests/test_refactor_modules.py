@@ -3,7 +3,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import streamlit_app
 from goat_financial_model.assumption_bundle import build_assumption_bundle
+from goat_financial_model.commercial_services import (
+    build_pricing_validation_messages,
+    sync_commercial_assumptions_to_core,
+)
 from goat_financial_model.pages import assumptions_page, input_schedule_page
 from goat_financial_model.pages.assumptions_page import (
     BiologicalEditorDefinition,
@@ -135,6 +140,66 @@ def test_apply_product_base_price_is_noop_when_required_columns_are_missing() ->
     updated = assumptions_page._apply_product_base_price(pricing, "Milk", 4.75)
 
     assert updated.equals(pricing)
+
+
+def test_commercial_service_sync_matches_existing_streamlit_wrapper() -> None:
+    core = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-02-28"],
+            "Revenue": [1000.0, 1200.0],
+        }
+    )
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Business Configuration"] = pd.DataFrame({"Business Type": ["Meat"]})
+
+    service_synced = sync_commercial_assumptions_to_core(
+        assumptions,
+        core,
+        ensure_business_configuration_table=streamlit_app._ensure_business_configuration_table,
+        selected_business_type=streamlit_app._selected_business_type,
+        active_products_for_business_type=streamlit_app._active_products_for_business_type,
+        build_app_assumption_bundle=streamlit_app._build_app_assumption_bundle,
+        sync_production_driver_table_to_products=streamlit_app._sync_production_driver_table_to_products,
+        sync_scenario_controls_to_products=streamlit_app._sync_scenario_controls_to_products,
+        sync_pricing_table_to_core=streamlit_app._sync_pricing_table_to_core,
+        derive_pricing_quantities_from_production=streamlit_app._derive_pricing_quantities_from_production,
+        pricing_schedule_context=streamlit_app._pricing_schedule_context,
+    )
+    wrapper_synced = streamlit_app._sync_commercial_assumptions_to_core(assumptions, core)
+
+    assert service_synced["Pricing"].equals(wrapper_synced["Pricing"])
+    assert service_synced["Production Drivers"].equals(wrapper_synced["Production Drivers"])
+    assert service_synced["Scenario Controls"].equals(wrapper_synced["Scenario Controls"])
+
+
+def test_pricing_validation_service_matches_existing_streamlit_wrapper() -> None:
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2026-01-31", "2026-01-31"],
+            "Product": ["Milk", "Cheese"],
+            "Active": [False, True],
+            "Allocation %": [100.0, 100.0],
+            "Quantity Mode": ["Manual Override", "Manual Override"],
+            "Manual Quantity Override": [25.0, 10.0],
+            "Quantity per Period": [25.0, 10.0],
+            "Unit": ["Litre", "Kg"],
+            "Base Price": [2.0, 0.0],
+            "Price Growth %": [0.0, 0.0],
+        }
+    )
+    production_drivers = streamlit_app._default_production_driver_table()
+
+    service_issues = build_pricing_validation_messages(
+        pricing,
+        production_drivers,
+        ensure_pricing_table=streamlit_app._ensure_pricing_table,
+        ensure_production_driver_table=streamlit_app._ensure_production_driver_table,
+        product_family_label=streamlit_app._product_family_label,
+        slaughter_products=streamlit_app._PRODUCTION_DRIVER_SLAUGHTER_PRODUCTS,
+    )
+    wrapper_issues = streamlit_app._pricing_validation_messages(pricing, production_drivers)
+
+    assert service_issues == wrapper_issues
 
 
 class _FakeColumn:
