@@ -364,6 +364,7 @@ def render_pricing_manual_editor(
     apply_increment_fn: Callable[[pd.DataFrame, str, float, Optional[str]], pd.DataFrame],
     render_row_editor: RenderEditor,
     clear_editor_state: Callable[[str], None],
+    invalidate_results_fn: Callable[[], None],
     active_products: list[str],
     period_label: str,
 ) -> dict[str, pd.DataFrame]:
@@ -374,6 +375,7 @@ def render_pricing_manual_editor(
             refresh_context,
             assumptions.get("Production Drivers"),
         )
+        invalidate_results_fn()
 
     product_options = sorted(
         {
@@ -567,13 +569,17 @@ def render_pricing_manual_editor(
             )
             assumptions.update(sync_assumptions_fn(updated_assumptions, core_schedule))
             clear_editor_state("assump::pricing")
+            invalidate_results_fn()
     else:
         st.caption("No products are available yet. Add pricing rows first to apply a bulk pricing update.")
 
     def _save_pricing_matrix(updated: pd.DataFrame) -> None:
+        if updated.equals(assumptions["Pricing"]):
+            return
         refreshed_assumptions = dict(assumptions)
         refreshed_assumptions["Pricing"] = updated
         assumptions.update(sync_assumptions_fn(refreshed_assumptions, core_schedule))
+        invalidate_results_fn()
 
     pricing_matrix = st.data_editor(
         assumptions["Pricing"],
@@ -619,6 +625,7 @@ def render_pricing_manual_editor(
         updated_assumptions["Pricing"] = add_row_fn(pricing_table)
         assumptions.update(sync_assumptions_fn(updated_assumptions, core_schedule))
         clear_editor_state("assump::pricing")
+        invalidate_results_fn()
 
     labels, label_index = build_remove_options(
         pricing_table,
@@ -641,6 +648,7 @@ def render_pricing_manual_editor(
             assumptions.update(sync_assumptions_fn(updated_assumptions, core_schedule))
             st.session_state.pricing_remove_choice = "-- Select Row --"
             clear_editor_state("assump::pricing")
+            invalidate_results_fn()
 
     inc_target_col, inc_column_col, inc_pct_col, inc_btn_col = st.columns([2, 1.5, 1, 1])
     target_options = ["All products"] + sorted(
@@ -665,6 +673,7 @@ def render_pricing_manual_editor(
         )
         assumptions.update(sync_assumptions_fn(updated_assumptions, core_schedule))
         clear_editor_state("assump::pricing")
+        invalidate_results_fn()
 
     render_row_editor(
         "assump::pricing",

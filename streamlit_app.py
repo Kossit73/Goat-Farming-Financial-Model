@@ -74,6 +74,10 @@ _LOCAL_SESSION_STATE: Dict[str, Any] = {}
 _CACHED_DEFAULT_VALUATION_INPUTS: Optional[Dict[str, float]] = None
 MODEL_RESULTS_STALE_KEY = "model_results_stale"
 MODEL_RUN_SIGNATURE_KEY = "model_last_run_signature"
+MODEL_INPUT_VERSION_KEY = "model_input_version"
+MODEL_LAST_RUN_VERSION_KEY = "model_last_run_version"
+MODEL_VIEW_CACHE_KEY = "model_view_cache"
+MODEL_VALIDATION_CACHE_KEY = "model_validation_cache"
 
 
 def _can_rerun() -> bool:
@@ -173,6 +177,60 @@ def _safe_session_state_pop(key: str, default: Any = None) -> Any:
             return default
         except Exception:
             return _LOCAL_SESSION_STATE.pop(key, default)
+
+
+def _frames_equal(left: Optional[pd.DataFrame], right: Optional[pd.DataFrame]) -> bool:
+    """Return True when two dataframes contain the same values."""
+
+    if left is right:
+        return True
+    if left is None or right is None:
+        return left is None and right is None
+    if not isinstance(left, pd.DataFrame) or not isinstance(right, pd.DataFrame):
+        return False
+    try:
+        pd.testing.assert_frame_equal(
+            left.reset_index(drop=True),
+            right.reset_index(drop=True),
+            check_dtype=False,
+            check_like=False,
+        )
+    except AssertionError:
+        return False
+    return True
+
+
+def _bump_model_input_version() -> int:
+    """Advance the lightweight input version used for stale-state tracking."""
+
+    current = int(_safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0)
+    next_value = current + 1
+    _safe_session_state_set(MODEL_INPUT_VERSION_KEY, next_value)
+    return next_value
+
+
+def _cached_input_value(cache_name: str, builder: Callable[[], Any], *, extra: str = "") -> Any:
+    """Return a value cached for the current input version."""
+
+    version = int(_safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0)
+    cache = _safe_session_state_setdefault(MODEL_VALIDATION_CACHE_KEY, {})
+    key = f"{version}|{cache_name}|{extra}"
+    if key not in cache:
+        cache[key] = builder()
+        _safe_session_state_set(MODEL_VALIDATION_CACHE_KEY, cache)
+    return cache[key]
+
+
+def _cached_result_view(cache_name: str, scenario_name: str, builder: Callable[[], Any], *, extra: str = "") -> Any:
+    """Return a value cached for the active model run and selected scenario."""
+
+    run_version = _safe_session_state_get(MODEL_LAST_RUN_VERSION_KEY)
+    cache = _safe_session_state_setdefault(MODEL_VIEW_CACHE_KEY, {})
+    key = f"{run_version}|{scenario_name}|{cache_name}|{extra}"
+    if key not in cache:
+        cache[key] = builder()
+        _safe_session_state_set(MODEL_VIEW_CACHE_KEY, cache)
+    return cache[key]
 
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 
@@ -1245,7 +1303,11 @@ def _render_schedule_row_editor(
             current_df = st.session_state.get(working_key, editor_df.copy(deep=True))
             current_meta = st.session_state.get(meta_key, stored_meta)
             restored = _restore_editor_table(current_df, current_meta)
+            input_version_before = int(_safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0)
             save_callback(restored)
+            input_version_after = int(_safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0)
+            if input_version_after == input_version_before:
+                _reset_cached_results()
             _clear_schedule_editor_state(identifier)
             st.session_state[edit_flag_key] = False
             _maybe_rerun()
@@ -4814,6 +4876,15 @@ def _render_assumption_master_table(
     increment_pct_key: str,
     disabled_columns: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
+    def _store_assumption_table(updated: pd.DataFrame) -> pd.DataFrame:
+        ensured = ensure_fn(updated)
+        if not _frames_equal(ensured, st.session_state.assumptions.get(assumption_key)):
+            st.session_state.assumptions[assumption_key] = ensured
+            _reset_cached_results()
+        else:
+            st.session_state.assumptions[assumption_key] = ensured
+        return ensured
+
     table = ensure_fn(st.session_state.assumptions.get(assumption_key))
     st.session_state.assumptions[assumption_key] = table
 
@@ -4852,7 +4923,7 @@ def _render_assumption_master_table(
                 add_row_factory(new_label),
                 ensure_fn,
             )
-            st.session_state.assumptions[assumption_key] = table
+            table = _store_assumption_table(table)
 
     labels, label_index = _assumption_input_row_labels(table, label_column)
     remove_select_col, remove_btn_col = st.columns([3, 1])
@@ -4865,7 +4936,7 @@ def _render_assumption_master_table(
         choice = st.session_state.get(remove_choice_key)
         if choice in label_index:
             table = _remove_assumption_input_row(table, label_index[choice], ensure_fn)
-            st.session_state.assumptions[assumption_key] = table
+            table = _store_assumption_table(table)
             st.session_state[remove_choice_key] = "-- Select Row --"
 
     increment_targets = [all_label] + sorted(
@@ -4895,8 +4966,7 @@ def _render_assumption_master_table(
             st.session_state.get(increment_target_key),
             float(st.session_state.get(increment_pct_key, 0.0)),
         )
-        table = ensure_fn(table)
-        st.session_state.assumptions[assumption_key] = table
+        table = _store_assumption_table(table)
 
     editor = st.data_editor(
         st.session_state.assumptions[assumption_key],
@@ -4906,8 +4976,7 @@ def _render_assumption_master_table(
         column_config=column_config,
         disabled=list(disabled_columns or []),
     )
-    ensured = ensure_fn(editor)
-    st.session_state.assumptions[assumption_key] = ensured
+    ensured = _store_assumption_table(editor)
 
     if st.button("Apply to Schedule", key=f"{editor_key}_apply_schedule"):
         _apply_assumption_input_schedule(
@@ -6602,7 +6671,11 @@ def _aggregate_variable_expenses(
 
 
 def _schedule_editor_save_table(schedule_name: str, table: pd.DataFrame) -> None:
+    current = st.session_state.detail_schedules.get(schedule_name)
+    if _frames_equal(current, table):
+        return
     st.session_state.detail_schedules[schedule_name] = table
+    _reset_cached_results()
 
 
 def _schedule_editor_target_options(
@@ -7847,7 +7920,16 @@ def _save_herd_plan_and_sync_opening_cohorts(table: pd.DataFrame) -> None:
     assumptions = dict(st.session_state.get("assumptions", {}))
     assumptions["Herd Plan"] = _ensure_herd_plan_table(table)
     assumptions = _sync_opening_herd_cohorts_in_assumptions(assumptions)
+    if (
+        _frames_equal(st.session_state.get("assumptions", {}).get("Herd Plan"), assumptions.get("Herd Plan"))
+        and _frames_equal(
+            st.session_state.get("assumptions", {}).get("Opening Herd Cohorts"),
+            assumptions.get("Opening Herd Cohorts"),
+        )
+    ):
+        return
     st.session_state.assumptions = assumptions
+    _reset_cached_results()
 
 
 def _production_year_options(start_year: int, end_year: int) -> list[int]:
@@ -7975,8 +8057,11 @@ def _rebase_schedule_to_horizon(
 def _reset_cached_results() -> None:
     """Mark outputs stale after input changes without auto-running the model again."""
 
+    _bump_model_input_version()
     _safe_session_state_set(MODEL_RESULTS_STALE_KEY, True)
     _safe_session_state_set("excel_bytes_map", {})
+    _safe_session_state_set(MODEL_VIEW_CACHE_KEY, {})
+    _safe_session_state_set(MODEL_VALIDATION_CACHE_KEY, {})
 
 
 def _sync_production_horizon(start_year: int, end_year: int) -> None:
@@ -8553,6 +8638,10 @@ def _ensure_default_results_loaded() -> None:
 
     _safe_session_state_setdefault(MODEL_RESULTS_STALE_KEY, True)
     _safe_session_state_setdefault(MODEL_RUN_SIGNATURE_KEY, None)
+    _safe_session_state_setdefault(MODEL_INPUT_VERSION_KEY, 0)
+    _safe_session_state_setdefault(MODEL_LAST_RUN_VERSION_KEY, None)
+    _safe_session_state_setdefault(MODEL_VIEW_CACHE_KEY, {})
+    _safe_session_state_setdefault(MODEL_VALIDATION_CACHE_KEY, {})
 
 
 def _serialize_run_state(value: Any) -> Any:
@@ -8616,10 +8705,10 @@ def _current_model_run_signature() -> str:
 def _refresh_results_stale_state() -> None:
     """Mark cached outputs stale whenever model-driving inputs change."""
 
-    current_signature = _current_model_run_signature()
-    last_run_signature = _safe_session_state_get(MODEL_RUN_SIGNATURE_KEY)
+    current_version = int(_safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0)
+    last_run_version = _safe_session_state_get(MODEL_LAST_RUN_VERSION_KEY)
     has_results = isinstance(_safe_session_state_get("results"), dict)
-    is_stale = (not has_results) or (current_signature != last_run_signature)
+    is_stale = (not has_results) or (last_run_version is None) or (current_version != last_run_version)
     _safe_session_state_set(MODEL_RESULTS_STALE_KEY, is_stale)
 
 
@@ -8850,7 +8939,7 @@ def _render_stale_results_notice() -> None:
     )
 
 
-def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) -> None:
+def _assumption_validation_issues(assumptions: Dict[str, pd.DataFrame]) -> list[str]:
     issues: list[str] = []
     operating = assumptions.get("Operating Costs", pd.DataFrame())
     if isinstance(operating, pd.DataFrame) and not operating.empty and {"Year", "Field"}.issubset(operating.columns):
@@ -8887,6 +8976,14 @@ def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) 
         supplementary.get("Asset Schedules"),
     )
     issues.extend(capex_recon_issues)
+    return issues
+
+
+def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) -> None:
+    issues = _cached_input_value(
+        "assumption_validation_summary",
+        lambda: _assumption_validation_issues(assumptions),
+    )
 
     if issues:
         st.warning("Validation summary: " + " ".join(f"- {msg}" for msg in issues))
@@ -10482,6 +10579,7 @@ def main() -> None:
                         if st.button("Add Row", key="cap_table_add_row"):
                             cap_table = _add_capitalisation_row(cap_table)
                             st.session_state.supplementary[name] = cap_table
+                            _reset_cached_results()
                             _clear_schedule_editor_state("supp::capitalisation_table")
 
                     option_labels = []
@@ -10517,6 +10615,7 @@ def main() -> None:
                                 cap_table, option_map[remove_choice]
                             )
                             st.session_state.supplementary[name] = cap_table
+                            _reset_cached_results()
                             _clear_schedule_editor_state("supp::capitalisation_table")
 
                     with inc_col_col:
@@ -10539,6 +10638,7 @@ def main() -> None:
                             )
 
                             st.session_state.supplementary[name] = cap_table
+                            _reset_cached_results()
                             _clear_schedule_editor_state("supp::capitalisation_table")
 
                     cap_table = st.session_state.supplementary[name]
@@ -10595,6 +10695,7 @@ def main() -> None:
                         st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
                             st.session_state.supplementary
                         )
+                        _reset_cached_results()
                         _clear_schedule_editor_state("supp::capex_schedule")
 
                     spend_default = spend_col.number_input(
@@ -10616,6 +10717,7 @@ def main() -> None:
                         st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
                             st.session_state.supplementary
                         )
+                        _reset_cached_results()
                         _clear_schedule_editor_state("supp::capex_schedule")
 
                     option_labels: list[str] = []
@@ -10645,6 +10747,7 @@ def main() -> None:
                             st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
                                 st.session_state.supplementary
                             )
+                            _reset_cached_results()
                             _clear_schedule_editor_state("supp::capex_schedule")
 
                     inc_col, inc_pct_col, inc_btn_col = st.columns([1.5, 1, 1])
@@ -10669,6 +10772,7 @@ def main() -> None:
                         st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
                             st.session_state.supplementary
                         )
+                        _reset_cached_results()
                         _clear_schedule_editor_state("supp::capex_schedule")
 
                     capex_table = st.session_state.supplementary[name]
@@ -11067,6 +11171,7 @@ def main() -> None:
             _clear_schedule_editor_state("assump::scenario_controls")
             _clear_schedule_editor_state("assump::production_drivers")
             _clear_schedule_editor_state("assump::pricing")
+            _reset_cached_results()
             _maybe_rerun()
         current_business_type = _selected_business_type(st.session_state.assumptions)
         active_products = _active_products_for_business_type(current_business_type)
@@ -11092,7 +11197,13 @@ def main() -> None:
 
         def _save_scenario_controls(updated: pd.DataFrame) -> None:
             ensured = _sync_scenario_controls_to_products(updated, active_products)
+            if _frames_equal(
+                st.session_state.assumptions.get("Scenario Controls"),
+                ensured,
+            ):
+                return
             st.session_state.assumptions["Scenario Controls"] = ensured
+            _reset_cached_results()
 
         _render_schedule_row_editor(
             "assump::scenario_controls",
@@ -11128,6 +11239,7 @@ def main() -> None:
                     )
                     st.session_state.assumptions["Scenario Controls"] = updated_table
                     _clear_schedule_editor_state("assump::scenario_controls")
+                    _reset_cached_results()
 
         feed_options = list(range(-50, 51))
         feed_selected_default = int(round(feed_default))
@@ -11147,6 +11259,7 @@ def main() -> None:
             )
             st.session_state.assumptions["Scenario Controls"] = updated_table
             _clear_schedule_editor_state("assump::scenario_controls")
+            _reset_cached_results()
 
         assumption_tables["Scenario Controls"] = st.session_state.assumptions[
             "Scenario Controls"
@@ -11310,7 +11423,13 @@ def main() -> None:
 
         def _save_production_drivers(updated: pd.DataFrame) -> None:
             ensured = _sync_production_driver_table_to_products(updated, active_products)
+            if _frames_equal(
+                st.session_state.assumptions.get("Production Drivers"),
+                ensured,
+            ):
+                return
             st.session_state.assumptions["Production Drivers"] = ensured
+            _reset_cached_results()
 
         def _save_production_driver_subset(products: Sequence[str], updated: pd.DataFrame) -> None:
             merged = _merge_production_driver_subset(
@@ -11318,7 +11437,13 @@ def main() -> None:
                 updated,
                 products,
             )
+            if _frames_equal(
+                st.session_state.assumptions.get("Production Drivers"),
+                merged,
+            ):
+                return
             st.session_state.assumptions["Production Drivers"] = merged
+            _reset_cached_results()
 
         driver_disabled_columns: list[str] = ["Product", "Unit"]
         visible_dairy_products = [
@@ -11358,6 +11483,7 @@ def main() -> None:
                     )
                     st.session_state.assumptions["Production Drivers"] = updated
                     _safe_session_state_set(add_key, "")
+                    _reset_cached_results()
                     _maybe_rerun()
 
             removable_columns = _production_driver_custom_columns(
@@ -11382,6 +11508,7 @@ def main() -> None:
                 )
                 st.session_state.assumptions["Production Drivers"] = updated
                 _safe_session_state_set("assump::production_drivers::remove_columns", [])
+                _reset_cached_results()
                 _maybe_rerun()
 
             st.markdown("##### Advanced Production Driver Editor")
@@ -11576,6 +11703,7 @@ def main() -> None:
                 period_end=st.session_state.get("pricing_plan_period_end"),
             )
             st.session_state.assumptions["Pricing"] = pricing_table
+            _reset_cached_results()
         st.session_state.assumptions = render_pricing_manual_editor(
             pricing_table=pricing_table,
             assumptions=st.session_state.assumptions,
@@ -11592,6 +11720,7 @@ def main() -> None:
             apply_increment_fn=_apply_pricing_yearly_increment,
             render_row_editor=_render_schedule_row_editor,
             clear_editor_state=_clear_schedule_editor_state,
+            invalidate_results_fn=_reset_cached_results,
             active_products=active_products,
             period_label=period_label,
         )
@@ -11641,12 +11770,19 @@ def main() -> None:
             )
             return _default_operating_cost_table()
 
+        def _save_operating_costs(updated: pd.DataFrame) -> None:
+            ensured = _ensure_operating_cost_table(updated)
+            if not _frames_equal(
+                ensured, st.session_state.assumptions.get("Operating Costs")
+            ):
+                st.session_state.assumptions["Operating Costs"] = ensured
+                _reset_cached_results()
+            else:
+                st.session_state.assumptions["Operating Costs"] = ensured
+
         st.session_state.assumptions["Operating Costs"] = render_operating_cost_editor(
             operating_table=operating_table,
-            save_table=lambda updated: st.session_state.assumptions.__setitem__(
-                "Operating Costs",
-                updated,
-            ),
+            save_table=_save_operating_costs,
             render_row_editor=_render_schedule_row_editor,
             clear_editor_state=_clear_schedule_editor_state,
             add_row_fn=_add_operating_cost_row,
@@ -11891,12 +12027,32 @@ def main() -> None:
 
             with financial_tabs[0]:
                 try:
-                    sop_base = results["model"].statement_of_financial_performance(
-                        results["base"], annual=True
+                    financial_views = _cached_result_view(
+                        "financial_statements",
+                        scenario_label,
+                        lambda: {
+                            "sop_base": results["model"].statement_of_financial_performance(
+                                results["base"], annual=True
+                            ),
+                            "sop_scenario": results["model"].statement_of_financial_performance(
+                                results["scenario"], annual=True
+                            ),
+                            "sofp_base": results["model"].statement_of_financial_position(
+                                results["base"], annual=True
+                            ),
+                            "sofp_scenario": results["model"].statement_of_financial_position(
+                                results["scenario"], annual=True
+                            ),
+                            "socf_base": results["model"].statement_of_cash_flow(
+                                results["base"], annual=True
+                            ),
+                            "socf_scenario": results["model"].statement_of_cash_flow(
+                                results["scenario"], annual=True
+                            ),
+                        },
                     )
-                    sop_scenario = results["model"].statement_of_financial_performance(
-                        results["scenario"], annual=True
-                    )
+                    sop_base = financial_views["sop_base"]
+                    sop_scenario = financial_views["sop_scenario"]
                     st.dataframe(
                         pd.concat(
                             {"Base": sop_base, scenario_label: sop_scenario}, axis=1
@@ -11912,12 +12068,32 @@ def main() -> None:
 
             with financial_tabs[1]:
                 try:
-                    sofp_base = results["model"].statement_of_financial_position(
-                        results["base"], annual=True
+                    financial_views = _cached_result_view(
+                        "financial_statements",
+                        scenario_label,
+                        lambda: {
+                            "sop_base": results["model"].statement_of_financial_performance(
+                                results["base"], annual=True
+                            ),
+                            "sop_scenario": results["model"].statement_of_financial_performance(
+                                results["scenario"], annual=True
+                            ),
+                            "sofp_base": results["model"].statement_of_financial_position(
+                                results["base"], annual=True
+                            ),
+                            "sofp_scenario": results["model"].statement_of_financial_position(
+                                results["scenario"], annual=True
+                            ),
+                            "socf_base": results["model"].statement_of_cash_flow(
+                                results["base"], annual=True
+                            ),
+                            "socf_scenario": results["model"].statement_of_cash_flow(
+                                results["scenario"], annual=True
+                            ),
+                        },
                     )
-                    sofp_scenario = results["model"].statement_of_financial_position(
-                        results["scenario"], annual=True
-                    )
+                    sofp_base = financial_views["sofp_base"]
+                    sofp_scenario = financial_views["sofp_scenario"]
                     st.dataframe(
                         pd.concat(
                             {"Base": sofp_base, scenario_label: sofp_scenario}, axis=1
@@ -11933,12 +12109,32 @@ def main() -> None:
 
             with financial_tabs[2]:
                 try:
-                    socf_base = results["model"].statement_of_cash_flow(
-                        results["base"], annual=True
+                    financial_views = _cached_result_view(
+                        "financial_statements",
+                        scenario_label,
+                        lambda: {
+                            "sop_base": results["model"].statement_of_financial_performance(
+                                results["base"], annual=True
+                            ),
+                            "sop_scenario": results["model"].statement_of_financial_performance(
+                                results["scenario"], annual=True
+                            ),
+                            "sofp_base": results["model"].statement_of_financial_position(
+                                results["base"], annual=True
+                            ),
+                            "sofp_scenario": results["model"].statement_of_financial_position(
+                                results["scenario"], annual=True
+                            ),
+                            "socf_base": results["model"].statement_of_cash_flow(
+                                results["base"], annual=True
+                            ),
+                            "socf_scenario": results["model"].statement_of_cash_flow(
+                                results["scenario"], annual=True
+                            ),
+                        },
                     )
-                    socf_scenario = results["model"].statement_of_cash_flow(
-                        results["scenario"], annual=True
-                    )
+                    socf_base = financial_views["socf_base"]
+                    socf_scenario = financial_views["socf_scenario"]
                     st.dataframe(
                         pd.concat(
                             {"Base": socf_base, scenario_label: socf_scenario}, axis=1
@@ -12096,7 +12292,12 @@ def main() -> None:
         st.session_state.selected_scenario_name = previous_selection
         st.session_state.results = scenario_results[previous_selection]
         st.session_state.excel_bytes_map = {}
+        st.session_state[MODEL_VIEW_CACHE_KEY] = {}
+        st.session_state[MODEL_VALIDATION_CACHE_KEY] = {}
         st.session_state[MODEL_RUN_SIGNATURE_KEY] = _current_model_run_signature()
+        st.session_state[MODEL_LAST_RUN_VERSION_KEY] = int(
+            _safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0
+        )
         st.session_state[MODEL_RESULTS_STALE_KEY] = False
 
     results = st.session_state.results
@@ -12420,7 +12621,11 @@ def main() -> None:
             scenario = results["scenario"]
             model = results["model"]
             try:
-                adv_annual = model.advanced_analytics(scenario, window=3, annual=True)
+                adv_annual = _cached_result_view(
+                    "advanced_analytics",
+                    results.get("selected_scenario", "Scenario"),
+                    lambda: model.advanced_analytics(scenario, window=3, annual=True),
+                )
 
                 def _render_analytics(
                     block_name: str, payload: Dict[str, object], scenario_label: str

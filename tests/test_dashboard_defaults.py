@@ -51,11 +51,8 @@ def test_refresh_results_stale_state_tracks_input_changes():
     streamlit_app._LOCAL_SESSION_STATE["results"] = {
         "selected_scenario": "Base Case Scenario"
     }
-
-    signature = streamlit_app._current_model_run_signature()
-    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_RUN_SIGNATURE_KEY] = (
-        signature
-    )
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_INPUT_VERSION_KEY] = 3
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_LAST_RUN_VERSION_KEY] = 3
 
     streamlit_app._refresh_results_stale_state()
     assert (
@@ -69,6 +66,7 @@ def test_refresh_results_stale_state_tracks_input_changes():
     ] = 7.0
     assumptions["Scenario Controls"] = updated_controls
     streamlit_app._LOCAL_SESSION_STATE["assumptions"] = assumptions
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_INPUT_VERSION_KEY] = 4
 
     streamlit_app._refresh_results_stale_state()
     assert (
@@ -87,6 +85,8 @@ def test_reset_cached_results_marks_outputs_stale_but_keeps_last_run():
         "Base Case Scenario": {"selected_scenario": "Base Case Scenario"}
     }
     streamlit_app._LOCAL_SESSION_STATE["excel_bytes_map"] = {"Base Case Scenario": b"test"}
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_INPUT_VERSION_KEY] = 8
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_LAST_RUN_VERSION_KEY] = 7
 
     streamlit_app._reset_cached_results()
 
@@ -98,9 +98,55 @@ def test_reset_cached_results_marks_outputs_stale_but_keeps_last_run():
     )
     assert streamlit_app._LOCAL_SESSION_STATE.get("excel_bytes_map") == {}
     assert (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_INPUT_VERSION_KEY)
+        == 9
+    )
+    assert (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_LAST_RUN_VERSION_KEY)
+        == 7
+    )
+    assert (
         streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_RESULTS_STALE_KEY)
         is True
     )
+
+    _reset_local_state()
+
+
+def test_cached_result_view_reuses_values_within_same_run_version():
+    _reset_local_state()
+
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_LAST_RUN_VERSION_KEY] = 5
+    call_count = {"value": 0}
+
+    def _builder() -> dict[str, int]:
+        call_count["value"] += 1
+        return {"count": call_count["value"]}
+
+    first = streamlit_app._cached_result_view(
+        "financial_statements",
+        "Base Case Scenario",
+        _builder,
+    )
+    second = streamlit_app._cached_result_view(
+        "financial_statements",
+        "Base Case Scenario",
+        _builder,
+    )
+
+    assert first == {"count": 1}
+    assert second == {"count": 1}
+    assert call_count["value"] == 1
+
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_LAST_RUN_VERSION_KEY] = 6
+    third = streamlit_app._cached_result_view(
+        "financial_statements",
+        "Base Case Scenario",
+        _builder,
+    )
+
+    assert third == {"count": 2}
+    assert call_count["value"] == 2
 
     _reset_local_state()
 
