@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from importlib.util import find_spec
 from io import BytesIO
+import json
 from pathlib import Path
 import re
 import sys
@@ -71,6 +72,8 @@ except Exception:  # pragma: no cover - older versions exposed the exception els
 
 _LOCAL_SESSION_STATE: Dict[str, Any] = {}
 _CACHED_DEFAULT_VALUATION_INPUTS: Optional[Dict[str, float]] = None
+MODEL_RESULTS_STALE_KEY = "model_results_stale"
+MODEL_RUN_SIGNATURE_KEY = "model_last_run_signature"
 
 
 def _can_rerun() -> bool:
@@ -7970,11 +7973,10 @@ def _rebase_schedule_to_horizon(
 
 
 def _reset_cached_results() -> None:
-    """Clear cached scenario results so defaults regenerate with fresh inputs."""
+    """Mark outputs stale after input changes without auto-running the model again."""
 
-    _safe_session_state_set("all_scenario_results", {})
-    _safe_session_state_set("results", None)
-    _safe_session_state_set("selected_scenario_name", next(iter(SCENARIO_PRESETS)))
+    _safe_session_state_set(MODEL_RESULTS_STALE_KEY, True)
+    _safe_session_state_set("excel_bytes_map", {})
 
 
 def _sync_production_horizon(start_year: int, end_year: int) -> None:
@@ -8547,75 +8549,78 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
 
 
 def _ensure_default_results_loaded() -> None:
-    """Populate the dashboard with default results for the initial view."""
+    """Initialise run-state flags without auto-executing the model."""
 
-    if st.session_state.get("all_scenario_results"):
-        return
+    _safe_session_state_setdefault(MODEL_RESULTS_STALE_KEY, True)
+    _safe_session_state_setdefault(MODEL_RUN_SIGNATURE_KEY, None)
 
-    core_table = st.session_state.get("core_schedule")
-    detail_tables = st.session_state.get("detail_schedules")
-    supplementary_tables = st.session_state.get("supplementary")
 
-    if core_table is None or detail_tables is None:
-        return
+def _serialize_run_state(value: Any) -> Any:
+    """Convert run-driving state into a stable JSON-serialisable structure."""
 
-    try:
-        assumptions = st.session_state.get("assumptions", {})
-        schedule_df = _build_schedule_dataframe(core_table, detail_tables, assumptions)
-    except ValueError:
-        return
-
-    valuation_inputs = dict(_editable_valuation_input_defaults())
-    if isinstance(assumptions, dict):
-        valuation_table = assumptions.get("Valuation Inputs")
-        if isinstance(valuation_table, pd.DataFrame) and not valuation_table.empty:
-            valuation_inputs.update(_valuation_table_to_inputs(valuation_table))
-    supplementary_copy = {
-        name: table.copy()
-        for name, table in (supplementary_tables or {}).items()
-        if isinstance(table, pd.DataFrame)
-    }
-    supplementary_copy = _sync_asset_schedule_from_capex_in_supplementary(
-        supplementary_copy
-    )
-    if isinstance(assumptions, dict):
-        cap_fin = assumptions.get("Capital & Financing")
-        if isinstance(cap_fin, pd.DataFrame) and not cap_fin.empty:
-            supplementary_copy["Capital & Financing"] = _ensure_capital_financing_table(
-                cap_fin
-            )
-
-    try:
-        scenario_suite = _build_scenario_suite()
-        scenario_suite = {
-            "Base Case Scenario": scenario_suite.get(
-                "Base Case Scenario",
-                {
-                    "adjustments": dict(DEFAULT_SCENARIO_ADJUSTMENTS),
-                    "description": "Baseline view using the model inputs without additional shocks.",
-                },
-            )
+    if isinstance(value, pd.DataFrame):
+        work = value.copy()
+        work.columns = [str(column) for column in work.columns]
+        rows: list[list[Any]] = []
+        for row in work.itertuples(index=False, name=None):
+            rows.append([_serialize_run_state(item) for item in row])
+        return {
+            "columns": list(work.columns),
+            "rows": rows,
         }
-        model, _, scenario_results = _execute_scenario_suite(
-            schedule_df,
-            valuation_inputs,
-            supplementary_copy,
-            scenario_suite,
-        )
-    except ValueError:
-        return
 
-    st.session_state.all_scenario_results = scenario_results
+    if isinstance(value, dict):
+        return {
+            str(key): _serialize_run_state(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
 
-    preferred = st.session_state.get("selected_scenario_name")
-    if preferred not in scenario_results:
-        preferred = next(iter(scenario_results))
+    if isinstance(value, (list, tuple)):
+        return [_serialize_run_state(item) for item in value]
 
-    st.session_state.selected_scenario_name = preferred
-    st.session_state.results = scenario_results[preferred]
-    st.session_state.setdefault(
-        "model_last_run_at", pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    )
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+
+    if isinstance(value, np.generic):
+        value = value.item()
+
+    if value is pd.NA or pd.isna(value):
+        return None
+
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+
+    return str(value)
+
+
+def _current_model_run_signature() -> str:
+    """Return a stable signature for all inputs that affect model execution."""
+
+    payload = {
+        "core_schedule": _safe_session_state_get("core_schedule"),
+        "detail_schedules": _safe_session_state_get("detail_schedules"),
+        "assumptions": _safe_session_state_get("assumptions"),
+        "supplementary": _safe_session_state_get("supplementary"),
+        "schedule_period_type": _safe_session_state_get("schedule_period_type"),
+        "scenario_preset_tables": _safe_session_state_get("scenario_preset_tables", {}),
+        "scenario_preset_descriptions": _safe_session_state_get(
+            "scenario_preset_descriptions", {}
+        ),
+        "scenario_preset_removed_drivers": _safe_session_state_get(
+            "scenario_preset_removed_drivers", {}
+        ),
+    }
+    return json.dumps(_serialize_run_state(payload), sort_keys=True, separators=(",", ":"))
+
+
+def _refresh_results_stale_state() -> None:
+    """Mark cached outputs stale whenever model-driving inputs change."""
+
+    current_signature = _current_model_run_signature()
+    last_run_signature = _safe_session_state_get(MODEL_RUN_SIGNATURE_KEY)
+    has_results = isinstance(_safe_session_state_get("results"), dict)
+    is_stale = (not has_results) or (current_signature != last_run_signature)
+    _safe_session_state_set(MODEL_RESULTS_STALE_KEY, is_stale)
 
 
 def _prepare_timeline_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -8816,13 +8821,33 @@ def _render_table(title: str, table: Optional[pd.DataFrame]) -> None:
 
 
 def _render_workflow_status_strip() -> None:
-    cols = st.columns(3)
+    cols = st.columns(4)
     assumptions_ready = isinstance(st.session_state.get("assumptions"), dict)
     schedule_ready = isinstance(st.session_state.get("core_schedule"), pd.DataFrame)
     last_run = st.session_state.get("model_last_run_at")
+    results = st.session_state.get("results")
+    results_stale = bool(st.session_state.get(MODEL_RESULTS_STALE_KEY, True))
+    if results is None:
+        results_status = "Not run"
+    else:
+        results_status = "Stale" if results_stale else "Current"
     cols[0].metric("Assumptions", "Ready" if assumptions_ready else "Pending")
     cols[1].metric("Schedule", "Ready" if schedule_ready else "Pending")
-    cols[2].metric("Last Recalculated", str(last_run) if last_run else "Not run")
+    cols[2].metric("Results", results_status)
+    cols[3].metric("Last Recalculated", str(last_run) if last_run else "Not run")
+
+
+def _render_stale_results_notice() -> None:
+    """Explain that displayed outputs are from the previous model run."""
+
+    if not st.session_state.get(MODEL_RESULTS_STALE_KEY):
+        return
+    if st.session_state.get("results") is None:
+        return
+    st.warning(
+        "Inputs have changed since the last model run. The displayed outputs are from the previous run. "
+        "Click `Run model` to refresh the financials, dashboard, analytics, and downloads."
+    )
 
 
 def _render_assumption_validation_summary(assumptions: Dict[str, pd.DataFrame]) -> None:
@@ -10285,6 +10310,7 @@ def main() -> None:
         st.session_state.results = None
 
     _ensure_default_results_loaded()
+    _refresh_results_stale_state()
 
     _ensure_active_scenario_selection()
     _sync_shared_model_context(st.session_state.get("results"))
@@ -11125,7 +11151,7 @@ def main() -> None:
         assumption_tables["Scenario Controls"] = st.session_state.assumptions[
             "Scenario Controls"
         ]
-        run_clicked = st.button("Run Scenarios", type="primary")
+        run_clicked = st.button("Run model", type="primary")
 
         st.markdown("#### Production Time Horizon")
         production_table = _ensure_production_horizon_table(
@@ -11849,8 +11875,9 @@ def main() -> None:
     with tabs[2]:
         st.subheader("Financial Statements")
         if st.session_state.results is None:
-            st.info("Run the scenarios to generate the financial statements.")
+            st.info("Run the model to generate the financial statements.")
         else:
+            _render_stale_results_notice()
             results = st.session_state.results
             financial_tabs = st.tabs(
                 [
@@ -12069,18 +12096,22 @@ def main() -> None:
         st.session_state.selected_scenario_name = previous_selection
         st.session_state.results = scenario_results[previous_selection]
         st.session_state.excel_bytes_map = {}
+        st.session_state[MODEL_RUN_SIGNATURE_KEY] = _current_model_run_signature()
+        st.session_state[MODEL_RESULTS_STALE_KEY] = False
 
     results = st.session_state.results
+    results_stale = bool(st.session_state.get(MODEL_RESULTS_STALE_KEY, True))
 
     if results is None:
         with excel_download_container:
-            st.info("Run a scenario to enable the Excel model download.")
+            st.info("Run the model to enable the Excel workbook download.")
 
         st.info(
-            "Update the input schedule, adjust the sliders, and press *Run Scenarios* "
-            "to evaluate alternative assumptions."
+            "Complete the assumptions and schedules, then press *Run model* "
+            "to generate the scenario outputs."
         )
     else:
+        _render_stale_results_notice()
         model = results["model"]
         scenario = results["scenario"]
         kpis = results["kpis"]
@@ -12137,7 +12168,9 @@ def main() -> None:
 
         with excel_download_container:
             st.markdown("#### Excel Model Download")
-            if not excel_bytes:
+            if results_stale:
+                st.info("Run the model again to prepare a workbook from the latest inputs.")
+            elif not excel_bytes:
                 if st.button(
                     "Prepare Excel Model",
                     key=f"prepare_excel_{key_suffix}",
@@ -12151,7 +12184,7 @@ def main() -> None:
                         )
                     excel_map[selected_scenario] = excel_bytes
                     st.session_state.excel_bytes_map = excel_map
-            if excel_bytes:
+            if excel_bytes and not results_stale:
                 st.download_button(
                     "Download Excel Model",
                     data=excel_bytes,
@@ -12172,11 +12205,12 @@ def main() -> None:
     with tabs[3]:
         st.subheader("Dashboard")
         if results is None:
-            st.info("Run the scenarios to populate the dashboard charts.")
+            st.info("Run the model to populate the dashboard charts.")
             st.markdown("---")
             st.subheader("Supplementary Schedules")
-            st.info("Supplementary schedules will appear once a scenario has been run.")
+            st.info("Supplementary schedules will appear once the model has been run.")
         else:
+            _render_stale_results_notice()
             valuation_summary = results.get("valuation", {}) or {}
             model_audit = results.get("model_audit")
             if not isinstance(model_audit, dict):
@@ -12380,8 +12414,9 @@ def main() -> None:
         )
         _render_analytics_framework(results)
         if results is None:
-            st.info("Run the scenarios to view advanced analytics.")
+            st.info("Run the model to view advanced analytics.")
         else:
+            _render_stale_results_notice()
             scenario = results["scenario"]
             model = results["model"]
             try:

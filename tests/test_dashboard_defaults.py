@@ -18,6 +18,93 @@ def _reset_local_state() -> None:
     streamlit_app._LOCAL_SESSION_STATE.clear()
 
 
+def test_default_results_wait_for_explicit_run():
+    _reset_local_state()
+
+    streamlit_app._ensure_default_results_loaded()
+
+    assert streamlit_app._LOCAL_SESSION_STATE.get("results") is None
+    assert (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_RESULTS_STALE_KEY)
+        is True
+    )
+
+    _reset_local_state()
+
+
+def test_refresh_results_stale_state_tracks_input_changes():
+    _reset_local_state()
+
+    assumptions = streamlit_app._default_assumption_tables()
+    core, details = streamlit_app._default_schedule_components(
+        production_horizon=assumptions.get("Production Horizon"),
+        assumptions=assumptions,
+    )
+
+    streamlit_app._LOCAL_SESSION_STATE["assumptions"] = assumptions
+    streamlit_app._LOCAL_SESSION_STATE["core_schedule"] = core
+    streamlit_app._LOCAL_SESSION_STATE["detail_schedules"] = details
+    streamlit_app._LOCAL_SESSION_STATE["supplementary"] = (
+        streamlit_app._default_supplementary_tables()
+    )
+    streamlit_app._LOCAL_SESSION_STATE["schedule_period_type"] = "monthly"
+    streamlit_app._LOCAL_SESSION_STATE["results"] = {
+        "selected_scenario": "Base Case Scenario"
+    }
+
+    signature = streamlit_app._current_model_run_signature()
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_RUN_SIGNATURE_KEY] = (
+        signature
+    )
+
+    streamlit_app._refresh_results_stale_state()
+    assert (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_RESULTS_STALE_KEY)
+        is False
+    )
+
+    updated_controls = assumptions["Scenario Controls"].copy()
+    updated_controls.loc[
+        updated_controls["Driver"] == "Feed cost change (%)", "Change %"
+    ] = 7.0
+    assumptions["Scenario Controls"] = updated_controls
+    streamlit_app._LOCAL_SESSION_STATE["assumptions"] = assumptions
+
+    streamlit_app._refresh_results_stale_state()
+    assert (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_RESULTS_STALE_KEY)
+        is True
+    )
+
+    _reset_local_state()
+
+
+def test_reset_cached_results_marks_outputs_stale_but_keeps_last_run():
+    _reset_local_state()
+
+    streamlit_app._LOCAL_SESSION_STATE["results"] = {"selected_scenario": "Base Case Scenario"}
+    streamlit_app._LOCAL_SESSION_STATE["all_scenario_results"] = {
+        "Base Case Scenario": {"selected_scenario": "Base Case Scenario"}
+    }
+    streamlit_app._LOCAL_SESSION_STATE["excel_bytes_map"] = {"Base Case Scenario": b"test"}
+
+    streamlit_app._reset_cached_results()
+
+    assert streamlit_app._LOCAL_SESSION_STATE.get("results") == {
+        "selected_scenario": "Base Case Scenario"
+    }
+    assert "Base Case Scenario" in streamlit_app._LOCAL_SESSION_STATE.get(
+        "all_scenario_results", {}
+    )
+    assert streamlit_app._LOCAL_SESSION_STATE.get("excel_bytes_map") == {}
+    assert (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_RESULTS_STALE_KEY)
+        is True
+    )
+
+    _reset_local_state()
+
+
 def test_default_schedule_spans_production_horizon():
     horizon = pd.DataFrame({"Start Year": [2025], "End Year": [2027]})
 
