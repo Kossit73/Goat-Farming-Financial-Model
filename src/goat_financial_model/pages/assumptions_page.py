@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -38,6 +39,77 @@ def _apply_product_base_price(
     if product_mask.any():
         updated.loc[product_mask, "Base Price"] = float(base_price)
     return updated
+
+
+def _apply_product_pricing_updates(
+    pricing_table: pd.DataFrame,
+    product: str,
+    *,
+    active: bool,
+    allocation_pct: float,
+    quantity_mode: str,
+    manual_quantity_override: float | None,
+    unit: str,
+    base_price: float,
+    price_growth_pct: float,
+) -> pd.DataFrame:
+    updated = pricing_table.copy()
+    if "Product" not in updated.columns:
+        return updated
+
+    product_mask = updated["Product"].astype(str).str.strip() == str(product).strip()
+    if not product_mask.any():
+        return updated
+
+    safe_mode = (
+        quantity_mode if quantity_mode in {"Derived", "Manual Override"} else "Derived"
+    )
+    safe_unit = str(unit or "").strip()
+    safe_allocation = float(allocation_pct) if active else 0.0
+    safe_manual_override = (
+        float(manual_quantity_override)
+        if safe_mode == "Manual Override"
+        and manual_quantity_override is not None
+        else np.nan
+    )
+
+    updated.loc[product_mask, "Active"] = bool(active)
+    updated.loc[product_mask, "Allocation %"] = safe_allocation
+    updated.loc[product_mask, "Quantity Mode"] = safe_mode
+    updated.loc[product_mask, "Manual Quantity Override"] = safe_manual_override
+    if safe_unit:
+        updated.loc[product_mask, "Unit"] = safe_unit
+    updated.loc[product_mask, "Base Price"] = float(base_price)
+    updated.loc[product_mask, "Price Growth %"] = float(price_growth_pct)
+    return updated
+
+
+def _first_product_value(
+    pricing_table: pd.DataFrame,
+    product: str,
+    column: str,
+    default: object,
+) -> object:
+    if (
+        pricing_table is None
+        or pricing_table.empty
+        or "Product" not in pricing_table.columns
+        or column not in pricing_table.columns
+    ):
+        return default
+
+    matches = pricing_table.loc[
+        pricing_table["Product"].astype(str).str.strip() == str(product).strip(),
+        column,
+    ]
+    if matches.empty:
+        return default
+
+    for value in matches.tolist():
+        if pd.isna(value):
+            continue
+        return value
+    return default
 
 
 def render_biological_assumption_editor(
@@ -313,57 +385,190 @@ def render_pricing_manual_editor(
     if not product_options:
         product_options = sorted({product for product in active_products if str(product).strip()})
 
-    st.markdown("##### Base Price Update")
+    st.markdown("##### Bulk Pricing Update")
     if product_options:
-        st.session_state.setdefault("pricing_base_price_product", product_options[0])
-        selected_product = st.session_state.get("pricing_base_price_product", "")
+        st.session_state.setdefault("pricing_bulk_product", product_options[0])
+        selected_product = st.session_state.get("pricing_bulk_product", "")
         if selected_product not in product_options:
             selected_product = product_options[0]
-            st.session_state.pricing_base_price_product = selected_product
+            st.session_state.pricing_bulk_product = selected_product
 
-        default_base_price = 0.0
-        if selected_product and "Product" in assumptions["Pricing"].columns:
-            matching_rows = assumptions["Pricing"].loc[
-                assumptions["Pricing"]["Product"].astype(str).str.strip() == selected_product,
-                "Base Price",
-            ]
-            if not matching_rows.empty:
-                current_price = pd.to_numeric(matching_rows, errors="coerce").dropna()
-                if not current_price.empty:
-                    default_base_price = float(current_price.iloc[0])
+        default_active = bool(
+            _first_product_value(assumptions["Pricing"], selected_product, "Active", True)
+        )
+        default_allocation = float(
+            pd.to_numeric(
+                pd.Series(
+                    [
+                        _first_product_value(
+                            assumptions["Pricing"],
+                            selected_product,
+                            "Allocation %",
+                            100.0 if default_active else 0.0,
+                        )
+                    ]
+                ),
+                errors="coerce",
+            ).iloc[0]
+            or 0.0
+        )
+        default_quantity_mode = str(
+            _first_product_value(
+                assumptions["Pricing"], selected_product, "Quantity Mode", "Derived"
+            )
+            or "Derived"
+        ).strip()
+        if default_quantity_mode not in {"Derived", "Manual Override"}:
+            default_quantity_mode = "Derived"
+        default_manual_override_raw = pd.to_numeric(
+            pd.Series(
+                [
+                    _first_product_value(
+                        assumptions["Pricing"],
+                        selected_product,
+                        "Manual Quantity Override",
+                        np.nan,
+                    )
+                ]
+            ),
+            errors="coerce",
+        ).iloc[0]
+        default_manual_override = (
+            float(default_manual_override_raw)
+            if pd.notna(default_manual_override_raw)
+            else 0.0
+        )
+        default_unit = str(
+            _first_product_value(assumptions["Pricing"], selected_product, "Unit", "")
+            or ""
+        ).strip()
+        default_base_price_raw = pd.to_numeric(
+            pd.Series(
+                [
+                    _first_product_value(
+                        assumptions["Pricing"], selected_product, "Base Price", 0.0
+                    )
+                ]
+            ),
+            errors="coerce",
+        ).iloc[0]
+        default_base_price = (
+            float(default_base_price_raw) if pd.notna(default_base_price_raw) else 0.0
+        )
+        default_price_growth_raw = pd.to_numeric(
+            pd.Series(
+                [
+                    _first_product_value(
+                        assumptions["Pricing"], selected_product, "Price Growth %", 0.0
+                    )
+                ]
+            ),
+            errors="coerce",
+        ).iloc[0]
+        default_price_growth = (
+            float(default_price_growth_raw) if pd.notna(default_price_growth_raw) else 0.0
+        )
 
-        last_product = st.session_state.get("pricing_base_price_last_product")
+        last_product = st.session_state.get("pricing_bulk_last_product")
         if last_product != selected_product:
-            st.session_state.pricing_base_price_amount = default_base_price
-            st.session_state.pricing_base_price_last_product = selected_product
+            st.session_state.pricing_bulk_active = default_active
+            st.session_state.pricing_bulk_allocation_pct = default_allocation
+            st.session_state.pricing_bulk_quantity_mode = default_quantity_mode
+            st.session_state.pricing_bulk_manual_override = default_manual_override
+            st.session_state.pricing_bulk_unit = default_unit
+            st.session_state.pricing_bulk_base_price = default_base_price
+            st.session_state.pricing_bulk_price_growth_pct = default_price_growth
+            st.session_state.pricing_bulk_last_product = selected_product
         else:
-            st.session_state.setdefault("pricing_base_price_amount", default_base_price)
+            st.session_state.setdefault("pricing_bulk_active", default_active)
+            st.session_state.setdefault("pricing_bulk_allocation_pct", default_allocation)
+            st.session_state.setdefault("pricing_bulk_quantity_mode", default_quantity_mode)
+            st.session_state.setdefault("pricing_bulk_manual_override", default_manual_override)
+            st.session_state.setdefault("pricing_bulk_unit", default_unit)
+            st.session_state.setdefault("pricing_bulk_base_price", default_base_price)
+            st.session_state.setdefault("pricing_bulk_price_growth_pct", default_price_growth)
 
-        st.caption("Choose a product and apply a new base price across its pricing rows.")
-        base_price_product_col, base_price_amount_col, base_price_apply_col = st.columns([2, 1.5, 1])
-        base_price_product_col.selectbox(
+        st.caption(
+            "Choose a product, update the pricing inputs below, and apply them across all of its pricing rows."
+        )
+        bulk_row_1 = st.columns([1.6, 1, 1, 1.2])
+        bulk_row_1[0].selectbox(
             "Product",
             options=product_options,
-            key="pricing_base_price_product",
+            key="pricing_bulk_product",
         )
-        base_price_amount_col.number_input(
-            "New base price",
+        bulk_row_1[1].checkbox(
+            "Active",
+            key="pricing_bulk_active",
+        )
+        bulk_row_1[2].number_input(
+            "Allocation (%)",
+            min_value=0.0,
+            max_value=100.0,
+            step=1.0,
+            format="%.2f",
+            key="pricing_bulk_allocation_pct",
+        )
+        bulk_row_1[3].selectbox(
+            "Quantity Mode",
+            options=["Derived", "Manual Override"],
+            key="pricing_bulk_quantity_mode",
+        )
+
+        bulk_row_2 = st.columns([1.2, 1.2, 1.2, 1.2])
+        bulk_row_2[0].number_input(
+            f"Manual qty / {period_label}",
+            min_value=0.0,
+            step=1.0,
+            format="%.2f",
+            key="pricing_bulk_manual_override",
+            disabled=st.session_state.get("pricing_bulk_quantity_mode") != "Manual Override",
+        )
+        bulk_row_2[1].text_input(
+            "Unit",
+            key="pricing_bulk_unit",
+        )
+        bulk_row_2[2].number_input(
+            "Base Price",
             min_value=0.0,
             step=0.1,
             format="%.2f",
-            key="pricing_base_price_amount",
+            key="pricing_bulk_base_price",
         )
-        if base_price_apply_col.button("Apply base price", key="pricing_apply_base_price"):
+        bulk_row_2[3].number_input(
+            "Price Growth (%)",
+            step=0.1,
+            format="%.2f",
+            key="pricing_bulk_price_growth_pct",
+        )
+
+        if st.button("Apply pricing update", key="pricing_apply_bulk_update"):
             updated_assumptions = dict(assumptions)
-            updated_assumptions["Pricing"] = _apply_product_base_price(
+            updated_assumptions["Pricing"] = _apply_product_pricing_updates(
                 assumptions["Pricing"],
-                str(st.session_state.get("pricing_base_price_product", "")),
-                float(st.session_state.get("pricing_base_price_amount", 0.0)),
+                str(st.session_state.get("pricing_bulk_product", "")),
+                active=bool(st.session_state.get("pricing_bulk_active", False)),
+                allocation_pct=float(
+                    st.session_state.get("pricing_bulk_allocation_pct", 0.0)
+                ),
+                quantity_mode=str(
+                    st.session_state.get("pricing_bulk_quantity_mode", "Derived")
+                ),
+                manual_quantity_override=(
+                    float(st.session_state.get("pricing_bulk_manual_override", 0.0))
+                    if st.session_state.get("pricing_bulk_quantity_mode") == "Manual Override"
+                    else None
+                ),
+                unit=str(st.session_state.get("pricing_bulk_unit", "")),
+                base_price=float(st.session_state.get("pricing_bulk_base_price", 0.0)),
+                price_growth_pct=float(
+                    st.session_state.get("pricing_bulk_price_growth_pct", 0.0)
+                ),
             )
             assumptions.update(sync_assumptions_fn(updated_assumptions, core_schedule))
             clear_editor_state("assump::pricing")
     else:
-        st.caption("No products are available yet. Add pricing rows first to apply a base price update.")
+        st.caption("No products are available yet. Add pricing rows first to apply a bulk pricing update.")
 
     def _save_pricing_matrix(updated: pd.DataFrame) -> None:
         refreshed_assumptions = dict(assumptions)

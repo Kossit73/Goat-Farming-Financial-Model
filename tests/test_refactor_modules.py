@@ -142,6 +142,100 @@ def test_apply_product_base_price_is_noop_when_required_columns_are_missing() ->
     assert updated.equals(pricing)
 
 
+def test_apply_product_pricing_updates_updates_all_supported_fields() -> None:
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2024-01-31", "2024-02-29", "2024-01-31"],
+            "Product": ["Milk", "Milk", "Cheese"],
+            "Active": [True, True, True],
+            "Allocation %": [100.0, 100.0, 100.0],
+            "Quantity Mode": ["Derived", "Derived", "Derived"],
+            "Manual Quantity Override": [pd.NA, pd.NA, pd.NA],
+            "Quantity per Period": [50.0, 55.0, 10.0],
+            "Unit": ["Litre", "Litre", "Kg"],
+            "Base Price": [4.0, 4.1, 30.0],
+            "Price Growth %": [1.0, 1.0, 2.0],
+            "Revenue": [200.0, 225.5, 300.0],
+        }
+    )
+
+    updated = assumptions_page._apply_product_pricing_updates(
+        pricing,
+        "Milk",
+        active=False,
+        allocation_pct=65.0,
+        quantity_mode="Manual Override",
+        manual_quantity_override=120.0,
+        unit="Bottle",
+        base_price=5.5,
+        price_growth_pct=3.0,
+    )
+
+    milk_rows = updated.loc[updated["Product"] == "Milk"]
+    cheese_row = updated.loc[updated["Product"] == "Cheese"].iloc[0]
+
+    assert milk_rows["Active"].tolist() == [False, False]
+    assert milk_rows["Allocation %"].tolist() == [0.0, 0.0]
+    assert milk_rows["Quantity Mode"].tolist() == ["Manual Override", "Manual Override"]
+    assert milk_rows["Manual Quantity Override"].tolist() == [120.0, 120.0]
+    assert milk_rows["Unit"].tolist() == ["Bottle", "Bottle"]
+    assert milk_rows["Base Price"].tolist() == [5.5, 5.5]
+    assert milk_rows["Price Growth %"].tolist() == [3.0, 3.0]
+    assert cheese_row["Base Price"] == 30.0
+
+
+def test_apply_product_pricing_updates_clears_manual_override_for_derived_mode() -> None:
+    pricing = pd.DataFrame(
+        {
+            "Period": ["2024-01-31", "2024-02-29"],
+            "Product": ["Milk", "Milk"],
+            "Active": [True, True],
+            "Allocation %": [100.0, 100.0],
+            "Quantity Mode": ["Manual Override", "Manual Override"],
+            "Manual Quantity Override": [80.0, 90.0],
+            "Quantity per Period": [80.0, 90.0],
+            "Unit": ["Litre", "Litre"],
+            "Base Price": [4.0, 4.0],
+            "Price Growth %": [1.0, 1.0],
+            "Revenue": [320.0, 360.0],
+        }
+    )
+
+    updated = assumptions_page._apply_product_pricing_updates(
+        pricing,
+        "Milk",
+        active=True,
+        allocation_pct=75.0,
+        quantity_mode="Derived",
+        manual_quantity_override=120.0,
+        unit="Litre",
+        base_price=4.5,
+        price_growth_pct=2.5,
+    )
+
+    assert updated["Allocation %"].tolist() == [75.0, 75.0]
+    assert updated["Quantity Mode"].tolist() == ["Derived", "Derived"]
+    assert updated["Manual Quantity Override"].isna().all()
+
+
+def test_apply_product_pricing_updates_is_noop_when_product_column_missing() -> None:
+    pricing = pd.DataFrame({"Base Price": [4.0]})
+
+    updated = assumptions_page._apply_product_pricing_updates(
+        pricing,
+        "Milk",
+        active=True,
+        allocation_pct=100.0,
+        quantity_mode="Derived",
+        manual_quantity_override=None,
+        unit="Litre",
+        base_price=4.5,
+        price_growth_pct=2.5,
+    )
+
+    assert updated.equals(pricing)
+
+
 def test_commercial_service_sync_matches_existing_streamlit_wrapper() -> None:
     core = pd.DataFrame(
         {
