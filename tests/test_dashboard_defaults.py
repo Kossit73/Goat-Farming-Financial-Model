@@ -516,6 +516,83 @@ def test_ensure_operating_cost_table_forward_fills_years_without_fillna_method_k
     assert table["Year"].tolist() == [2024, 2024, 2026]
 
 
+def test_sparse_loader_tables_do_not_crash_on_scalar_get_fallbacks():
+    scenario = streamlit_app._ensure_scenario_preset_table(
+        "Base Case Scenario",
+        pd.DataFrame({"Change %": [5.0]}),
+    )
+    assert "Driver" in scenario.columns
+    assert scenario["Driver"].astype(str).str.strip().ne("").all()
+
+    merged_drivers = streamlit_app._merge_production_driver_subset(
+        None,
+        pd.DataFrame({"Milk Yield per Head per Day": [2.5]}),
+        ["Milk"],
+    )
+    assert "Product" in merged_drivers.columns
+
+    pricing = streamlit_app._apply_pricing_yearly_increment(
+        pd.DataFrame(
+            {
+                "Period": ["2026-03-31"],
+                "Base Price": [10.0],
+                "Allocation %": [100.0],
+                "Quantity per Period": [5.0],
+                "Active": [True],
+            }
+        ),
+        "Base Price",
+        5.0,
+    )
+    assert pricing.loc[0, "Product"] == "Product"
+
+    operating = streamlit_app._ensure_operating_cost_table(
+        pd.DataFrame(
+            {
+                "Year": [2026],
+                "unit_cost_per_head_per_month": [12.0],
+                "Inflation %": [3.0],
+            }
+        )
+    )
+    assert operating.loc[0, "Field"] == "variable_feed_cost_per_herd"
+
+    direct_wages = streamlit_app._apply_direct_wage_increment(
+        pd.DataFrame(
+            {
+                "Period": ["2026-03-31"],
+                "Head Count": [2.0],
+                "Monthly Salary per Head": [1500.0],
+            }
+        ),
+        4.0,
+    )
+    assert direct_wages.loc[0, "Position"] == "Direct Wage"
+
+    admin_wages = streamlit_app._apply_admin_wage_increment(
+        pd.DataFrame(
+            {
+                "Period": ["2026-03-31"],
+                "Head Count": [1.0],
+                "Monthly Salary per Head": [2200.0],
+            }
+        ),
+        4.0,
+    )
+    assert admin_wages.loc[0, "Position"] == "Admin Wage"
+
+    variable_expenses = streamlit_app._apply_variable_expense_increment(
+        pd.DataFrame(
+            {
+                "Period": ["2026-03-31"],
+                "Amount": [500.0],
+            }
+        ),
+        4.0,
+    )
+    assert "Item" in variable_expenses.columns
+
+
 def test_direct_wage_template_normalization_recomputes_itemised_totals():
     records = streamlit_app._normalize_direct_wage_template_records(
         [

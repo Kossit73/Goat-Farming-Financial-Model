@@ -1696,7 +1696,7 @@ def _ensure_scenario_preset_table(
 
     if "Driver" not in work.columns:
         work["Driver"] = ""
-    work["Driver"] = work.get("Driver", "").astype(str).str.strip()
+    work["Driver"] = _series_or_default(work, "Driver", "").astype(str).str.strip()
     work.loc[work["Driver"] == "", "Driver"] = "Driver"
 
     if "Change %" not in work.columns:
@@ -2631,10 +2631,10 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
         if column not in work.columns:
             work[column] = np.nan
 
-    work["Product"] = work.get("Product", "").astype(str).str.strip()
+    work["Product"] = _series_or_default(work, "Product", "").astype(str).str.strip()
     work.loc[work["Product"] == "", "Product"] = "Product"
-    work["Unit"] = work.get("Unit", "").astype(str).str.strip()
-    work["Quantity Mode"] = work.get("Quantity Mode", "Derived").astype(str).str.strip()
+    work["Unit"] = _series_or_default(work, "Unit", "").astype(str).str.strip()
+    work["Quantity Mode"] = _series_or_default(work, "Quantity Mode", "Derived").astype(str).str.strip()
     work.loc[~work["Quantity Mode"].isin(["Derived", "Manual Override"]), "Quantity Mode"] = "Derived"
 
     for col in _PRODUCTION_DRIVER_NUMERIC_COLUMNS:
@@ -2737,7 +2737,7 @@ def _merge_production_driver_subset(
 ) -> pd.DataFrame:
     base = _ensure_production_driver_table(table)
     edited = subset.copy()
-    edited["Product"] = edited.get("Product", "").astype(str).str.strip()
+    edited["Product"] = _series_or_default(edited, "Product", "").astype(str).str.strip()
     product_keys = {str(product).strip().casefold() for product in products if str(product).strip()}
 
     for column in edited.columns:
@@ -3078,20 +3078,31 @@ def _merge_missing_default_rows(
     return work
 
 
+def _series_or_default(
+    frame: pd.DataFrame,
+    column: str,
+    default: Any,
+) -> pd.Series:
+    series = frame.get(column)
+    if series is None:
+        series = pd.Series([default] * len(frame), index=frame.index)
+    return series.fillna(default)
+
+
 def _normalize_biological_system_settings_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
     for column in ["Setting", "Value"]:
         if column not in work.columns:
             work[column] = ""
-    work["Setting"] = work.get("Setting", "").astype(str).str.strip()
-    work["Value"] = work.get("Value", "").astype(str).str.strip()
+    work["Setting"] = _series_or_default(work, "Setting", "").astype(str).str.strip()
+    work["Value"] = _series_or_default(work, "Value", "").astype(str).str.strip()
     work.loc[work["Setting"] == "", "Setting"] = "Setting"
     return _merge_missing_default_rows(work, DEFAULT_BIOLOGICAL_SYSTEM_SETTINGS, "Setting")
 
 
 def _normalize_breeding_reproduction_biology_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
-    work["Breeding Group"] = work.get("Breeding Group", "").fillna("").astype(str).str.strip()
+    work["Breeding Group"] = _series_or_default(work, "Breeding Group", "").fillna("").astype(str).str.strip()
     work.loc[work["Breeding Group"] == "", "Breeding Group"] = "Breeding Group"
     for column in [
         "Age at First Kidding (months)",
@@ -3107,13 +3118,13 @@ def _normalize_breeding_reproduction_biology_table(table: pd.DataFrame) -> pd.Da
         "Replacement Retention %",
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
-    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work["Active"] = _series_or_default(work, "Active", True).map(lambda value: _coerce_bool_value(value, True))
     return work
 
 
 def _normalize_lactation_biology_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
-    work["Parity Group"] = work.get("Parity Group", "").fillna("").astype(str).str.strip()
+    work["Parity Group"] = _series_or_default(work, "Parity Group", "").fillna("").astype(str).str.strip()
     work.loc[work["Parity Group"] == "", "Parity Group"] = "1"
     for column in [
         "Age at First Kidding (months)",
@@ -3126,13 +3137,13 @@ def _normalize_lactation_biology_table(table: pd.DataFrame) -> pd.DataFrame:
         "Curve Shape Parameter",
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
-    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work["Active"] = _series_or_default(work, "Active", True).map(lambda value: _coerce_bool_value(value, True))
     return work
 
 
 def _normalize_finishing_slaughter_biology_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
-    work["Product Group"] = work.get("Product Group", "").fillna("").astype(str).str.strip()
+    work["Product Group"] = _series_or_default(work, "Product Group", "").fillna("").astype(str).str.strip()
     work.loc[work["Product Group"] == "", "Product Group"] = "Default Livestock Stream"
     for column in [
         "Months to Market Weight",
@@ -3148,21 +3159,21 @@ def _normalize_finishing_slaughter_biology_table(table: pd.DataFrame) -> pd.Data
         "Mortality %",
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
-    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work["Active"] = _series_or_default(work, "Active", True).map(lambda value: _coerce_bool_value(value, True))
     return work
 
 
 def _normalize_opening_herd_cohorts_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
     for column in ["Cohort ID", "Sex", "Purpose"]:
-        work[column] = work[column].fillna("").astype(str).str.strip()
+        work[column] = _series_or_default(work, column, "").fillna("").astype(str).str.strip()
     work.loc[work["Cohort ID"] == "", "Cohort ID"] = "COHORT"
     work.loc[work["Sex"] == "", "Sex"] = "Female"
     work.loc[work["Purpose"] == "", "Purpose"] = "replacement_doe"
     for column in ["Age in Months", "Head Count", "Parity", "Days in Milk"]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
-    work["Pregnant"] = work.get("Pregnant", False).map(lambda value: _coerce_bool_value(value, False))
-    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work["Pregnant"] = _series_or_default(work, "Pregnant", False).map(lambda value: _coerce_bool_value(value, False))
+    work["Active"] = _series_or_default(work, "Active", True).map(lambda value: _coerce_bool_value(value, True))
     return work
 
 
@@ -3171,7 +3182,7 @@ def _normalize_cohort_allocation_rules_table(table: pd.DataFrame) -> pd.DataFram
     for column in ["Rule", "Value"]:
         if column not in work.columns:
             work[column] = np.nan
-    work["Rule"] = work.get("Rule", "").astype(str).str.strip()
+    work["Rule"] = _series_or_default(work, "Rule", "").astype(str).str.strip()
     work.loc[work["Rule"] == "", "Rule"] = "Rule"
     work["Value"] = pd.to_numeric(work.get("Value"), errors="coerce")
     return _merge_missing_default_rows(work, DEFAULT_COHORT_ALLOCATION_RULES, "Rule")
@@ -3180,7 +3191,7 @@ def _normalize_cohort_allocation_rules_table(table: pd.DataFrame) -> pd.DataFram
 def _normalize_biological_cost_drivers_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
     for column in ["Field", "Category", "Applies To"]:
-        work[column] = work.get(column, "").fillna("").astype(str).str.strip()
+        work[column] = _series_or_default(work, column, "").fillna("").astype(str).str.strip()
     work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
     work.loc[work["Category"] == "", "Category"] = "Feed"
     work.loc[work["Applies To"] == "", "Applies To"] = "total_herd"
@@ -3189,7 +3200,7 @@ def _normalize_biological_cost_drivers_table(table: pd.DataFrame) -> pd.DataFram
         work.get("unit_cost_per_head_per_month"), errors="coerce"
     )
     work["Inflation %"] = pd.to_numeric(work.get("Inflation %"), errors="coerce")
-    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work["Active"] = _series_or_default(work, "Active", True).map(lambda value: _coerce_bool_value(value, True))
     return work
 
 
@@ -4525,7 +4536,7 @@ def _ensure_variable_expense_input_table(
         if column not in work.columns:
             work[column] = np.nan
 
-    work["Item"] = work.get("Item", "").astype(str).str.strip()
+    work["Item"] = _series_or_default(work, "Item", "").astype(str).str.strip()
     work.loc[work["Item"] == "", "Item"] = "Variable Expense"
     work["Amount per Period"] = pd.to_numeric(
         work.get("Amount per Period"), errors="coerce"
@@ -5024,11 +5035,11 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
             work[col] = np.nan
 
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
-    work["Product"] = work.get("Product", "").astype(str).str.strip()
+    work["Product"] = _series_or_default(work, "Product", "").astype(str).str.strip()
     work.loc[work["Product"] == "", "Product"] = "Product"
-    work["Active"] = work.get("Active", False).fillna(False).astype(bool)
+    work["Active"] = _series_or_default(work, "Active", False).fillna(False).astype(bool)
     work["Allocation %"] = pd.to_numeric(work.get("Allocation %"), errors="coerce")
-    work["Quantity Mode"] = work.get("Quantity Mode", "Derived").astype(str).str.strip()
+    work["Quantity Mode"] = _series_or_default(work, "Quantity Mode", "Derived").astype(str).str.strip()
     work.loc[~work["Quantity Mode"].isin(["Derived", "Manual Override"]), "Quantity Mode"] = "Derived"
     work["Manual Quantity Override"] = pd.to_numeric(
         work.get("Manual Quantity Override"), errors="coerce"
@@ -5036,7 +5047,7 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     work["Quantity per Period"] = pd.to_numeric(
         work.get("Quantity per Period"), errors="coerce"
     )
-    work["Unit"] = work.get("Unit", "").astype(str).str.strip()
+    work["Unit"] = _series_or_default(work, "Unit", "").astype(str).str.strip()
     work["Base Price"] = pd.to_numeric(work.get("Base Price"), errors="coerce")
     work["Price Growth %"] = pd.to_numeric(
         work.get("Price Growth %"), errors="coerce"
@@ -5129,7 +5140,7 @@ def _apply_pricing_yearly_increment(
         return work
 
     work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
-    work["Product"] = work.get("Product", "").astype(str).str.strip()
+    work["Product"] = _series_or_default(work, "Product", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
     is_percent_column = column.endswith("%")
@@ -5516,12 +5527,14 @@ def _ensure_operating_cost_table(
     if "Field" not in work.columns:
         work["Field"] = np.nan
     work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
-    work["Field"] = work.get("Field", "").astype(str).str.strip()
-    work["Category"] = work.get("Category", "").astype(str).str.strip()
+    work["Field"] = _series_or_default(work, "Field", "").astype(str).str.strip()
+    work["Category"] = _series_or_default(work, "Category", "").astype(str).str.strip()
     work.loc[work["Category"] == "", "Category"] = np.nan
     for idx in work.index:
-        category = str(work.at[idx, "Category"]).strip()
-        field = str(work.at[idx, "Field"]).strip()
+        category_value = work.at[idx, "Category"]
+        field_value = work.at[idx, "Field"]
+        category = "" if pd.isna(category_value) else str(category_value).strip()
+        field = "" if pd.isna(field_value) else str(field_value).strip()
         if (not field or field.lower() == "nan") and category:
             for key, label in OPERATING_COST_FIELD_TO_CATEGORY.items():
                 if label.casefold() == category.casefold():
@@ -5618,7 +5631,7 @@ def _apply_operating_cost_increment(
         return work
 
     work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
-    work["Category"] = work.get("Category", "").astype(str).str.strip()
+    work["Category"] = _series_or_default(work, "Category", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
     is_percent_column = column.endswith("%")
@@ -6067,7 +6080,7 @@ def _ensure_direct_wage_table(
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
     if "Position" not in work.columns:
         work["Position"] = work.get("Role", "")
-    work["Position"] = work.get("Position", "").astype(str).str.strip()
+    work["Position"] = _series_or_default(work, "Position", "").astype(str).str.strip()
     work.loc[work["Position"] == "", "Position"] = "Direct Wage"
 
     if "Head Count" not in work.columns:
@@ -6164,7 +6177,7 @@ def _apply_direct_wage_increment(
     work["Monthly Salary per Head"] = pd.to_numeric(
         work.get("Monthly Salary per Head"), errors="coerce"
     )
-    work["Position"] = work.get("Position", "").astype(str).str.strip()
+    work["Position"] = _series_or_default(work, "Position", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
 
@@ -6356,7 +6369,7 @@ def _ensure_admin_wage_table(
             work["Position"] = work["Role"]
         else:
             work["Position"] = ""
-    work["Position"] = work.get("Position", "").astype(str).str.strip()
+    work["Position"] = _series_or_default(work, "Position", "").astype(str).str.strip()
     work.loc[work["Position"] == "", "Position"] = "Admin Wage"
 
     if "Head Count" not in work.columns:
@@ -6453,7 +6466,7 @@ def _apply_admin_wage_increment(
     work["Monthly Salary per Head"] = pd.to_numeric(
         work.get("Monthly Salary per Head"), errors="coerce"
     )
-    work["Position"] = work.get("Position", "").astype(str).str.strip()
+    work["Position"] = _series_or_default(work, "Position", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
 
@@ -6555,7 +6568,7 @@ def _ensure_variable_expense_table(
 
     work = table.copy()
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
-    work["Item"] = work.get("Item", "").astype(str).str.strip()
+    work["Item"] = _series_or_default(work, "Item", "").astype(str).str.strip()
     work.loc[work["Item"] == "", "Item"] = "Variable Expense"
     work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
 
@@ -6609,7 +6622,7 @@ def _apply_variable_expense_increment(
     work = table.copy()
     work["Period_dt"] = pd.to_datetime(work.get("Period"), errors="coerce")
     work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
-    work["Item"] = work.get("Item", "").astype(str).str.strip()
+    work["Item"] = _series_or_default(work, "Item", "").astype(str).str.strip()
 
     increment_factor = 1 + (increment_pct / 100.0)
 
@@ -7694,7 +7707,7 @@ def _ensure_business_configuration_table(
 
     if "Business Type" not in work.columns:
         work["Business Type"] = DEFAULT_BUSINESS_TYPE
-    work["Business Type"] = work.get("Business Type", DEFAULT_BUSINESS_TYPE).apply(_normalize_business_type)
+    work["Business Type"] = _series_or_default(work, "Business Type", DEFAULT_BUSINESS_TYPE).apply(_normalize_business_type)
     return work[["Business Type"]].head(1).reset_index(drop=True)
 
 
@@ -7717,7 +7730,7 @@ def _ensure_scenario_controls_table(
 
     if "Driver" not in work.columns:
         work["Driver"] = ""
-    work["Driver"] = work.get("Driver", "").astype(str).str.strip()
+    work["Driver"] = _series_or_default(work, "Driver", "").astype(str).str.strip()
     work.loc[work["Driver"] == "", "Driver"] = "Driver"
 
     if "Change %" not in work.columns:
@@ -8247,7 +8260,7 @@ def _ensure_capital_financing_table(
 
     if "Source" not in work.columns:
         work["Source"] = ""
-    work["Source"] = work.get("Source", "").astype(str).str.strip()
+    work["Source"] = _series_or_default(work, "Source", "").astype(str).str.strip()
     work.loc[work["Source"] == "", "Source"] = "Source"
 
     for column in ["Amount", "Interest/Return %", "Term (years)"]:
@@ -8320,7 +8333,9 @@ def _ensure_loan_facilities_table(table: Optional[pd.DataFrame]) -> pd.DataFrame
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
 
-    work["Active"] = work.get("Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work["Active"] = _series_or_default(work, "Active", True).map(
+        lambda value: _coerce_bool_value(value, True)
+    )
 
     ordered_cols = list(defaults.columns)
     remainder = [col for col in work.columns if col not in ordered_cols]
@@ -8362,7 +8377,7 @@ def _ensure_equity_facilities_table(table: Optional[pd.DataFrame]) -> pd.DataFra
     for column in ["Contribution Amount", "Ownership %", "Issue Costs"]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
 
-    work["Active"] = work.get("Active", True).map(
+    work["Active"] = _series_or_default(work, "Active", True).map(
         lambda value: _coerce_bool_value(value, True)
     )
 
@@ -8565,7 +8580,7 @@ def _ensure_valuation_inputs_table(
 
     if "Metric" not in work.columns:
         work["Metric"] = ""
-    work["Metric"] = work.get("Metric", "").astype(str).str.strip()
+    work["Metric"] = _series_or_default(work, "Metric", "").astype(str).str.strip()
     work.loc[work["Metric"] == "", "Metric"] = "Metric"
     derived_metric_keys = {metric.casefold() for metric in DERIVED_VALUATION_METRICS}
     work = work.loc[
