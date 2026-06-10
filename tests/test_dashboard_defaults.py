@@ -809,8 +809,13 @@ def test_production_drivers_derive_meat_and_pelt_from_slaughter():
         pricing, schedule, drivers
     )
 
-    assert derived.loc[derived["Product"] == "Meat", "Quantity per Period"].iloc[0] == 100.0
-    assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == 5.0
+    expected_saleable_goats = 100.0 * (1.0 - (1.0 - 0.05) ** (1.0 / 12.0))
+    assert derived.loc[derived["Product"] == "Meat", "Quantity per Period"].iloc[0] == pytest.approx(
+        expected_saleable_goats * 20.0
+    )
+    assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == pytest.approx(
+        expected_saleable_goats
+    )
 
 
 def test_production_drivers_derive_offal_and_live_herd_from_saleable_stream():
@@ -854,10 +859,21 @@ def test_production_drivers_derive_offal_and_live_herd_from_saleable_stream():
         pricing, schedule, drivers
     )
 
-    assert derived.loc[derived["Product"] == "Meat", "Quantity per Period"].iloc[0] == 80.0
-    assert derived.loc[derived["Product"] == "Offal", "Quantity per Period"].iloc[0] == 16.0
-    assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == 4.0
-    assert derived.loc[derived["Product"] == "Live Herd", "Quantity per Period"].iloc[0] == 1.0
+    expected_saleable_goats = 100.0 * (1.0 - (1.0 - 0.05) ** (1.0 / 12.0))
+    expected_live_herd = expected_saleable_goats * 0.20
+    expected_slaughter_heads = expected_saleable_goats - expected_live_herd
+    assert derived.loc[derived["Product"] == "Meat", "Quantity per Period"].iloc[0] == pytest.approx(
+        expected_slaughter_heads * 20.0
+    )
+    assert derived.loc[derived["Product"] == "Offal", "Quantity per Period"].iloc[0] == pytest.approx(
+        expected_slaughter_heads * 4.0
+    )
+    assert derived.loc[derived["Product"] == "Pelt", "Quantity per Period"].iloc[0] == pytest.approx(
+        expected_slaughter_heads
+    )
+    assert derived.loc[derived["Product"] == "Live Herd", "Quantity per Period"].iloc[0] == pytest.approx(
+        expected_live_herd
+    )
 
 
 def test_add_production_driver_column_preserves_core_schema():
@@ -1303,9 +1319,10 @@ def test_commercial_shocks_apply_to_multiple_products():
     meat_row = shocked.loc[shocked["Product"] == "Meat"].iloc[0]
     pelt_row = shocked.loc[shocked["Product"] == "Pelt"].iloc[0]
 
-    assert meat_row["Quantity per Period"] == pytest.approx(120.0)
+    expected_saleable_goats = 100.0 * (1.0 - (1.0 - 0.05) ** (1.0 / 12.0))
+    assert meat_row["Quantity per Period"] == pytest.approx(expected_saleable_goats * 1.2 * 20.0)
     assert meat_row["Base Price"] == pytest.approx(11.0)
-    assert meat_row["Revenue"] == pytest.approx(1320.0)
+    assert meat_row["Revenue"] == pytest.approx(meat_row["Quantity per Period"] * 11.0)
     assert pelt_row["Base Price"] == pytest.approx(3.0)
 
 

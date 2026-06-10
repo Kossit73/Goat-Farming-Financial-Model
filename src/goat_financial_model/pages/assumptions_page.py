@@ -150,12 +150,12 @@ def render_herd_plan_editor(
     ensure_fn: Callable[[pd.DataFrame], pd.DataFrame],
 ) -> pd.DataFrame:
     st.caption(
-        "Set herd size by year and optional growth %. Revenue and key variable costs are scaled from the baseline herd level."
+        "Set herd size by year and optional annual growth %. Revenue and key variable costs are scaled from the baseline herd level."
     )
     st.session_state.setdefault("herd_yearly_increment_percent", 0.0)
     herd_inc_col, herd_inc_btn_col = st.columns([2, 1])
     herd_inc_col.number_input(
-        "Yearly Increment (%)",
+        "Annual Increment (%)",
         min_value=-100.0,
         max_value=300.0,
         step=0.1,
@@ -538,7 +538,7 @@ def render_pricing_manual_editor(
             key="pricing_bulk_base_price",
         )
         bulk_row_2[3].number_input(
-            "Price Growth (%)",
+            "Annual Price Growth (%)",
             step=0.1,
             format="%.2f",
             key="pricing_bulk_price_growth_pct",
@@ -595,7 +595,7 @@ def render_pricing_manual_editor(
             "Quantity per Period": st.column_config.NumberColumn(f"Quantity per {period_label}", format="%.2f", step=1.0),
             "Unit": st.column_config.TextColumn("Unit"),
             "Base Price": st.column_config.NumberColumn("Base Price", format="%.2f", step=0.1),
-            "Price Growth %": st.column_config.NumberColumn("Price Growth (%)", format="%.2f", step=0.1),
+            "Price Growth %": st.column_config.NumberColumn("Annual Price Growth (%)", format="%.2f", step=0.1),
             "Revenue": st.column_config.NumberColumn("Revenue", format="%.2f"),
         },
         disabled=["Period", "Product", "Quantity per Period", "Revenue"],
@@ -657,7 +657,7 @@ def render_pricing_manual_editor(
     inc_target_col.selectbox("Apply increment to", options=target_options, key="pricing_increment_target")
     inc_column_col.selectbox("Column", options=["Base Price", "Price Growth %"], key="pricing_increment_column")
     inc_pct_col.number_input(
-        "Yearly increment (%)",
+        "Annual increment (%)",
         min_value=-100.0,
         max_value=100.0,
         step=0.1,

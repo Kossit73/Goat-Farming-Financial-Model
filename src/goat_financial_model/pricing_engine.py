@@ -29,6 +29,14 @@ def period_days_from_index(index: pd.DatetimeIndex) -> pd.Series:
     return deltas.fillna(default_days).clip(lower=1.0)
 
 
+def annual_pct_to_period_rate(percent: float, period_days: float) -> float:
+    """Convert an annualized rate into the active schedule period rate."""
+
+    annual_rate = max(0.0, min(float(percent) / 100.0, 1.0))
+    months_factor = max(float(period_days) / 30.44, 1e-6)
+    return 1.0 - ((1.0 - annual_rate) ** (months_factor / 12.0))
+
+
 def build_pricing_context(
     schedule_df: pd.DataFrame,
     driver_lookup: dict[str, dict[str, Any]],
@@ -133,9 +141,14 @@ def derive_pricing_quantities(
             float(pd.to_numeric(pd.Series([livestock_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
             / 100.0
         )
-        slaughter_rate = float(
-            pd.to_numeric(pd.Series([livestock_driver.get("Slaughter Rate % of Herd per Period")]), errors="coerce").iloc[0] or 0.0
-        ) / 100.0
+        annual_slaughter_pct = float(
+            pd.to_numeric(
+                pd.Series([livestock_driver.get("Slaughter Rate % of Herd per Period")]),
+                errors="coerce",
+            ).iloc[0]
+            or 0.0
+        )
+        slaughter_rate = annual_pct_to_period_rate(annual_slaughter_pct, period_days)
         live_herd_share = float(
             pd.to_numeric(pd.Series([context.driver_lookup.get("Live Herd", livestock_driver).get("Live Herd Sales Share %")]), errors="coerce").iloc[0] or 0.0
         ) / 100.0

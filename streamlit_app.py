@@ -1472,7 +1472,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 3.0,
+            "Slaughter Rate % of Herd per Period": 36.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 22.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1487,7 +1487,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 3.0,
+            "Slaughter Rate % of Herd per Period": 36.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 4.0,
@@ -1502,7 +1502,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 3.0,
+            "Slaughter Rate % of Herd per Period": 36.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1517,7 +1517,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 3.0,
+            "Slaughter Rate % of Herd per Period": 36.0,
             "Live Herd Sales Share %": 30.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -2798,7 +2798,7 @@ def _production_driver_column_config(
             "Cheese Yield (Kg/Litre)", format="%.3f", step=0.01
         ),
         "Slaughter Rate % of Herd per Period": st.column_config.NumberColumn(
-            "Slaughter Rate (% / Period)", format="%.2f", step=0.1
+            "Annual Slaughter Rate (%)", format="%.2f", step=0.1
         ),
         "Live Herd Sales Share %": st.column_config.NumberColumn(
             "Live Herd Sales Share (%)", format="%.2f", step=0.1
@@ -2813,7 +2813,7 @@ def _production_driver_column_config(
             "Pelt Units / Goat", format="%.2f", step=0.1
         ),
         "Driver Growth %": st.column_config.NumberColumn(
-            "Driver Growth (%)", format="%.2f", step=0.1
+            "Annual Driver Growth (%)", format="%.2f", step=0.1
         ),
     }
 
@@ -10362,7 +10362,7 @@ def main() -> None:
             st.session_state.assumptions.setdefault(name, table.copy())
 
     production_horizon_defaults = st.session_state.assumptions.get("Production Horizon")
-    st.session_state.setdefault("schedule_period_type", "monthly")
+    st.session_state.setdefault("schedule_period_type", "quarterly")
     st.session_state["schedule_period_type"] = _normalize_period_type(
         st.session_state.get("schedule_period_type")
     )
@@ -10454,6 +10454,7 @@ def main() -> None:
             key="schedule_period_type_selector",
             help=(
                 "Applies to Core, COGS, Variable Expenses, Direct Wages, and Admin Wages schedules. "
+                "Quarterly is the recommended planning default; monthly remains available for operating-detail use. "
                 "Capex remains year-based and aligned to the active production horizon."
             ),
         )
@@ -11340,7 +11341,8 @@ def main() -> None:
         st.markdown("### 2. Biological Engine")
         st.caption(
             "These tables drive herd reproduction, lactation, finishing, slaughter, and replacement logic. "
-            "They now sit upstream of pricing quantities and herd-linked operating costs."
+            "They now sit upstream of pricing quantities and herd-linked operating costs. Annual biological rates "
+            "such as mortality and culling are converted internally to the active model grain."
         )
         biological_editors = [
             BiologicalEditorDefinition(
@@ -11351,7 +11353,7 @@ def main() -> None:
             ),
             BiologicalEditorDefinition(
                 "Breeding & Reproduction Biology",
-                "Defines age at first kidding, gestation timing, fertility, kidding rates, mortality, culling, and replacement retention.",
+                "Defines age at first kidding, gestation timing, fertility, kidding rates, mortality, culling, and replacement retention. Age fields are in months; kidding is annualized per doe per year; mortality and cull rates are annual percentages.",
                 _ensure_breeding_reproduction_biology_table,
                 "assump::breeding_biology",
             ),
@@ -11363,7 +11365,7 @@ def main() -> None:
             ),
             BiologicalEditorDefinition(
                 "Finishing & Slaughter Biology",
-                "Defines months to market weight, slaughter timing, live-sale mix, yield assumptions, and finishing mortality.",
+                "Defines months to market weight, slaughter timing, live-sale mix, yield assumptions, and finishing mortality. Age and weight-gain fields are monthly/month-based; mortality is an annual percentage.",
                 _ensure_finishing_slaughter_biology_table,
                 "assump::finishing_biology",
             ),
@@ -11393,7 +11395,7 @@ def main() -> None:
         )
         st.session_state.assumptions = _sync_biological_start_date_in_assumptions(
             st.session_state.assumptions,
-            period_type=st.session_state.get("schedule_period_type", "monthly"),
+            period_type=st.session_state.get("schedule_period_type", "quarterly"),
         )
         st.session_state.assumptions = _sync_opening_herd_cohorts_in_assumptions(
             st.session_state.assumptions
@@ -11413,7 +11415,8 @@ def main() -> None:
         st.session_state.assumptions["Production Drivers"] = production_drivers
         st.caption(
             "These biological and commercial drivers convert herd size into saleable output. Dairy products use the "
-            "lactation stream, while livestock products use the saleable-herd and slaughter stream."
+            "lactation stream, while livestock products use the saleable-herd and slaughter stream. Slaughter rates "
+            "and driver growth are annual assumptions that the model converts to the active schedule grain."
         )
         production_drivers = _sync_production_driver_table_to_products(
             production_drivers,
@@ -11821,7 +11824,7 @@ def main() -> None:
                 "of truth for the Input Schedule variable-expense grid."
             ),
             propagation_note=(
-                "Yearly increase compounds from the base monthly amount. When the schedule grain is quarterly, "
+                "Annual increase compounds from the base monthly amount. When the schedule grain is quarterly, "
                 "the applied schedule multiplies the monthly base by 3 for each quarter."
             ),
             ensure_fn=_ensure_variable_expense_input_table,
@@ -11835,10 +11838,10 @@ def main() -> None:
             column_config={
                 "Item": st.column_config.TextColumn("Item"),
                 "Amount per Period": st.column_config.NumberColumn(
-                    "Amount per Period", format="%.2f", step=100.0
+                    "Monthly Amount", format="%.2f", step=100.0
                 ),
                 "Yearly Increase %": st.column_config.NumberColumn(
-                    "Yearly Increase (%)", format="%.2f", step=0.1
+                    "Annual Increase (%)", format="%.2f", step=0.1
                 ),
             },
             editor_key="assump_variable_expense_master",
@@ -11864,7 +11867,7 @@ def main() -> None:
                 "This master table should be set before refining direct labour in the Input Schedule page."
             ),
             propagation_note=(
-                "Yearly increase applies to `Monthly Salary per Head`, then `Total Salary` is recomputed as "
+                "Annual increase applies to `Monthly Salary per Head`, then `Total Salary` is recomputed as "
                 "`Head Count × Monthly Salary per Head`. Quarterly schedules convert the monthly salary to quarter totals."
             ),
             ensure_fn=_ensure_direct_wage_input_table,
@@ -11889,7 +11892,7 @@ def main() -> None:
                     "Total Salary", format="%.2f"
                 ),
                 "Yearly Increase %": st.column_config.NumberColumn(
-                    "Yearly Increase (%)", format="%.2f", step=0.1
+                "Annual Increase (%)", format="%.2f", step=0.1
                 ),
             },
             editor_key="assump_direct_wage_master",
@@ -11916,7 +11919,7 @@ def main() -> None:
                 "salary plan across the full production horizon."
             ),
             propagation_note=(
-                "Yearly increase applies to `Monthly Salary per Head`, then `Total Salary` is recomputed as "
+                "Annual increase applies to `Monthly Salary per Head`, then `Total Salary` is recomputed as "
                 "`Head Count × Monthly Salary per Head`. Quarterly schedules convert the monthly salary to quarter totals."
             ),
             ensure_fn=_ensure_admin_wage_input_table,
@@ -11941,7 +11944,7 @@ def main() -> None:
                     "Total Salary", format="%.2f"
                 ),
                 "Yearly Increase %": st.column_config.NumberColumn(
-                    "Yearly Increase (%)", format="%.2f", step=0.1
+                "Annual Increase (%)", format="%.2f", step=0.1
                 ),
             },
             editor_key="assump_admin_wage_master",
@@ -11961,6 +11964,9 @@ def main() -> None:
             "captured in the capital and asset support schedules on the Input Schedule page."
         )
         st.markdown("#### Capital & Financing Assumptions")
+        st.caption(
+            "Use annual return and interest percentages here. Terms remain year-based; drawdown and contribution timing are handled in the dated support schedules."
+        )
         capital_table = _ensure_capital_financing_table(
             st.session_state.assumptions.get("Capital & Financing")
         )
@@ -11980,7 +11986,9 @@ def main() -> None:
         ]
     
         st.markdown("#### Valuation Assumptions")
-        st.caption("Discount rate, working-capital, liquidity, and covenant assumptions. IRR and NPV are computed outputs.")
+        st.caption(
+            "Discount rate, working-capital, liquidity, and covenant assumptions. WACC and terminal growth are annual percentages; IRR and NPV are computed outputs."
+        )
         include_valuation = st.checkbox("Include valuation assumptions", value=True)
         valuation_table = _ensure_valuation_inputs_table(
             st.session_state.assumptions.get("Valuation Inputs")
@@ -12810,7 +12818,7 @@ _GOAT_STATE_KEYS = [
     "assumptions",             # dict[str, pd.DataFrame] — assumption tables
     "supplementary",           # dict[str, pd.DataFrame] — supplementary tables
     "selected_scenario_name",  # str
-    "schedule_period_type",    # str ('monthly' | 'annual')
+    "schedule_period_type",    # str ('monthly' | 'quarterly')
     DEFAULT_INPUT_CONFIG_KEY,  # "default_input_templates"
 ]
 
