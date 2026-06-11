@@ -1351,7 +1351,7 @@ BREEDING_PRODUCTS: tuple[str, ...] = ("Female Kids", "Male Kids")
 ALL_MODEL_PRODUCTS: tuple[str, ...] = BREEDING_PRODUCTS + DAIRY_PRODUCTS + LIVESTOCK_PRODUCTS
 
 BUSINESS_TYPE_ACTIVE_PRODUCTS: Dict[str, tuple[str, ...]] = {
-    "Breeding": ("Female Kids", "Male Kids"),
+    "Breeding": ("Female Kids", "Male Kids", "Meat", "Offal", "Pelt", "Live Herd"),
     "Meat": ("Meat", "Offal", "Pelt", "Live Herd"),
     "Milk-Cheese": ("Milk", "Cheese", "Pelt", "Live Herd"),
     "Combined": ("Milk", "Cheese", "Meat", "Offal", "Pelt", "Live Herd"),
@@ -1457,8 +1457,12 @@ def _normalize_transfer_pricing_method(value: Any) -> str:
     return DEFAULT_TRANSFER_PRICING_METHOD
 
 
-def _default_pricing_row_templates(products: Optional[Sequence[str]] = None) -> list[dict[str, object]]:
+def _default_pricing_row_templates(
+    products: Optional[Sequence[str]] = None,
+    business_type: Any = DEFAULT_BUSINESS_TYPE,
+) -> list[dict[str, object]]:
     product_list = list(products) if products is not None else list(ALL_MODEL_PRODUCTS)
+    business_unit = _normalize_business_type(business_type)
     rows: list[dict[str, object]] = []
     for product in product_list:
         defaults = PRODUCT_DEFAULTS.get(str(product).strip())
@@ -1467,7 +1471,7 @@ def _default_pricing_row_templates(products: Optional[Sequence[str]] = None) -> 
         rows.append(
             {
                 "Product": str(product).strip(),
-                "Business Unit": "Breeding" if str(product).strip() in BREEDING_PRODUCTS else DEFAULT_BUSINESS_TYPE,
+                "Business Unit": business_unit,
                 "Revenue Channel": "External",
                 "Unit": str(defaults.get("unit", "Unit")).strip() or "Unit",
                 "Base Price": float(defaults.get("base_price", 0.0) or 0.0),
@@ -1480,12 +1484,14 @@ def _default_pricing_row_templates(products: Optional[Sequence[str]] = None) -> 
 
 def _default_production_driver_row_templates(
     products: Optional[Sequence[str]] = None,
+    business_type: Any = DEFAULT_BUSINESS_TYPE,
 ) -> list[dict[str, object]]:
+    business_unit = _normalize_business_type(business_type)
     all_rows: Dict[str, dict[str, object]] = {
         "Female Kids": {
             "Product": "Female Kids",
             "Unit": "Head",
-            "Business Unit": "Breeding",
+            "Business Unit": business_unit,
             "Quantity Source": "Breeding External Sales",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
@@ -1502,7 +1508,7 @@ def _default_production_driver_row_templates(
         "Male Kids": {
             "Product": "Male Kids",
             "Unit": "Head",
-            "Business Unit": "Breeding",
+            "Business Unit": business_unit,
             "Quantity Source": "Breeding External Sales",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
@@ -1519,7 +1525,7 @@ def _default_production_driver_row_templates(
         "Milk": {
             "Product": "Milk",
             "Unit": "Litre",
-            "Business Unit": "Milk-Cheese",
+            "Business Unit": business_unit,
             "Quantity Source": "Lactating Herd",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 55.0,
@@ -1536,7 +1542,7 @@ def _default_production_driver_row_templates(
         "Cheese": {
             "Product": "Cheese",
             "Unit": "Kg",
-            "Business Unit": "Milk-Cheese",
+            "Business Unit": business_unit,
             "Quantity Source": "Lactating Herd",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 55.0,
@@ -1553,7 +1559,7 @@ def _default_production_driver_row_templates(
         "Meat": {
             "Product": "Meat",
             "Unit": "Kg",
-            "Business Unit": "Meat",
+            "Business Unit": business_unit,
             "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
@@ -1570,7 +1576,7 @@ def _default_production_driver_row_templates(
         "Offal": {
             "Product": "Offal",
             "Unit": "Kg",
-            "Business Unit": "Meat",
+            "Business Unit": business_unit,
             "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
@@ -1587,7 +1593,7 @@ def _default_production_driver_row_templates(
         "Pelt": {
             "Product": "Pelt",
             "Unit": "Piece",
-            "Business Unit": "Meat",
+            "Business Unit": business_unit,
             "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
@@ -1604,7 +1610,7 @@ def _default_production_driver_row_templates(
         "Live Herd": {
             "Product": "Live Herd",
             "Unit": "Head",
-            "Business Unit": "Meat",
+            "Business Unit": business_unit,
             "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
@@ -1621,6 +1627,16 @@ def _default_production_driver_row_templates(
     }
     product_list = list(products) if products is not None else list(ALL_MODEL_PRODUCTS)
     return [dict(all_rows[product]) for product in product_list if product in all_rows]
+
+
+def _period_indexed_frame(
+    rows: Sequence[dict[str, Any]],
+    columns: Sequence[str],
+) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    if "Period" not in frame.columns:
+        frame = frame.reindex(columns=list(columns))
+    return frame.set_index("Period")
 
 
 def _price_change_driver(product: str) -> str:
@@ -2771,10 +2787,11 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
 def _sync_production_driver_table_to_products(
     table: Optional[pd.DataFrame],
     products: Sequence[str],
+    business_type: Any = DEFAULT_BUSINESS_TYPE,
 ) -> pd.DataFrame:
     product_list = [str(product).strip() for product in products if str(product).strip()]
     base = _ensure_production_driver_table(
-        pd.DataFrame(_default_production_driver_row_templates(product_list))
+        pd.DataFrame(_default_production_driver_row_templates(product_list, business_type))
     )
     current = _ensure_production_driver_table(table)
     current = current.loc[
@@ -2962,6 +2979,11 @@ DEFAULT_BREEDING_REPRODUCTION_ROWS = [
         "Doe Mortality %": 2.5,
         "Buck Mortality %": 2.5,
         "Cull Rate %": 8.0,
+        "Breeder Doe Cull Age (months)": 72.0,
+        "Breeder Doe Cull At Parity": np.nan,
+        "Breeder Doe Live Sale Share %": 0.0,
+        "Breeder Buck Replacement Age (months)": 60.0,
+        "Breeder Buck Live Sale Share %": 0.0,
         "Replacement Retention %": 30.0,
         "Active": True,
     }
@@ -3230,6 +3252,11 @@ def _normalize_breeding_reproduction_biology_table(table: pd.DataFrame) -> pd.Da
         "Doe Mortality %",
         "Buck Mortality %",
         "Cull Rate %",
+        "Breeder Doe Cull Age (months)",
+        "Breeder Doe Cull At Parity",
+        "Breeder Doe Live Sale Share %",
+        "Breeder Buck Replacement Age (months)",
+        "Breeder Buck Live Sale Share %",
         "Replacement Retention %",
     ]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
@@ -3665,6 +3692,7 @@ def _advance_age_buckets(
     weight_gain_per_month: float = 0.0,
     market_weight_kg: float = 0.0,
     months_to_market_weight: float = 0.0,
+    use_weight_condition: bool = True,
 ) -> tuple[np.ndarray, float, float]:
     next_buckets = np.zeros_like(buckets, dtype=float)
     matured_heads = 0.0
@@ -3675,6 +3703,8 @@ def _advance_age_buckets(
         new_age = _bucket_mid_age(bucket_index, age_band_width) + max(months_factor, 0.0)
         estimated_weight = max(new_age * max(weight_gain_per_month, 0.0), 0.0)
         meets_weight_condition = (
+            use_weight_condition
+            and
             months_to_market_weight > 0
             and market_weight_kg > 0
             and weight_gain_per_month > 0
@@ -3691,6 +3721,43 @@ def _advance_age_buckets(
         )
         next_buckets[next_index] += head_count
     return next_buckets, matured_heads, matured_weight_total
+
+
+def _extract_buckets_pro_rata(
+    buckets: np.ndarray,
+    head_count: float,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    source = np.array(buckets, dtype=float)
+    requested = max(float(head_count), 0.0)
+    total = float(source.sum())
+    if total <= 0 or requested <= 0:
+        return source, np.zeros_like(source, dtype=float), 0.0
+    if requested >= total:
+        return np.zeros_like(source, dtype=float), source.copy(), total
+    ratio = requested / total
+    extracted = source * ratio
+    remaining = source - extracted
+    return remaining, extracted, float(extracted.sum())
+
+
+def _bucket_weight_total(
+    buckets: np.ndarray,
+    *,
+    age_band_width: float,
+    monthly_weight_gain: float,
+    target_live_weight: float,
+) -> float:
+    total_weight = 0.0
+    fallback_weight = max(float(target_live_weight), 0.0)
+    for bucket_index, head_count in enumerate(np.array(buckets, dtype=float).tolist()):
+        if head_count <= 0:
+            continue
+        estimated_weight = max(
+            _bucket_mid_age(bucket_index, age_band_width) * max(float(monthly_weight_gain), 0.0),
+            fallback_weight,
+        )
+        total_weight += float(head_count) * estimated_weight
+    return total_weight
 
 
 def _calculate_lactation_curve_yield(
@@ -3860,6 +3927,14 @@ def _derive_biological_schedules(
         ),
         0.0,
     )
+    breeder_doe_cull_age_horizon = pd.to_numeric(
+        pd.Series([reproduction_row.get("Breeder Doe Cull Age (months)")]),
+        errors="coerce",
+    ).iloc[0]
+    breeder_buck_replacement_age_horizon = pd.to_numeric(
+        pd.Series([reproduction_row.get("Breeder Buck Replacement Age (months)")]),
+        errors="coerce",
+    ).iloc[0]
     max_opening_age = pd.to_numeric(
         opening_cohorts.get("Age in Months"),
         errors="coerce",
@@ -3871,14 +3946,24 @@ def _derive_biological_schedules(
         slaughter_age,
         months_to_market_weight,
         max_opening_age + pre_roll_months,
+        float(breeder_doe_cull_age_horizon)
+        if pd.notna(breeder_doe_cull_age_horizon) and float(breeder_doe_cull_age_horizon) > 0
+        else 0.0,
+        float(breeder_buck_replacement_age_horizon)
+        if pd.notna(breeder_buck_replacement_age_horizon) and float(breeder_buck_replacement_age_horizon) > 0
+        else 0.0,
     ) + (2.0 * age_band_width)
     bucket_count = max(3, int(np.ceil(max_age_horizon / age_band_width)) + 2)
 
     replacement_buckets = np.zeros(bucket_count, dtype=float)
     female_finishing_buckets = np.zeros(bucket_count, dtype=float)
     male_finishing_buckets = np.zeros(bucket_count, dtype=float)
-    breeding_parity = {"1": 0.0, "2": 0.0, "3+": 0.0}
-    breeding_bucks = 0.0
+    breeding_doe_buckets = {
+        "1": np.zeros(bucket_count, dtype=float),
+        "2": np.zeros(bucket_count, dtype=float),
+        "3+": np.zeros(bucket_count, dtype=float),
+    }
+    breeding_buck_buckets = np.zeros(bucket_count, dtype=float)
     pregnancy_slots = max(1, int(np.ceil(gestation_months / max(grain_months, 1e-9))))
     pregnancy_queue: list[dict[str, float]] = [{"1": 0.0, "2": 0.0, "3+": 0.0} for _ in range(pregnancy_slots)]
 
@@ -3894,7 +3979,7 @@ def _derive_biological_schedules(
             pd.to_numeric(pd.Series([row.get("Head Count")]), errors="coerce").iloc[0] or 0.0
         )
         if purpose == "breeding_doe":
-            breeding_parity[_parity_key(row.get("Parity"))] += head_count
+            breeding_doe_buckets[_parity_key(row.get("Parity"))][min(age_idx, bucket_count - 1)] += head_count
             if _coerce_bool_value(row.get("Pregnant"), False) and pregnancy_queue:
                 seed_slot = min(
                     max(pregnancy_slots - 1 - int(np.floor(pre_roll_months / max(grain_months, 1e-9))), 0),
@@ -3902,7 +3987,7 @@ def _derive_biological_schedules(
                 )
                 pregnancy_queue[seed_slot][_parity_key(row.get("Parity"))] += head_count
         elif purpose == "breeding_buck":
-            breeding_bucks += head_count
+            breeding_buck_buckets[min(age_idx, bucket_count - 1)] += head_count
         elif purpose == "replacement_doe":
             replacement_buckets[min(age_idx, bucket_count - 1)] += head_count
         elif purpose == "finishing_female":
@@ -3911,16 +3996,20 @@ def _derive_biological_schedules(
             male_finishing_buckets[min(age_idx, bucket_count - 1)] += head_count
 
     if (
-        breeding_bucks
+        breeding_buck_buckets.sum()
         + replacement_buckets.sum()
         + female_finishing_buckets.sum()
         + male_finishing_buckets.sum()
-        + sum(breeding_parity.values())
+        + sum(bucket.sum() for bucket in breeding_doe_buckets.values())
         <= 0
     ):
         first_target = float(pd.to_numeric(herd_plan_df["Herd Size (heads)"], errors="coerce").dropna().iloc[0] or 320.0)
-        breeding_parity["2"] = first_target * 0.47
-        breeding_bucks = first_target * 0.025
+        breeding_doe_buckets["2"][
+            min(_age_bucket_index(30.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)
+        ] = first_target * 0.47
+        breeding_buck_buckets[
+            min(_age_bucket_index(36.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)
+        ] = first_target * 0.025
         replacement_buckets[min(_age_bucket_index(age_at_first_kidding / 2.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)] = first_target * 0.125
         female_finishing_buckets[min(_age_bucket_index(sale_age / 2.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)] = first_target * 0.19
         male_finishing_buckets[min(_age_bucket_index(sale_age / 2.0, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)] = first_target * 0.19
@@ -4015,9 +4104,41 @@ def _derive_biological_schedules(
     ) + float(
         pd.to_numeric(pd.Series([reproduction_row.get("Cull Rate %")]), errors="coerce").iloc[0] or 0.0
     )
+    breeder_doe_cull_age = pd.to_numeric(
+        pd.Series([reproduction_row.get("Breeder Doe Cull Age (months)")]),
+        errors="coerce",
+    ).iloc[0]
+    breeder_doe_cull_parity = pd.to_numeric(
+        pd.Series([reproduction_row.get("Breeder Doe Cull At Parity")]),
+        errors="coerce",
+    ).iloc[0]
+    breeder_doe_live_sale_share = max(
+        float(
+            pd.to_numeric(
+                pd.Series([reproduction_row.get("Breeder Doe Live Sale Share %")]),
+                errors="coerce",
+            ).iloc[0]
+            or 0.0
+        ),
+        0.0,
+    ) / 100.0
     buck_exit_pct = float(
         pd.to_numeric(pd.Series([reproduction_row.get("Buck Mortality %")]), errors="coerce").iloc[0] or 0.0
     )
+    breeder_buck_replacement_age = pd.to_numeric(
+        pd.Series([reproduction_row.get("Breeder Buck Replacement Age (months)")]),
+        errors="coerce",
+    ).iloc[0]
+    breeder_buck_live_sale_share = max(
+        float(
+            pd.to_numeric(
+                pd.Series([reproduction_row.get("Breeder Buck Live Sale Share %")]),
+                errors="coerce",
+            ).iloc[0]
+            or 0.0
+        ),
+        0.0,
+    ) / 100.0
     finishing_mortality_pct = float(
         pd.to_numeric(pd.Series([finishing_row.get("Mortality %")]), errors="coerce").iloc[0] or 0.0
     )
@@ -4056,12 +4177,53 @@ def _derive_biological_schedules(
         kid_exit_rate = _monthly_rate_from_annual_pct(kid_mortality_pct, months_factor)
         finishing_exit_rate = _monthly_rate_from_annual_pct(finishing_mortality_pct, months_factor)
 
-        for parity in list(breeding_parity.keys()):
-            breeding_parity[parity] *= max(0.0, 1.0 - doe_exit_rate)
-        breeding_bucks *= max(0.0, 1.0 - buck_exit_rate)
+        for parity in list(breeding_doe_buckets.keys()):
+            breeding_doe_buckets[parity] *= max(0.0, 1.0 - doe_exit_rate)
+        breeding_buck_buckets *= max(0.0, 1.0 - buck_exit_rate)
         replacement_buckets *= max(0.0, 1.0 - kid_exit_rate)
         female_finishing_buckets *= max(0.0, 1.0 - finishing_exit_rate)
         male_finishing_buckets *= max(0.0, 1.0 - finishing_exit_rate)
+
+        breeder_doe_age_culls = 0.0
+        breeder_doe_age_weight_total = 0.0
+        for parity, parity_buckets in list(breeding_doe_buckets.items()):
+            pre_age_total = float(np.array(parity_buckets, dtype=float).sum())
+            aged_buckets, aged_culls, aged_weight_total = _advance_age_buckets(
+                parity_buckets,
+                months_factor=months_factor,
+                age_band_width=age_band_width,
+                mature_age_months=(
+                    float(breeder_doe_cull_age)
+                    if pd.notna(breeder_doe_cull_age) and float(breeder_doe_cull_age) > 0
+                    else float("inf")
+                ),
+                weight_gain_per_month=monthly_weight_gain,
+                market_weight_kg=target_live_weight,
+                months_to_market_weight=months_to_market_weight,
+                use_weight_condition=False,
+            )
+            breeding_doe_buckets[parity] = aged_buckets
+            post_age_total = float(np.array(aged_buckets, dtype=float).sum())
+            if pre_age_total > 0 and post_age_total < pre_age_total:
+                retention_ratio = post_age_total / pre_age_total
+                for payload in pregnancy_queue:
+                    payload[parity] *= retention_ratio
+            breeder_doe_age_culls += aged_culls
+            breeder_doe_age_weight_total += aged_weight_total
+        breeding_buck_buckets, breeder_buck_culls, breeder_buck_cull_weight_total = _advance_age_buckets(
+            breeding_buck_buckets,
+            months_factor=months_factor,
+            age_band_width=age_band_width,
+            mature_age_months=(
+                float(breeder_buck_replacement_age)
+                if pd.notna(breeder_buck_replacement_age) and float(breeder_buck_replacement_age) > 0
+                else float("inf")
+            ),
+            weight_gain_per_month=monthly_weight_gain,
+            market_weight_kg=target_live_weight,
+            months_to_market_weight=months_to_market_weight,
+            use_weight_condition=False,
+        )
 
         replacement_buckets, matured_replacements, _ = _advance_age_buckets(
             replacement_buckets,
@@ -4087,7 +4249,9 @@ def _derive_biological_schedules(
             market_weight_kg=target_live_weight,
             months_to_market_weight=months_to_market_weight,
         )
-        breeding_parity["1"] += matured_replacements
+        breeding_doe_buckets["1"][
+            min(_age_bucket_index(age_at_first_kidding, int(np.ceil(max_age_horizon)), age_band_width), bucket_count - 1)
+        ] += matured_replacements
 
         births_payload = pregnancy_queue.pop(0) if pregnancy_queue else {"1": 0.0, "2": 0.0, "3+": 0.0}
         kidding_does = float(sum(births_payload.values()))
@@ -4103,12 +4267,17 @@ def _derive_biological_schedules(
         male_finishing_buckets[_age_bucket_index(0.0, int(np.ceil(max_age_horizon)), age_band_width)] += male_kids
 
         if kidding_does > 0:
-            parity_one_births = float(births_payload.get("1", 0.0))
-            parity_two_births = float(births_payload.get("2", 0.0))
-            breeding_parity["1"] = max(0.0, breeding_parity["1"] - parity_one_births)
-            breeding_parity["2"] = max(0.0, breeding_parity["2"] - parity_two_births)
-            breeding_parity["2"] += parity_one_births
-            breeding_parity["3+"] += float(births_payload.get("3+", 0.0)) + parity_two_births
+            breeding_doe_buckets["1"], promoted_from_one, _ = _extract_buckets_pro_rata(
+                breeding_doe_buckets["1"],
+                float(births_payload.get("1", 0.0)),
+            )
+            breeding_doe_buckets["2"] = breeding_doe_buckets["2"] + promoted_from_one
+
+            breeding_doe_buckets["2"], promoted_from_two, _ = _extract_buckets_pro_rata(
+                breeding_doe_buckets["2"],
+                float(births_payload.get("2", 0.0)),
+            )
+            breeding_doe_buckets["3+"] = breeding_doe_buckets["3+"] + promoted_from_two
 
             for parity, heads in births_payload.items():
                 if heads <= 0:
@@ -4120,6 +4289,38 @@ def _derive_biological_schedules(
                         "days_in_milk": 0.0,
                     }
                 )
+
+        breeder_doe_parity_culls = 0.0
+        breeder_doe_parity_cull_weight_total = 0.0
+        if pd.notna(breeder_doe_cull_parity):
+            parity_limit = float(breeder_doe_cull_parity)
+            parity_cull_targets: list[str] = []
+            if parity_limit <= 1:
+                parity_cull_targets = ["2", "3+"]
+            elif parity_limit <= 2:
+                parity_cull_targets = ["3+"]
+            for parity in parity_cull_targets:
+                pre_parity_total = float(np.array(breeding_doe_buckets[parity], dtype=float).sum())
+                culled_bucket = breeding_doe_buckets[parity].copy()
+                breeder_doe_parity_culls += float(culled_bucket.sum())
+                breeder_doe_parity_cull_weight_total += _bucket_weight_total(
+                    culled_bucket,
+                    age_band_width=age_band_width,
+                    monthly_weight_gain=monthly_weight_gain,
+                    target_live_weight=target_live_weight,
+                )
+                breeding_doe_buckets[parity] = np.zeros_like(culled_bucket, dtype=float)
+                if pre_parity_total > 0:
+                    for payload in pregnancy_queue:
+                        payload[parity] = 0.0
+
+        breeding_parity = {
+            parity: float(buckets.sum())
+            for parity, buckets in breeding_doe_buckets.items()
+        }
+        breeding_bucks = float(breeding_buck_buckets.sum())
+        breeder_doe_culls = breeder_doe_age_culls + breeder_doe_parity_culls
+        breeder_doe_cull_weight_total = breeder_doe_age_weight_total + breeder_doe_parity_cull_weight_total
 
         breeding_does = float(sum(breeding_parity.values()))
         monthly_kidding_rate = (kiddings_per_doe_year / 12.0) * (conception_rate / 100.0) * months_factor
@@ -4161,12 +4362,34 @@ def _derive_biological_schedules(
             next_lactation_cohorts.append(cohort)
         lactation_cohorts = next_lactation_cohorts
 
-        saleable_goats = max(0.0, eligible_female + eligible_male)
-        live_herd_sales = saleable_goats * max(0.0, live_sale_share)
-        slaughter_heads = max(0.0, saleable_goats - live_herd_sales)
+        finishing_saleable_goats = max(0.0, eligible_female + eligible_male)
+        finishing_live_sales = finishing_saleable_goats * max(0.0, live_sale_share)
+        finishing_slaughter_heads = max(0.0, finishing_saleable_goats - finishing_live_sales)
+        breeder_doe_live_sales = breeder_doe_culls * breeder_doe_live_sale_share
+        breeder_doe_slaughter_heads = max(0.0, breeder_doe_culls - breeder_doe_live_sales)
+        breeder_buck_live_sales = breeder_buck_culls * breeder_buck_live_sale_share
+        breeder_buck_slaughter_heads = max(0.0, breeder_buck_culls - breeder_buck_live_sales)
+        breeder_live_sales = breeder_doe_live_sales + breeder_buck_live_sales
+        breeder_slaughter_heads = breeder_doe_slaughter_heads + breeder_buck_slaughter_heads
+        saleable_goats = max(0.0, finishing_saleable_goats + breeder_doe_culls + breeder_buck_culls)
+        live_herd_sales = finishing_live_sales + breeder_live_sales
+        slaughter_heads = max(0.0, finishing_slaughter_heads + breeder_slaughter_heads)
+        breeder_slaughter_weight_total = (
+            breeder_doe_cull_weight_total * (1.0 - breeder_doe_live_sale_share)
+            + breeder_buck_cull_weight_total * (1.0 - breeder_buck_live_sale_share)
+        )
+        breeder_live_weight_total = (
+            breeder_doe_cull_weight_total * breeder_doe_live_sale_share
+            + breeder_buck_cull_weight_total * breeder_buck_live_sale_share
+        )
         average_sale_weight = 0.0
         if saleable_goats > 0:
-            average_sale_weight = (female_sale_weight_total + male_sale_weight_total) / saleable_goats
+            average_sale_weight = (
+                female_sale_weight_total
+                + male_sale_weight_total
+                + breeder_slaughter_weight_total
+                + breeder_live_weight_total
+            ) / saleable_goats
 
         herd_size = float(
             breeding_bucks
@@ -4180,9 +4403,9 @@ def _derive_biological_schedules(
 
         if hard_override and pd.notna(target_herd) and herd_size > 0:
             scaling_factor = max(float(target_herd), 0.0) / herd_size
-            breeding_bucks *= scaling_factor
-            for parity in breeding_parity:
-                breeding_parity[parity] *= scaling_factor
+            breeding_buck_buckets *= scaling_factor
+            for parity in breeding_doe_buckets:
+                breeding_doe_buckets[parity] *= scaling_factor
             replacement_buckets *= scaling_factor
             female_finishing_buckets *= scaling_factor
             male_finishing_buckets *= scaling_factor
@@ -4191,6 +4414,11 @@ def _derive_biological_schedules(
                     payload[parity] *= scaling_factor
             for cohort in lactation_cohorts:
                 cohort["heads"] *= scaling_factor
+            breeding_parity = {
+                parity: float(buckets.sum())
+                for parity, buckets in breeding_doe_buckets.items()
+            }
+            breeding_bucks = float(breeding_buck_buckets.sum())
             herd_size = float(target_herd)
             herd_variance = 0.0
 
@@ -4213,6 +4441,13 @@ def _derive_biological_schedules(
                 "Male Kids": male_kids,
                 "Lactating Does": lactating_does,
                 "Milk Production (L)": milk_output,
+                "Breeder Doe Culls (heads)": breeder_doe_culls,
+                "Breeder Buck Culls (heads)": breeder_buck_culls,
+                "Breeder Live Sales (heads)": breeder_live_sales,
+                "Breeder Slaughter Heads": breeder_slaughter_heads,
+                "Breeder Meat Output Kg": breeder_slaughter_heads * meat_yield,
+                "Breeder Offal Output Kg": breeder_slaughter_heads * offal_yield,
+                "Breeder Pelt Output Units": breeder_slaughter_heads * pelt_units,
                 "Saleable Goats (heads)": saleable_goats,
                 "Live Herd Sales (heads)": live_herd_sales,
                 "Slaughter Heads": slaughter_heads,
@@ -4273,6 +4508,9 @@ def _derive_biological_schedules(
                 "Replacement Does": replacement_buckets.sum(),
                 "Finishing Females": female_finishing_buckets.sum(),
                 "Finishing Males": male_finishing_buckets.sum(),
+                "Finishing Saleable Goats (heads)": finishing_saleable_goats,
+                "Breeder Doe Culls (heads)": breeder_doe_culls,
+                "Breeder Buck Culls (heads)": breeder_buck_culls,
                 "Saleable Goats (heads)": saleable_goats,
                 "Average Sale Weight Kg": average_sale_weight,
             }
@@ -4281,7 +4519,11 @@ def _derive_biological_schedules(
             {
                 "Period": period,
                 "Saleable Goats (heads)": saleable_goats,
+                "Finishing Live Herd Sales (heads)": finishing_live_sales,
+                "Breeder Live Sales (heads)": breeder_live_sales,
                 "Live Herd Sales (heads)": live_herd_sales,
+                "Finishing Slaughter Heads": finishing_slaughter_heads,
+                "Breeder Slaughter Heads": breeder_slaughter_heads,
                 "Slaughter Heads": slaughter_heads,
                 "Average Sale Weight Kg": average_sale_weight,
                 "Meat Output Kg": slaughter_heads * meat_yield,
@@ -4307,6 +4549,8 @@ def _derive_biological_schedules(
                 "Breeding Does": sum(breeding_parity.values()),
                 "Breeding Bucks": breeding_bucks,
                 "Pregnant Does": pregnant_does,
+                "Breeder Doe Culls (heads)": breeder_doe_culls,
+                "Breeder Buck Culls (heads)": breeder_buck_culls,
             }
         )
         for bucket_index in range(bucket_count):
@@ -4328,16 +4572,29 @@ def _derive_biological_schedules(
                 }
             )
 
-    summary = pd.DataFrame(summary_rows).set_index("Period")
-    pregnancy_schedule = pd.DataFrame(pregnancy_rows).set_index("Period")
-    kidding_schedule = pd.DataFrame(kidding_rows).set_index("Period")
-    lactation_schedule = pd.DataFrame(lactation_rows).set_index("Period")
-    days_in_milk_schedule = pd.DataFrame(days_in_milk_rows).set_index("Period")
-    finishing_schedule = pd.DataFrame(finishing_rows).set_index("Period")
-    slaughter_schedule = pd.DataFrame(slaughter_rows).set_index("Period")
-    replacement_schedule = pd.DataFrame(replacement_rows).set_index("Period")
-    kid_cohort_schedule = pd.DataFrame(kid_cohort_rows).set_index("Period")
-    breeding_schedule = pd.DataFrame(breeding_rows).set_index("Period")
+    summary = _period_indexed_frame(summary_rows, summary_rows[0].keys())
+    pregnancy_schedule = _period_indexed_frame(pregnancy_rows, pregnancy_rows[0].keys())
+    kidding_schedule = _period_indexed_frame(kidding_rows, kidding_rows[0].keys())
+    lactation_schedule = _period_indexed_frame(lactation_rows, lactation_rows[0].keys())
+    days_in_milk_schedule = _period_indexed_frame(
+        days_in_milk_rows,
+        ["Period", "Parity Group", "Lactating Does", "Average Days in Milk", "Average Yield per Doe per Day"],
+    )
+    finishing_schedule = _period_indexed_frame(finishing_rows, finishing_rows[0].keys())
+    slaughter_schedule = _period_indexed_frame(slaughter_rows, slaughter_rows[0].keys())
+    replacement_schedule = _period_indexed_frame(replacement_rows, replacement_rows[0].keys())
+    kid_cohort_schedule = _period_indexed_frame(
+        kid_cohort_rows,
+        [
+            "Period",
+            "Age Band Start (months)",
+            "Age Band End (months)",
+            "Replacement Does",
+            "Finishing Females",
+            "Finishing Males",
+        ],
+    )
+    breeding_schedule = _period_indexed_frame(breeding_rows, breeding_rows[0].keys())
 
     outputs = {
         "Biological Herd Summary": summary,
@@ -4624,6 +4881,11 @@ def _derive_breeding_to_unit_outputs(
         male_kids = float(pd.to_numeric(pd.Series([row.get("Male Kids")]), errors="coerce").iloc[0] or 0.0)
         female_available = max(female_kids - replacement_retained, 0.0)
         male_available = max(male_kids, 0.0)
+        breeder_live_sales = float(pd.to_numeric(pd.Series([row.get("Breeder Live Sales (heads)")]), errors="coerce").iloc[0] or 0.0)
+        breeder_slaughter_heads = float(pd.to_numeric(pd.Series([row.get("Breeder Slaughter Heads")]), errors="coerce").iloc[0] or 0.0)
+        breeder_meat_output = float(pd.to_numeric(pd.Series([row.get("Breeder Meat Output Kg")]), errors="coerce").iloc[0] or 0.0)
+        breeder_offal_output = float(pd.to_numeric(pd.Series([row.get("Breeder Offal Output Kg")]), errors="coerce").iloc[0] or 0.0)
+        breeder_pelt_output = float(pd.to_numeric(pd.Series([row.get("Breeder Pelt Output Units")]), errors="coerce").iloc[0] or 0.0)
         kid_rows.append(
             {
                 "Period": timestamp,
@@ -4635,7 +4897,7 @@ def _derive_breeding_to_unit_outputs(
         )
 
         internal_revenue = 0.0
-        external_revenue = 0.0
+        kid_external_revenue = 0.0
         for sex, available in (("Female", female_available), ("Male", male_available)):
             remaining = float(available)
             period_rules = _routing_rows_for_period(
@@ -4676,7 +4938,7 @@ def _derive_breeding_to_unit_outputs(
                     product = f"{sex} Kids"
                     price = _external_price_lookup(pricing, product, timestamp)
                     revenue = alloc_head * price
-                    external_revenue += revenue
+                    kid_external_revenue += revenue
                     external_rows.append(
                         {
                             "Period": timestamp,
@@ -4715,6 +4977,13 @@ def _derive_breeding_to_unit_outputs(
                         "Allocation %": 100.0,
                     }
                 )
+        breeder_cull_revenue = (
+            breeder_live_sales * _external_price_lookup(pricing, "Live Herd", timestamp)
+            + breeder_meat_output * _external_price_lookup(pricing, "Meat", timestamp)
+            + breeder_offal_output * _external_price_lookup(pricing, "Offal", timestamp)
+            + breeder_pelt_output * _external_price_lookup(pricing, "Pelt", timestamp)
+        )
+        external_revenue = kid_external_revenue + breeder_cull_revenue
         breeding_rows.append(
             {
                 "Period": timestamp,
@@ -4724,7 +4993,14 @@ def _derive_breeding_to_unit_outputs(
                 "Replacement Does": row.get("Replacement Does", 0.0),
                 "Female Kids Available": female_available,
                 "Male Kids Available": male_available,
-                "External Kid Sales Revenue": external_revenue,
+                "Breeder Live Sales (heads)": breeder_live_sales,
+                "Breeder Slaughter Heads": breeder_slaughter_heads,
+                "Breeder Meat Output Kg": breeder_meat_output,
+                "Breeder Offal Output Kg": breeder_offal_output,
+                "Breeder Pelt Output Units": breeder_pelt_output,
+                "Breeder Cull Revenue": breeder_cull_revenue,
+                "External Kid Sales Revenue": kid_external_revenue,
+                "External Revenue": external_revenue,
                 "Internal Transfer Revenue": internal_revenue,
                 "Revenue": external_revenue + internal_revenue,
             }
@@ -4757,7 +5033,9 @@ def _derive_breeding_to_unit_outputs(
     unit_bridge = pd.DataFrame(index=pd.to_datetime(summary.index, errors="coerce"))
     unit_bridge.index.name = "Period"
     unit_bridge["Breeding External Revenue"] = (
-        breeding_unit_schedule.reindex(unit_bridge.index)["External Kid Sales Revenue"].fillna(0.0)
+        breeding_unit_schedule.reindex(unit_bridge.index)[
+            "External Revenue" if "External Revenue" in breeding_unit_schedule.columns else "External Kid Sales Revenue"
+        ].fillna(0.0)
         if not breeding_unit_schedule.empty
         else 0.0
     )
@@ -4839,12 +5117,13 @@ def _default_pricing_table_from_core(
     rows = [
         row_lookup.get(product, row)
         for product in active_products
-        for row in [_default_pricing_row_templates([product])[0]]
+        for row in [_default_pricing_row_templates([product], business_type)[0]]
     ]
     for idx, row in enumerate(rows):
         product = str(row.get("Product", "")).strip()
         if product in row_lookup:
             rows[idx] = {**row, **row_lookup[product]}
+        rows[idx]["Business Unit"] = _normalize_business_type(business_type)
 
     default_rows: list[dict[str, object]] = []
     for idx, period in enumerate(periods):
@@ -5941,6 +6220,7 @@ def _sync_pricing_table_to_core(
     business_type: Any = DEFAULT_BUSINESS_TYPE,
 ) -> pd.DataFrame:
     active_products = _active_products_for_business_type(business_type)
+    normalized_business_unit = _normalize_business_type(business_type)
     base = _default_pricing_table_from_core(core, business_type)
     if table is None or table.empty:
         return base
@@ -5958,6 +6238,8 @@ def _sync_pricing_table_to_core(
     current_indexed = current.set_index(["Period", "Product"])
     merged = base_indexed.combine_first(current_indexed)
     merged.update(current_indexed)
+    if "Business Unit" in merged.columns:
+        merged.loc[:, "Business Unit"] = normalized_business_unit
     return _ensure_pricing_table(merged.reset_index())
 
 
@@ -5973,7 +6255,11 @@ def _sync_commercial_assumptions_to_core(
         selected_business_type=_selected_business_type,
         active_products_for_business_type=_active_products_for_business_type,
         build_app_assumption_bundle=_build_app_assumption_bundle,
-        sync_production_driver_table_to_products=_sync_production_driver_table_to_products,
+        sync_production_driver_table_to_products=lambda table, products: _sync_production_driver_table_to_products(
+            table,
+            products,
+            _selected_business_type(assumptions),
+        ),
         sync_scenario_controls_to_products=_sync_scenario_controls_to_products,
         sync_pricing_table_to_core=_sync_pricing_table_to_core,
         derive_pricing_quantities_from_production=_derive_pricing_quantities_from_production,

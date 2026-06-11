@@ -511,6 +511,145 @@ def test_biological_engine_uses_age_band_weight_and_missing_schedules():
     assert schedule["Average Sale Weight Kg"].fillna(0.0).max() > 0
 
 
+def test_breeder_offtake_culls_flow_into_live_sales_and_slaughter_outputs():
+    assumptions = streamlit_app._default_assumption_tables()
+    reproduction = assumptions["Breeding & Reproduction Biology"].copy()
+    reproduction.loc[:, "Breeder Doe Cull Age (months)"] = 24.0
+    reproduction.loc[:, "Breeder Doe Live Sale Share %"] = 100.0
+    reproduction.loc[:, "Breeder Buck Replacement Age (months)"] = 24.0
+    reproduction.loc[:, "Breeder Buck Live Sale Share %"] = 0.0
+    assumptions["Breeding & Reproduction Biology"] = reproduction
+
+    opening = assumptions["Opening Herd Cohorts"].copy()
+    opening.loc[:, "Active"] = False
+    opening = pd.concat(
+        [
+            opening,
+            pd.DataFrame(
+                [
+                    {
+                        "Cohort ID": "TEST-BD",
+                        "Business Unit": "Breeding",
+                        "Sex": "Female",
+                        "Purpose": "breeding_doe",
+                        "Age in Months": 36.0,
+                        "Head Count": 20.0,
+                        "Parity": 2.0,
+                        "Pregnant": False,
+                        "Days in Milk": 0.0,
+                        "Active": True,
+                    },
+                    {
+                        "Cohort ID": "TEST-BB",
+                        "Business Unit": "Breeding",
+                        "Sex": "Male",
+                        "Purpose": "breeding_buck",
+                        "Age in Months": 36.0,
+                        "Head Count": 4.0,
+                        "Parity": 0.0,
+                        "Pregnant": False,
+                        "Days in Milk": 0.0,
+                        "Active": True,
+                    },
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    assumptions["Opening Herd Cohorts"] = opening
+
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions["Production Horizon"],
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+    biological = streamlit_app._derive_biological_schedules(schedule, assumptions)
+    first_row = biological["Biological Herd Summary"].iloc[0]
+
+    assert first_row["Breeder Doe Culls (heads)"] > 0
+    assert first_row["Breeder Buck Culls (heads)"] > 0
+    assert first_row["Breeder Live Sales (heads)"] > 0
+    assert first_row["Breeder Slaughter Heads"] > 0
+    assert first_row["Live Herd Sales (heads)"] >= first_row["Breeder Live Sales (heads)"]
+    assert first_row["Slaughter Heads"] >= first_row["Breeder Slaughter Heads"]
+    assert first_row["Breeder Meat Output Kg"] > 0
+
+
+def test_breeding_unit_schedule_includes_breeder_cull_revenue():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Business Configuration"] = pd.DataFrame(
+        {
+            "Business Type": ["Breeding"],
+            "Operating Model": ["Breeding-to-Unit"],
+            "Transfer Destination": ["Meat"],
+            "Reporting View": ["Consolidated"],
+            "Transfer Pricing Method": ["Cost"],
+            "Allow External Kid Sales": [True],
+        }
+    )
+    assumptions = streamlit_app._sync_transfer_tables_to_business_configuration(assumptions)
+
+    reproduction = assumptions["Breeding & Reproduction Biology"].copy()
+    reproduction.loc[:, "Breeder Doe Cull Age (months)"] = 24.0
+    reproduction.loc[:, "Breeder Doe Live Sale Share %"] = 50.0
+    reproduction.loc[:, "Breeder Buck Replacement Age (months)"] = 24.0
+    reproduction.loc[:, "Breeder Buck Live Sale Share %"] = 0.0
+    assumptions["Breeding & Reproduction Biology"] = reproduction
+
+    opening = assumptions["Opening Herd Cohorts"].copy()
+    opening.loc[:, "Active"] = False
+    opening = pd.concat(
+        [
+            opening,
+            pd.DataFrame(
+                [
+                    {
+                        "Cohort ID": "TEST-BD",
+                        "Business Unit": "Breeding",
+                        "Sex": "Female",
+                        "Purpose": "breeding_doe",
+                        "Age in Months": 36.0,
+                        "Head Count": 20.0,
+                        "Parity": 2.0,
+                        "Pregnant": False,
+                        "Days in Milk": 0.0,
+                        "Active": True,
+                    },
+                    {
+                        "Cohort ID": "TEST-BB",
+                        "Business Unit": "Breeding",
+                        "Sex": "Male",
+                        "Purpose": "breeding_buck",
+                        "Age in Months": 36.0,
+                        "Head Count": 4.0,
+                        "Parity": 0.0,
+                        "Pregnant": False,
+                        "Days in Milk": 0.0,
+                        "Active": True,
+                    },
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    assumptions["Opening Herd Cohorts"] = opening
+
+    core, detail_tables = streamlit_app._default_schedule_components(
+        production_horizon=assumptions["Production Horizon"],
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, detail_tables, assumptions)
+    biological = streamlit_app._derive_biological_schedules(schedule, assumptions)
+    breeding_unit_schedule = biological["Breeding Unit Schedule"]
+    first_row = breeding_unit_schedule.iloc[0]
+
+    assert first_row["Breeder Live Sales (heads)"] > 0
+    assert first_row["Breeder Slaughter Heads"] > 0
+    assert first_row["Breeder Cull Revenue"] > 0
+    assert first_row["External Revenue"] >= first_row["Breeder Cull Revenue"]
+    assert first_row["Revenue"] >= first_row["Breeder Cull Revenue"]
+
+
 def test_stage_aware_biological_cost_drivers_override_flat_herd_costing():
     assumptions = streamlit_app._default_assumption_tables()
     core, detail_tables = streamlit_app._default_schedule_components(

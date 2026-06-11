@@ -364,6 +364,49 @@ def test_default_assumptions_include_biological_engine_tables():
     ].columns
 
 
+def test_default_breeding_reproduction_biology_includes_breeder_offtake_controls():
+    table = streamlit_app._default_breeding_reproduction_biology_table()
+
+    assert {
+        "Breeder Doe Cull Age (months)",
+        "Breeder Doe Cull At Parity",
+        "Breeder Doe Live Sale Share %",
+        "Breeder Buck Replacement Age (months)",
+        "Breeder Buck Live Sale Share %",
+    }.issubset(table.columns)
+    assert table.loc[0, "Breeder Doe Cull Age (months)"] == pytest.approx(72.0)
+    assert pd.isna(table.loc[0, "Breeder Doe Cull At Parity"])
+    assert table.loc[0, "Breeder Buck Replacement Age (months)"] == pytest.approx(60.0)
+
+
+def test_breeding_pricing_sync_assigns_livestock_products_to_breeding_unit():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Business Configuration"] = pd.DataFrame(
+        {
+            "Business Type": ["Breeding"],
+            "Operating Model": ["Breeding-to-Unit"],
+            "Transfer Destination": ["Meat"],
+            "Reporting View": ["Consolidated"],
+            "Transfer Pricing Method": ["Cost"],
+            "Allow External Kid Sales": [True],
+        }
+    )
+    assumptions = streamlit_app._sync_transfer_tables_to_business_configuration(assumptions)
+    core, _ = streamlit_app._default_schedule_components(
+        production_horizon=assumptions.get("Production Horizon"),
+        assumptions=assumptions,
+    )
+    synced = streamlit_app._sync_commercial_assumptions_to_core(assumptions, core)
+    pricing = synced["Pricing"]
+
+    livestock_rows = pricing.loc[
+        pricing["Product"].isin(["Meat", "Offal", "Pelt", "Live Herd"])
+    ]
+
+    assert not livestock_rows.empty
+    assert set(livestock_rows["Business Unit"]) == {"Breeding"}
+
+
 def test_default_biological_start_date_matches_production_horizon_start():
     assumptions = streamlit_app._default_assumption_tables()
 
