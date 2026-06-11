@@ -393,6 +393,12 @@ class GoatModel:
 
     def _periods_per_year(self, index: Optional[pd.DatetimeIndex] = None) -> int:
         idx = index if index is not None else self.dates
+        if not isinstance(idx, pd.DatetimeIndex):
+            coerced = pd.to_datetime(idx, errors="coerce")
+            if isinstance(coerced, pd.Series):
+                coerced = coerced.dropna().to_numpy()
+            coerced_index = pd.DatetimeIndex(coerced)
+            idx = coerced_index[coerced_index.notna()]
         if len(idx) <= 1:
             return 12
 

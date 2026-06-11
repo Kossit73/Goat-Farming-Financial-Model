@@ -2068,9 +2068,40 @@ ASSET_SCHEDULE_COLUMNS = [
 
 
 def _normalize_period(series: pd.Series) -> pd.Series:
-    periods = pd.to_datetime(series, errors="coerce")
-    formatted = periods.dt.strftime("%Y-%m-%d")
-    return formatted.where(~periods.isna(), series.astype(str))
+    values = pd.Series(series, copy=False)
+    if values.empty:
+        return values.astype("object")
+
+    if is_datetime64_any_dtype(values):
+        periods = pd.to_datetime(values, errors="coerce")
+        return periods.dt.strftime("%Y-%m-%d").astype("object")
+
+    if isinstance(values.dtype, pd.PeriodDtype):
+        periods = values.dt.to_timestamp()
+        return periods.dt.strftime("%Y-%m-%d").astype("object")
+
+    raw_text = values.astype("string")
+    stripped = raw_text.str.strip()
+    normalized = stripped.astype("object")
+    empty_mask = stripped.isna() | stripped.eq("")
+    if empty_mask.all():
+        return normalized
+
+    canonical = stripped.str.replace("/", "-", regex=False)
+    iso_mask = canonical.str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)
+    if iso_mask.any():
+        iso_periods = pd.to_datetime(canonical[iso_mask], format="%Y-%m-%d", errors="coerce")
+        normalized.loc[iso_mask] = iso_periods.dt.strftime("%Y-%m-%d").astype("object")
+
+    fallback_mask = ~empty_mask & ~iso_mask
+    if fallback_mask.any():
+        fallback_periods = pd.to_datetime(canonical[fallback_mask], errors="coerce")
+        fallback_formatted = fallback_periods.dt.strftime("%Y-%m-%d").astype("object")
+        normalized.loc[fallback_mask] = fallback_formatted.where(
+            ~fallback_periods.isna(),
+            stripped[fallback_mask].astype("object"),
+        )
+    return normalized
 
 
 def _format_scenario_label(primary_product: str, price_pct: int, feed_pct: int) -> str:
@@ -3521,6 +3552,29 @@ def _string_to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _coerce_numeric_scalar(value: Any) -> float:
+    try:
+        numeric = pd.to_numeric(value, errors="coerce")
+    except Exception:
+        return np.nan
+    if isinstance(numeric, (pd.Series, pd.Index, np.ndarray, list, tuple)):
+        array = np.asarray(numeric, dtype="float64").reshape(-1)
+        numeric = array[0] if array.size else np.nan
+    return float(numeric) if pd.notna(numeric) else np.nan
+
+
+def _coerce_float_scalar(value: Any, default: float = 0.0) -> float:
+    numeric = _coerce_numeric_scalar(value)
+    return float(numeric) if pd.notna(numeric) else float(default)
+
+
+def _coerce_int_scalar(value: Any, default: int = 0) -> int:
+    numeric = _coerce_numeric_scalar(value)
+    if pd.isna(numeric):
+        return int(default)
+    return int(round(float(numeric)))
+
+
 def _assumption_bundle_ensure_map() -> dict[str, Callable[[Optional[pd.DataFrame]], pd.DataFrame]]:
     return {
         "Biological System Settings": _ensure_biological_system_settings_table,
@@ -3642,7 +3696,7 @@ def _active_first_row(table: pd.DataFrame, default_row: Optional[pd.Series] = No
 
 
 def _parity_key(value: Any) -> str:
-    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    numeric = _coerce_numeric_scalar(value)
     if pd.notna(numeric):
         if numeric <= 1:
             return "1"
@@ -3764,21 +3818,11 @@ def _calculate_lactation_curve_yield(
     config: dict[str, Any],
     month_in_milk: float,
 ) -> float:
-    peak_month = float(
-        pd.to_numeric(pd.Series([config.get("Peak Lactation Month")]), errors="coerce").iloc[0] or 2.0
-    )
-    base_yield = float(
-        pd.to_numeric(pd.Series([config.get("Base Yield Litres per Day")]), errors="coerce").iloc[0] or 0.0
-    )
-    peak_yield = float(
-        pd.to_numeric(pd.Series([config.get("Peak Yield Litres per Day")]), errors="coerce").iloc[0] or base_yield
-    )
-    parity_factor = float(
-        pd.to_numeric(pd.Series([config.get("Parity Yield Factor")]), errors="coerce").iloc[0] or 1.0
-    )
-    shape = float(
-        pd.to_numeric(pd.Series([config.get("Curve Shape Parameter")]), errors="coerce").iloc[0] or 1.0
-    )
+    peak_month = _coerce_float_scalar(config.get("Peak Lactation Month"), 2.0)
+    base_yield = _coerce_float_scalar(config.get("Base Yield Litres per Day"), 0.0)
+    peak_yield = _coerce_float_scalar(config.get("Peak Yield Litres per Day"), base_yield)
+    parity_factor = _coerce_float_scalar(config.get("Parity Yield Factor"), 1.0)
+    shape = _coerce_float_scalar(config.get("Curve Shape Parameter"), 1.0)
     if month_in_milk < 0:
         return 0.0
     if month_in_milk <= peak_month:
@@ -3825,116 +3869,17 @@ def _derive_biological_schedules(
         opening_start = work_index.min()
     pre_roll_months = max(0.0, (work_index.min() - opening_start).days / 30.44)
     pre_roll_days = max(0.0, (work_index.min() - opening_start).days)
-    age_band_width = max(
-        float(
-            pd.to_numeric(
-                pd.Series([settings_lookup.get("Age Band Width (months)", 1.0)]),
-                errors="coerce",
-            ).iloc[0]
-            or 1.0
-        ),
-        1.0,
-    )
+    age_band_width = max(_coerce_float_scalar(settings_lookup.get("Age Band Width (months)", 1.0), 1.0), 1.0)
 
-    age_at_first_kidding = max(
-        1,
-        int(
-            round(
-                float(
-                    pd.to_numeric(
-                        pd.Series([reproduction_row.get("Age at First Kidding (months)")]),
-                        errors="coerce",
-                    ).iloc[0]
-                    or 18.0
-                )
-            )
-        ),
-    )
-    gestation_months = max(
-        1,
-        int(
-            round(
-                float(
-                    pd.to_numeric(
-                        pd.Series([reproduction_row.get("Gestation Months")]),
-                        errors="coerce",
-                    ).iloc[0]
-                    or 5.0
-                )
-            )
-        ),
-    )
-    sale_age = max(
-        1,
-        int(
-            round(
-                max(
-                    float(
-                        pd.to_numeric(
-                            pd.Series([finishing_row.get("Months to Market Weight")]),
-                            errors="coerce",
-                        ).iloc[0]
-                        or 8.0
-                    ),
-                    float(
-                        pd.to_numeric(
-                            pd.Series([finishing_row.get("Age at Slaughter (months)")]),
-                            errors="coerce",
-                        ).iloc[0]
-                        or 10.0
-                    ),
-                )
-            )
-        ),
-    )
-    months_to_market_weight = max(
-        float(
-            pd.to_numeric(
-                pd.Series([finishing_row.get("Months to Market Weight")]),
-                errors="coerce",
-            ).iloc[0]
-            or 8.0
-        ),
-        1.0,
-    )
-    slaughter_age = max(
-        float(
-            pd.to_numeric(
-                pd.Series([finishing_row.get("Age at Slaughter (months)")]),
-                errors="coerce",
-            ).iloc[0]
-            or sale_age
-        ),
-        1.0,
-    )
-    target_live_weight = max(
-        float(
-            pd.to_numeric(
-                pd.Series([finishing_row.get("Target Live Weight Kg")]),
-                errors="coerce",
-            ).iloc[0]
-            or 0.0
-        ),
-        0.0,
-    )
-    monthly_weight_gain = max(
-        float(
-            pd.to_numeric(
-                pd.Series([finishing_row.get("Monthly Weight Gain Kg")]),
-                errors="coerce",
-            ).iloc[0]
-            or 0.0
-        ),
-        0.0,
-    )
-    breeder_doe_cull_age_horizon = pd.to_numeric(
-        pd.Series([reproduction_row.get("Breeder Doe Cull Age (months)")]),
-        errors="coerce",
-    ).iloc[0]
-    breeder_buck_replacement_age_horizon = pd.to_numeric(
-        pd.Series([reproduction_row.get("Breeder Buck Replacement Age (months)")]),
-        errors="coerce",
-    ).iloc[0]
+    age_at_first_kidding = max(1, _coerce_int_scalar(reproduction_row.get("Age at First Kidding (months)"), 18))
+    gestation_months = max(1, _coerce_int_scalar(reproduction_row.get("Gestation Months"), 5))
+    months_to_market_weight = max(_coerce_float_scalar(finishing_row.get("Months to Market Weight"), 8.0), 1.0)
+    slaughter_age = max(_coerce_float_scalar(finishing_row.get("Age at Slaughter (months)"), months_to_market_weight), 1.0)
+    sale_age = max(1, int(round(max(months_to_market_weight, slaughter_age))))
+    target_live_weight = max(_coerce_float_scalar(finishing_row.get("Target Live Weight Kg"), 0.0), 0.0)
+    monthly_weight_gain = max(_coerce_float_scalar(finishing_row.get("Monthly Weight Gain Kg"), 0.0), 0.0)
+    breeder_doe_cull_age_horizon = _coerce_numeric_scalar(reproduction_row.get("Breeder Doe Cull Age (months)"))
+    breeder_buck_replacement_age_horizon = _coerce_numeric_scalar(reproduction_row.get("Breeder Buck Replacement Age (months)"))
     max_opening_age = pd.to_numeric(
         opening_cohorts.get("Age in Months"),
         errors="coerce",
@@ -3970,14 +3915,11 @@ def _derive_biological_schedules(
     for _, row in opening_cohorts.loc[opening_cohorts["Active"].fillna(True).astype(bool)].iterrows():
         purpose = str(row.get("Purpose", "")).strip().lower()
         age_idx = _age_bucket_index(
-            float(pd.to_numeric(pd.Series([row.get("Age in Months")]), errors="coerce").iloc[0] or 0.0)
-            + pre_roll_months,
+            _coerce_float_scalar(row.get("Age in Months"), 0.0) + pre_roll_months,
             int(np.ceil(max_age_horizon)),
             age_band_width,
         )
-        head_count = float(
-            pd.to_numeric(pd.Series([row.get("Head Count")]), errors="coerce").iloc[0] or 0.0
-        )
+        head_count = _coerce_float_scalar(row.get("Head Count"), 0.0)
         if purpose == "breeding_doe":
             breeding_doe_buckets[_parity_key(row.get("Parity"))][min(age_idx, bucket_count - 1)] += head_count
             if _coerce_bool_value(row.get("Pregnant"), False) and pregnancy_queue:
@@ -4020,15 +3962,12 @@ def _derive_biological_schedules(
             opening_cohorts["Purpose"].astype(str).str.strip().str.lower() == "breeding_doe"
         ]
         for _, row in initial_lactating.iterrows():
-            days_in_milk = (
-                float(pd.to_numeric(pd.Series([row.get("Days in Milk")]), errors="coerce").iloc[0] or 0.0)
-                + pre_roll_days
-            )
+            days_in_milk = _coerce_float_scalar(row.get("Days in Milk"), 0.0) + pre_roll_days
             if days_in_milk <= 0:
                 continue
             lactation_cohorts.append(
                 {
-                    "heads": float(pd.to_numeric(pd.Series([row.get("Head Count")]), errors="coerce").iloc[0] or 0.0),
+                    "heads": _coerce_float_scalar(row.get("Head Count"), 0.0),
                     "parity": _parity_key(row.get("Parity")),
                     "days_in_milk": days_in_milk,
                 }
@@ -4063,94 +4002,39 @@ def _derive_biological_schedules(
         False,
     )
 
-    female_share = float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Female Birth Share %")]), errors="coerce").iloc[0] or 50.0
+    female_share = _coerce_float_scalar(reproduction_row.get("Female Birth Share %"), 50.0) / 100.0
+    conception_rate = _coerce_float_scalar(reproduction_row.get("Conception Rate %"), 85.0)
+    kiddings_per_doe_year = _coerce_float_scalar(reproduction_row.get("Kiddings per Doe per Year"), 1.3)
+    kids_per_kidding = _coerce_float_scalar(reproduction_row.get("Kids per Kidding"), 1.8)
+    replacement_retention = _coerce_float_scalar(
+        rules_lookup.get(
+            "Female Replacement Retention %",
+            reproduction_row.get("Replacement Retention %"),
+        ),
+        35.0,
     ) / 100.0
-    conception_rate = float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Conception Rate %")]), errors="coerce").iloc[0] or 85.0
+    live_sale_share = _coerce_float_scalar(finishing_row.get("Live Herd Sales Share %"), 0.0) / 100.0
+    kid_mortality_pct = _coerce_float_scalar(reproduction_row.get("Kid Mortality %"), 0.0)
+    doe_exit_pct = _coerce_float_scalar(reproduction_row.get("Doe Mortality %"), 0.0) + _coerce_float_scalar(
+        reproduction_row.get("Cull Rate %"),
+        0.0,
     )
-    kiddings_per_doe_year = float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Kiddings per Doe per Year")]), errors="coerce").iloc[0] or 1.3
-    )
-    kids_per_kidding = float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Kids per Kidding")]), errors="coerce").iloc[0] or 1.8
-    )
-    replacement_retention = float(
-        pd.to_numeric(
-            pd.Series(
-                [
-                    rules_lookup.get(
-                        "Female Replacement Retention %",
-                        reproduction_row.get("Replacement Retention %"),
-                    )
-                ]
-            ),
-            errors="coerce",
-        ).iloc[0]
-        or 35.0
-    ) / 100.0
-    live_sale_share = float(
-        pd.to_numeric(
-            pd.Series([finishing_row.get("Live Herd Sales Share %")]),
-            errors="coerce",
-        ).iloc[0]
-        or 0.0
-    ) / 100.0
-    kid_mortality_pct = float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Kid Mortality %")]), errors="coerce").iloc[0] or 0.0
-    )
-    doe_exit_pct = float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Doe Mortality %")]), errors="coerce").iloc[0] or 0.0
-    ) + float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Cull Rate %")]), errors="coerce").iloc[0] or 0.0
-    )
-    breeder_doe_cull_age = pd.to_numeric(
-        pd.Series([reproduction_row.get("Breeder Doe Cull Age (months)")]),
-        errors="coerce",
-    ).iloc[0]
-    breeder_doe_cull_parity = pd.to_numeric(
-        pd.Series([reproduction_row.get("Breeder Doe Cull At Parity")]),
-        errors="coerce",
-    ).iloc[0]
+    breeder_doe_cull_age = _coerce_numeric_scalar(reproduction_row.get("Breeder Doe Cull Age (months)"))
+    breeder_doe_cull_parity = _coerce_numeric_scalar(reproduction_row.get("Breeder Doe Cull At Parity"))
     breeder_doe_live_sale_share = max(
-        float(
-            pd.to_numeric(
-                pd.Series([reproduction_row.get("Breeder Doe Live Sale Share %")]),
-                errors="coerce",
-            ).iloc[0]
-            or 0.0
-        ),
+        _coerce_float_scalar(reproduction_row.get("Breeder Doe Live Sale Share %"), 0.0),
         0.0,
     ) / 100.0
-    buck_exit_pct = float(
-        pd.to_numeric(pd.Series([reproduction_row.get("Buck Mortality %")]), errors="coerce").iloc[0] or 0.0
-    )
-    breeder_buck_replacement_age = pd.to_numeric(
-        pd.Series([reproduction_row.get("Breeder Buck Replacement Age (months)")]),
-        errors="coerce",
-    ).iloc[0]
+    buck_exit_pct = _coerce_float_scalar(reproduction_row.get("Buck Mortality %"), 0.0)
+    breeder_buck_replacement_age = _coerce_numeric_scalar(reproduction_row.get("Breeder Buck Replacement Age (months)"))
     breeder_buck_live_sale_share = max(
-        float(
-            pd.to_numeric(
-                pd.Series([reproduction_row.get("Breeder Buck Live Sale Share %")]),
-                errors="coerce",
-            ).iloc[0]
-            or 0.0
-        ),
+        _coerce_float_scalar(reproduction_row.get("Breeder Buck Live Sale Share %"), 0.0),
         0.0,
     ) / 100.0
-    finishing_mortality_pct = float(
-        pd.to_numeric(pd.Series([finishing_row.get("Mortality %")]), errors="coerce").iloc[0] or 0.0
-    )
-    meat_yield = float(
-        pd.to_numeric(pd.Series([finishing_row.get("Meat Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0
-    )
-    offal_yield = float(
-        pd.to_numeric(pd.Series([finishing_row.get("Offal Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0
-    )
-    pelt_units = float(
-        pd.to_numeric(pd.Series([finishing_row.get("Pelt Units per Goat")]), errors="coerce").iloc[0] or 0.0
-    )
+    finishing_mortality_pct = _coerce_float_scalar(finishing_row.get("Mortality %"), 0.0)
+    meat_yield = _coerce_float_scalar(finishing_row.get("Meat Yield Kg per Goat"), 0.0)
+    offal_yield = _coerce_float_scalar(finishing_row.get("Offal Yield Kg per Goat"), 0.0)
+    pelt_units = _coerce_float_scalar(finishing_row.get("Pelt Units per Goat"), 0.0)
 
     summary_rows: list[dict[str, Any]] = []
     pregnancy_rows: list[dict[str, Any]] = []
@@ -10469,6 +10353,7 @@ def _reporting_scenario_viability_table(
     entity: str,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
+    use_cached_consolidated = str(entity).strip().casefold() == "consolidated"
     for scenario_name, payload in (results_map or {}).items():
         if not isinstance(payload, dict):
             continue
@@ -10478,8 +10363,16 @@ def _reporting_scenario_viability_table(
         schedule_view = _reporting_schedule_for_entity(payload, entity)
         if not isinstance(schedule_view, pd.DataFrame) or schedule_view.empty:
             continue
-        valuation = model.valuation_summary(schedule_view, annual=True)
-        debt_capacity = model.debt_capacity_schedule(schedule_view, annual=True)
+        if use_cached_consolidated:
+            valuation = payload.get("valuation_annual")
+            if not isinstance(valuation, dict) or not valuation:
+                valuation = model.valuation_summary(schedule_view, annual=True)
+            debt_capacity = payload.get("debt_capacity_annual")
+            if not isinstance(debt_capacity, pd.DataFrame):
+                debt_capacity = model.debt_capacity_schedule(schedule_view, annual=True)
+        else:
+            valuation = model.valuation_summary(schedule_view, annual=True)
+            debt_capacity = model.debt_capacity_schedule(schedule_view, annual=True)
         rows.append(
             {
                 "Scenario": scenario_name,
@@ -10516,6 +10409,82 @@ def _reporting_scenario_viability_table(
     if comparison.empty:
         return comparison
     return comparison.set_index("Scenario")
+
+
+def _dashboard_outputs_for_entity(
+    result_payload: dict[str, Any],
+    entity: str,
+) -> dict[str, Any]:
+    scenario = _reporting_schedule_for_entity(result_payload, entity)
+    model = result_payload["model"]
+    use_cached_consolidated = str(entity).strip().casefold() == "consolidated"
+
+    if use_cached_consolidated:
+        valuation_summary = result_payload.get("valuation_annual")
+        if not isinstance(valuation_summary, dict) or not valuation_summary:
+            valuation_summary = result_payload.get("valuation", {})
+        model_audit = result_payload.get("model_audit")
+        if not isinstance(model_audit, dict):
+            model_audit = model.model_audit(scenario, annual=True)
+        working_capital_annual = result_payload.get("working_capital_annual")
+        if not isinstance(working_capital_annual, pd.DataFrame):
+            working_capital_annual = model.working_capital_schedule(scenario, annual=True)
+        debt_capacity_annual = result_payload.get("debt_capacity_annual")
+        if not isinstance(debt_capacity_annual, pd.DataFrame):
+            debt_capacity_annual = model.debt_capacity_schedule(scenario, annual=True)
+        ufcf_schedule_annual = result_payload.get("ufcf_schedule_annual")
+        if not isinstance(ufcf_schedule_annual, pd.DataFrame):
+            ufcf_schedule_annual = model.ufcf_schedule(scenario, annual=True)
+        kpis = result_payload.get("kpis")
+        if not isinstance(kpis, pd.DataFrame):
+            kpis = model.kpis(scenario, annual=True)
+        break_even = result_payload.get("break_even")
+        if not isinstance(break_even, pd.DataFrame):
+            break_even = model.break_even(scenario, annual=True)
+    else:
+        valuation_summary = model.valuation_summary(scenario, annual=True)
+        model_audit = model.model_audit(scenario, annual=True)
+        working_capital_annual = model.working_capital_schedule(scenario, annual=True)
+        debt_capacity_annual = model.debt_capacity_schedule(scenario, annual=True)
+        ufcf_schedule_annual = model.ufcf_schedule(scenario, annual=True)
+        kpis = model.kpis(scenario, annual=True)
+        break_even = model.break_even(scenario, annual=True)
+
+    supplementary = result_payload.get("supplementary", {})
+    if not isinstance(supplementary, dict):
+        supplementary = {}
+    pricing_assumptions = result_payload.get("pricing_assumptions")
+    if not isinstance(pricing_assumptions, pd.DataFrame):
+        pricing_assumptions = pd.DataFrame()
+    product_revenue_summary = supplementary.get("Commercial Revenue by Product")
+    if not isinstance(product_revenue_summary, pd.DataFrame):
+        product_revenue_summary = (
+            _pricing_family_summary(pricing_assumptions)
+            if not pricing_assumptions.empty
+            else pd.DataFrame()
+        )
+    product_qty_summary = supplementary.get("Commercial Quantity by Period")
+    if not isinstance(product_qty_summary, pd.DataFrame):
+        product_qty_summary = (
+            _pricing_quantity_by_period(pricing_assumptions)
+            if not pricing_assumptions.empty
+            else pd.DataFrame()
+        )
+
+    return {
+        "scenario": scenario,
+        "valuation_summary": valuation_summary,
+        "model_audit": model_audit,
+        "working_capital_annual": working_capital_annual,
+        "debt_capacity_annual": debt_capacity_annual,
+        "ufcf_schedule_annual": ufcf_schedule_annual,
+        "kpis": kpis,
+        "break_even": break_even,
+        "pricing_assumptions": pricing_assumptions,
+        "product_revenue_summary": product_revenue_summary,
+        "product_qty_summary": product_qty_summary,
+        "supplementary": supplementary,
+    }
 
 
 def _computed_default_valuation_inputs() -> Dict[str, float]:
@@ -12347,6 +12316,12 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
     history = st.session_state.setdefault("ai_orchestration_chat_history", [])
     current_query = ""
     should_record_history = False
+    cache_signature = {
+        "scenario": snapshot.get("selected_scenario", "Scenario"),
+        "run_version": _safe_session_state_get(MODEL_LAST_RUN_VERSION_KEY),
+    }
+    cached_payload = st.session_state.get("ai_orchestration_cached_output")
+    output = None
     if submit_prompt and prompt:
         st.session_state["ai_orchestration_last_query"] = prompt
         current_query = prompt
@@ -12359,18 +12334,28 @@ def _render_ai_orchestration_layer(results: Optional[Dict[str, Any]]) -> None:
         messages.append({"role": "user", "content": prompt})
         messages.append({"role": "assistant", "content": assistant_reply})
         st.session_state["ai_orchestration_chat_messages"] = messages
+        st.session_state["ai_orchestration_cached_output"] = {
+            "signature": cache_signature,
+            "query": prompt,
+            "output": output,
+            "retrieved": retrieved,
+        }
         should_record_history = True
     elif submit_prompt:
         st.warning("Enter a question before generating a response.")
-        query = st.session_state.get("ai_orchestration_last_query", "Strategic overview")
-        current_query = query
-        retrieved = _retrieve_rag_context(query)
-        output = _run_orchestration_engine(query, config, snapshot, retrieved, history)
     else:
-        query = st.session_state.get("ai_orchestration_last_query", "Strategic overview")
-        current_query = query
-        retrieved = _retrieve_rag_context(query)
-        output = _run_orchestration_engine(query, config, snapshot, retrieved, history)
+        if (
+            isinstance(cached_payload, dict)
+            and cached_payload.get("signature") == cache_signature
+            and isinstance(cached_payload.get("output"), dict)
+        ):
+            current_query = str(cached_payload.get("query", "")).strip()
+            output = cached_payload["output"]
+        else:
+            st.info(
+                "Generate a response to analyze the current scenario. The orchestration engine now stays idle until requested."
+            )
+            return
 
     if should_record_history and current_query.strip():
         history.append(
@@ -14760,22 +14745,30 @@ def main() -> None:
                 options=entity_options,
                 key="reporting_entity_selector",
             )
-            scenario = reporting_context.get("scenario_schedules", {}).get(
-                selected_reporting_entity,
-                results["scenario"],
+            dashboard_outputs = _cached_result_view(
+                "dashboard_outputs",
+                results.get("selected_scenario", "Scenario"),
+                lambda: _dashboard_outputs_for_entity(results, selected_reporting_entity),
+                extra=selected_reporting_entity,
             )
-            valuation_summary = results["model"].valuation_summary(scenario, annual=True)
-            model_audit = results["model"].model_audit(scenario, annual=True)
-            working_capital_annual = results["model"].working_capital_schedule(scenario, annual=True)
-            debt_capacity_annual = results["model"].debt_capacity_schedule(scenario, annual=True)
-            ufcf_schedule_annual = results["model"].ufcf_schedule(scenario, annual=True)
-            scenario_comparison = _reporting_scenario_viability_table(
-                st.session_state.get("all_scenario_results", {}),
-                selected_reporting_entity,
+            scenario = dashboard_outputs["scenario"]
+            valuation_summary = dashboard_outputs["valuation_summary"]
+            model_audit = dashboard_outputs["model_audit"]
+            working_capital_annual = dashboard_outputs["working_capital_annual"]
+            debt_capacity_annual = dashboard_outputs["debt_capacity_annual"]
+            ufcf_schedule_annual = dashboard_outputs["ufcf_schedule_annual"]
+            kpis = dashboard_outputs["kpis"]
+            break_even = dashboard_outputs["break_even"]
+            pricing_assumptions = dashboard_outputs["pricing_assumptions"]
+            scenario_comparison = _cached_result_view(
+                "scenario_viability",
+                results.get("selected_scenario", "Scenario"),
+                lambda: _reporting_scenario_viability_table(
+                    st.session_state.get("all_scenario_results", {}),
+                    selected_reporting_entity,
+                ),
+                extra=selected_reporting_entity,
             )
-            pricing_assumptions = results.get("pricing_assumptions")
-            if not isinstance(pricing_assumptions, pd.DataFrame):
-                pricing_assumptions = pd.DataFrame()
 
             st.markdown("#### Investor Viability Snapshot")
             viability_cols = st.columns(4)
@@ -14823,14 +14816,14 @@ def main() -> None:
                 st.markdown("#### Commercial Product View")
                 product_view_col1, product_view_col2 = st.columns(2)
                 with product_view_col1:
-                    product_revenue_summary = _pricing_family_summary(pricing_assumptions)
+                    product_revenue_summary = dashboard_outputs["product_revenue_summary"]
                     st.markdown("**Revenue by Product**")
                     st.dataframe(product_revenue_summary, use_container_width=True)
                     if not product_revenue_summary.empty:
                         product_chart = product_revenue_summary.set_index("Product")["Total Revenue"]
                         st.bar_chart(product_chart)
                 with product_view_col2:
-                    product_qty_summary = _pricing_quantity_by_period(pricing_assumptions)
+                    product_qty_summary = dashboard_outputs["product_qty_summary"]
                     st.markdown("**Quantity by Period**")
                     st.dataframe(product_qty_summary, use_container_width=True)
                     qty_chart = product_qty_summary.set_index("Period") if "Period" in product_qty_summary.columns else pd.DataFrame()
@@ -14838,10 +14831,8 @@ def main() -> None:
                         st.line_chart(qty_chart)
 
             st.subheader("KPIs (Annual)")
-            kpis = results["model"].kpis(scenario, annual=True)
             st.dataframe(_format_kpis_for_display(kpis))
 
-            break_even = results["model"].break_even(scenario, annual=True)
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("#### Revenue vs NPAT")
@@ -14949,7 +14940,7 @@ def main() -> None:
 
             st.markdown("---")
             st.subheader("Supplementary Schedules")
-            supplementary_render = results.get("supplementary", {})
+            supplementary_render = dashboard_outputs["supplementary"]
             for name in [
                 "Loan Facilities",
                 "Equity Facilities",

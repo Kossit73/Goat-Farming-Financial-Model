@@ -7,6 +7,17 @@ import numpy as np
 import pandas as pd
 
 
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        numeric = pd.to_numeric(value, errors="coerce")
+    except Exception:
+        return float(default)
+    if isinstance(numeric, (pd.Series, pd.Index, np.ndarray, list, tuple)):
+        array = np.asarray(numeric, dtype="float64").reshape(-1)
+        numeric = array[0] if array.size else np.nan
+    return float(numeric) if pd.notna(numeric) else float(default)
+
+
 @dataclass(frozen=True)
 class PricingContext:
     schedule_df: pd.DataFrame
@@ -94,6 +105,22 @@ def derive_pricing_quantities(
 ) -> pd.DataFrame:
     work = pricing_table.copy()
     work["Period_dt"] = pd.to_datetime(work["Period"], errors="coerce")
+    milk_driver = context.driver_lookup.get("Milk", {})
+    cheese_driver = context.driver_lookup.get("Cheese", {})
+    livestock_driver = next(
+        (context.driver_lookup.get(product, {}) for product in context.slaughter_products if context.driver_lookup.get(product)),
+        {},
+    )
+    live_herd_driver = context.driver_lookup.get("Live Herd", livestock_driver)
+    milk_growth = 1 + (_coerce_float(milk_driver.get("Driver Growth %"), 0.0) / 100.0)
+    cheese_growth = 1 + (_coerce_float(cheese_driver.get("Driver Growth %"), 0.0) / 100.0)
+    lactating_share = _coerce_float(milk_driver.get("Lactating Herd Share %"), 0.0) / 100.0
+    litres_per_day = _coerce_float(milk_driver.get("Litres per Lactating Doe per Day"), 0.0)
+    cheese_allocation = _coerce_float(cheese_driver.get("Milk Allocation to Cheese %"), 0.0) / 100.0
+    base_cheese_yield = _coerce_float(cheese_driver.get("Cheese Yield Kg per Litre"), 0.0)
+    slaughter_growth = 1 + (_coerce_float(livestock_driver.get("Driver Growth %"), 0.0) / 100.0)
+    annual_slaughter_pct = _coerce_float(livestock_driver.get("Slaughter Rate % of Herd per Period"), 0.0)
+    live_herd_share = _coerce_float(live_herd_driver.get("Live Herd Sales Share %"), 0.0) / 100.0
 
     for period, period_group in work.groupby("Period", sort=False):
         herd_size = context.herd_map.get(period, 0.0)
@@ -101,57 +128,18 @@ def derive_pricing_quantities(
         period_dt = pd.to_datetime(period, errors="coerce")
         year_offset = max(0, int(period_dt.year) - context.base_year) if pd.notna(period_dt) else 0
 
-        milk_driver = context.driver_lookup.get("Milk", {})
-        cheese_driver = context.driver_lookup.get("Cheese", {})
-        milk_growth = 1 + (
-            float(pd.to_numeric(pd.Series([milk_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
-            / 100.0
-        )
-        cheese_growth = 1 + (
-            float(pd.to_numeric(pd.Series([cheese_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
-            / 100.0
-        )
-        lactating_share = float(
-            pd.to_numeric(pd.Series([milk_driver.get("Lactating Herd Share %")]), errors="coerce").iloc[0] or 0.0
-        ) / 100.0
-        litres_per_day = float(
-            pd.to_numeric(pd.Series([milk_driver.get("Litres per Lactating Doe per Day")]), errors="coerce").iloc[0] or 0.0
-        )
         milk_output = herd_size * lactating_share * litres_per_day * period_days * (milk_growth ** year_offset)
         if period in context.biological_maps["milk"]:
             milk_output = float(context.biological_maps["milk"][period])
 
-        cheese_allocation = float(
-            pd.to_numeric(pd.Series([cheese_driver.get("Milk Allocation to Cheese %")]), errors="coerce").iloc[0] or 0.0
-        ) / 100.0
-        cheese_yield = float(
-            pd.to_numeric(pd.Series([cheese_driver.get("Cheese Yield Kg per Litre")]), errors="coerce").iloc[0] or 0.0
-        ) * (cheese_growth ** year_offset)
+        cheese_yield = base_cheese_yield * (cheese_growth ** year_offset)
         cheese_active = bool(
             period_group.loc[period_group["Product"].astype(str).str.strip() == "Cheese", "Active"].fillna(False).any()
         )
         milk_available_for_sale = milk_output * (1.0 - cheese_allocation if cheese_active else 1.0)
         cheese_milk_input = milk_output * cheese_allocation if cheese_active else 0.0
 
-        livestock_driver = next(
-            (context.driver_lookup.get(product, {}) for product in context.slaughter_products if context.driver_lookup.get(product)),
-            {},
-        )
-        slaughter_growth = 1 + (
-            float(pd.to_numeric(pd.Series([livestock_driver.get("Driver Growth %")]), errors="coerce").iloc[0] or 0.0)
-            / 100.0
-        )
-        annual_slaughter_pct = float(
-            pd.to_numeric(
-                pd.Series([livestock_driver.get("Slaughter Rate % of Herd per Period")]),
-                errors="coerce",
-            ).iloc[0]
-            or 0.0
-        )
         slaughter_rate = annual_pct_to_period_rate(annual_slaughter_pct, period_days)
-        live_herd_share = float(
-            pd.to_numeric(pd.Series([context.driver_lookup.get("Live Herd", livestock_driver).get("Live Herd Sales Share %")]), errors="coerce").iloc[0] or 0.0
-        ) / 100.0
         saleable_goats = herd_size * slaughter_rate * (slaughter_growth ** year_offset)
         live_herd_units = saleable_goats * live_herd_share
         goats_for_slaughter = max(0.0, saleable_goats - live_herd_units)
@@ -162,7 +150,7 @@ def derive_pricing_quantities(
         for idx, row in period_group.iterrows():
             quantity_mode = str(row.get("Quantity Mode", "Derived")).strip()
             if quantity_mode == "Manual Override":
-                manual_qty = pd.to_numeric(pd.Series([row.get("Manual Quantity Override")]), errors="coerce").iloc[0]
+                manual_qty = _coerce_float(row.get("Manual Quantity Override"), np.nan)
                 work.at[idx, "Quantity per Period"] = 0.0 if pd.isna(manual_qty) else float(manual_qty)
                 continue
             active = bool(row.get("Active", False))
@@ -213,12 +201,12 @@ def calculate_product_quantity(
 
     driver = context.driver_lookup.get(product, {})
     if product == "Meat":
-        yield_value = float(pd.to_numeric(pd.Series([driver.get("Meat Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0)
+        yield_value = _coerce_float(driver.get("Meat Yield Kg per Goat"), 0.0)
         return goats_for_slaughter * yield_value
     if product == "Offal":
-        yield_value = float(pd.to_numeric(pd.Series([driver.get("Offal Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0)
+        yield_value = _coerce_float(driver.get("Offal Yield Kg per Goat"), 0.0)
         return goats_for_slaughter * yield_value
     if product == "Pelt":
-        yield_value = float(pd.to_numeric(pd.Series([driver.get("Pelt Units per Goat")]), errors="coerce").iloc[0] or 0.0)
+        yield_value = _coerce_float(driver.get("Pelt Units per Goat"), 0.0)
         return goats_for_slaughter * yield_value
     return 0.0
