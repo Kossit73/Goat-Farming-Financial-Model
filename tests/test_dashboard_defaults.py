@@ -32,6 +32,160 @@ def test_default_results_wait_for_explicit_run():
     _reset_local_state()
 
 
+def test_default_business_configuration_includes_breeding_transfer_controls():
+    config = streamlit_app._default_business_configuration_table()
+
+    assert config.columns.tolist() == [
+        "Business Type",
+        "Operating Model",
+        "Transfer Destination",
+        "Reporting View",
+        "Transfer Pricing Method",
+        "Allow External Kid Sales",
+    ]
+    assert config.loc[0, "Business Type"] == "Combined"
+    assert config.loc[0, "Operating Model"] == "Standalone"
+
+
+def test_default_assumptions_include_breeding_transfer_tables():
+    assumptions = streamlit_app._default_assumption_tables()
+
+    for name in [
+        "Kid Routing Rules",
+        "Internal Transfer Pricing",
+        "Downstream Intake Rules",
+        "Transfer Elimination Rules",
+    ]:
+        assert name in assumptions
+        assert isinstance(assumptions[name], pd.DataFrame)
+        assert not assumptions[name].empty
+
+
+def test_breeding_to_unit_mode_emits_transfer_schedules():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Business Configuration"] = pd.DataFrame(
+        {
+            "Business Type": ["Breeding"],
+            "Operating Model": ["Breeding-to-Unit"],
+            "Transfer Destination": ["Meat"],
+            "Reporting View": ["Consolidated"],
+            "Transfer Pricing Method": ["Cost"],
+            "Allow External Kid Sales": [True],
+        }
+    )
+    assumptions = streamlit_app._sync_transfer_tables_to_business_configuration(assumptions)
+    core, details = streamlit_app._default_schedule_components(
+        production_horizon=assumptions.get("Production Horizon"),
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, details, assumptions)
+    biological = streamlit_app._derive_biological_schedules(schedule, assumptions)
+
+    assert "Kid Availability Schedule" in biological
+    assert "Internal Transfer Schedule" in biological
+    assert "Downstream Intake Schedule" in biological
+    assert "Breeding Unit Schedule" in biological
+    assert "Destination Unit Schedule" in biological
+    assert "Reporting Schedule - Breeding" in biological
+    assert "Reporting Schedule - Consolidated" in biological
+    assert not biological["Kid Availability Schedule"].empty
+
+
+def test_reporting_schedules_apply_internal_transfer_elimination():
+    assumptions = streamlit_app._default_assumption_tables()
+    assumptions["Business Configuration"] = pd.DataFrame(
+        {
+            "Business Type": ["Breeding"],
+            "Operating Model": ["Breeding-to-Unit"],
+            "Transfer Destination": ["Meat"],
+            "Reporting View": ["Consolidated"],
+            "Transfer Pricing Method": ["Cost"],
+            "Allow External Kid Sales": [True],
+        }
+    )
+    assumptions = streamlit_app._sync_transfer_tables_to_business_configuration(assumptions)
+    core, details = streamlit_app._default_schedule_components(
+        production_horizon=assumptions.get("Production Horizon"),
+        assumptions=assumptions,
+    )
+    schedule = streamlit_app._build_schedule_dataframe(core, details, assumptions)
+    biological = streamlit_app._derive_biological_schedules(schedule, assumptions)
+
+    breeding = biological["Reporting Schedule - Breeding"]
+    destination = biological["Reporting Schedule - Meat"]
+    consolidated = biological["Reporting Schedule - Consolidated"]
+    elimination = biological["Internal Transfer Elimination Schedule"]
+
+    combined_cogs = (
+        pd.to_numeric(breeding["COGS"], errors="coerce").fillna(0.0)
+        + pd.to_numeric(destination["COGS"], errors="coerce").fillna(0.0)
+    )
+    cost_elimination = pd.to_numeric(
+        elimination["Cost Elimination"], errors="coerce"
+    ).fillna(0.0)
+
+    assert cost_elimination.abs().max() > 0
+    pd.testing.assert_series_equal(
+        pd.to_numeric(consolidated["COGS"], errors="coerce").fillna(0.0),
+        combined_cogs.add(cost_elimination, fill_value=0.0),
+        check_names=False,
+    )
+
+
+def test_unit_aggregations_preserve_business_unit_breakdown():
+    core = pd.DataFrame(
+        {
+            "Period": ["2024-01-31", "2024-02-29"],
+        }
+    )
+    variable_table = pd.DataFrame(
+        {
+            "Period": ["2024-01-31", "2024-01-31", "2024-02-29"],
+            "Business Unit": ["Breeding", "Meat", "Breeding"],
+            "Item": ["Health", "Health", "Health"],
+            "Amount": [10.0, 20.0, 30.0],
+        }
+    )
+    direct_table = pd.DataFrame(
+        {
+            "Period": ["2024-01-31", "2024-02-29"],
+            "Business Unit": ["Breeding", "Meat"],
+            "Position": ["Farmhand", "Butcher"],
+            "Head Count": [1.0, 1.0],
+            "Monthly Salary per Head": [100.0, 200.0],
+            "Total Salary": [100.0, 200.0],
+        }
+    )
+    admin_table = pd.DataFrame(
+        {
+            "Period": ["2024-01-31", "2024-02-29"],
+            "Business Unit": ["Breeding", "Meat"],
+            "Position": ["Clerk", "Manager"],
+            "Head Count": [1.0, 1.0],
+            "Monthly Salary per Head": [50.0, 75.0],
+            "Total Salary": [50.0, 75.0],
+        }
+    )
+
+    variable_agg = streamlit_app._aggregate_variable_expenses_by_business_unit(
+        variable_table, core
+    )
+    direct_agg = streamlit_app._aggregate_direct_wages_by_business_unit(
+        direct_table, core
+    )
+    admin_agg = streamlit_app._aggregate_admin_wages_by_business_unit(
+        admin_table, core
+    )
+
+    assert variable_agg.columns.tolist() == ["Period", "Breeding", "Meat"]
+    assert direct_agg.columns.tolist() == ["Period", "Breeding", "Meat"]
+    assert admin_agg.columns.tolist() == ["Period", "Breeding", "Meat"]
+    assert variable_agg.loc[0, "Breeding"] == 10.0
+    assert variable_agg.loc[0, "Meat"] == 20.0
+    assert direct_agg.loc[1, "Meat"] == 200.0
+    assert admin_agg.loc[0, "Breeding"] == 50.0
+
+
 def test_refresh_results_stale_state_tracks_input_changes():
     _reset_local_state()
 

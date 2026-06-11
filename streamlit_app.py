@@ -1336,20 +1336,30 @@ DETAIL_SCHEDULE_COLUMNS = {
 }
 
 
-BUSINESS_TYPE_OPTIONS: tuple[str, ...] = ("Meat", "Milk-Cheese", "Combined")
+BUSINESS_TYPE_OPTIONS: tuple[str, ...] = ("Breeding", "Meat", "Milk-Cheese", "Combined")
 DEFAULT_BUSINESS_TYPE = "Combined"
+OPERATING_MODEL_OPTIONS: tuple[str, ...] = ("Standalone", "Breeding-to-Unit")
+DEFAULT_OPERATING_MODEL = "Standalone"
+REPORTING_VIEW_OPTIONS: tuple[str, ...] = ("Standalone Unit", "Consolidated")
+DEFAULT_REPORTING_VIEW = "Consolidated"
+TRANSFER_PRICING_METHOD_OPTIONS: tuple[str, ...] = ("Cost", "Cost Plus", "Market", "Zero")
+DEFAULT_TRANSFER_PRICING_METHOD = "Cost"
 
 DAIRY_PRODUCTS: tuple[str, ...] = ("Milk", "Cheese")
 LIVESTOCK_PRODUCTS: tuple[str, ...] = ("Meat", "Offal", "Pelt", "Live Herd")
-ALL_MODEL_PRODUCTS: tuple[str, ...] = DAIRY_PRODUCTS + LIVESTOCK_PRODUCTS
+BREEDING_PRODUCTS: tuple[str, ...] = ("Female Kids", "Male Kids")
+ALL_MODEL_PRODUCTS: tuple[str, ...] = BREEDING_PRODUCTS + DAIRY_PRODUCTS + LIVESTOCK_PRODUCTS
 
 BUSINESS_TYPE_ACTIVE_PRODUCTS: Dict[str, tuple[str, ...]] = {
+    "Breeding": ("Female Kids", "Male Kids"),
     "Meat": ("Meat", "Offal", "Pelt", "Live Herd"),
     "Milk-Cheese": ("Milk", "Cheese", "Pelt", "Live Herd"),
     "Combined": ("Milk", "Cheese", "Meat", "Offal", "Pelt", "Live Herd"),
 }
 
 PRODUCT_FAMILY_MAP: Dict[str, str] = {
+    "Female Kids": "Breeding Transfers & External Kid Sales",
+    "Male Kids": "Breeding Transfers & External Kid Sales",
     "Milk": "Dairy",
     "Cheese": "Dairy",
     "Meat": "Livestock Sales & By-Products",
@@ -1359,6 +1369,18 @@ PRODUCT_FAMILY_MAP: Dict[str, str] = {
 }
 
 PRODUCT_DEFAULTS: Dict[str, dict[str, Any]] = {
+    "Female Kids": {
+        "unit": "Head",
+        "base_price": 180.00,
+        "price_growth_pct": 2.5,
+        "default_active": True,
+    },
+    "Male Kids": {
+        "unit": "Head",
+        "base_price": 150.00,
+        "price_growth_pct": 2.5,
+        "default_active": True,
+    },
     "Milk": {
         "unit": "Litre",
         "base_price": 4.00,
@@ -1411,6 +1433,30 @@ def _active_products_for_business_type(business_type: Any) -> list[str]:
     return list(BUSINESS_TYPE_ACTIVE_PRODUCTS.get(normalized, BUSINESS_TYPE_ACTIVE_PRODUCTS[DEFAULT_BUSINESS_TYPE]))
 
 
+def _normalize_operating_model(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    for option in OPERATING_MODEL_OPTIONS:
+        if cleaned.casefold() == option.casefold():
+            return option
+    return DEFAULT_OPERATING_MODEL
+
+
+def _normalize_reporting_view(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    for option in REPORTING_VIEW_OPTIONS:
+        if cleaned.casefold() == option.casefold():
+            return option
+    return DEFAULT_REPORTING_VIEW
+
+
+def _normalize_transfer_pricing_method(value: Any) -> str:
+    cleaned = str(value or "").strip()
+    for option in TRANSFER_PRICING_METHOD_OPTIONS:
+        if cleaned.casefold() == option.casefold():
+            return option
+    return DEFAULT_TRANSFER_PRICING_METHOD
+
+
 def _default_pricing_row_templates(products: Optional[Sequence[str]] = None) -> list[dict[str, object]]:
     product_list = list(products) if products is not None else list(ALL_MODEL_PRODUCTS)
     rows: list[dict[str, object]] = []
@@ -1421,6 +1467,8 @@ def _default_pricing_row_templates(products: Optional[Sequence[str]] = None) -> 
         rows.append(
             {
                 "Product": str(product).strip(),
+                "Business Unit": "Breeding" if str(product).strip() in BREEDING_PRODUCTS else DEFAULT_BUSINESS_TYPE,
+                "Revenue Channel": "External",
                 "Unit": str(defaults.get("unit", "Unit")).strip() or "Unit",
                 "Base Price": float(defaults.get("base_price", 0.0) or 0.0),
                 "Price Growth %": float(defaults.get("price_growth_pct", 0.0) or 0.0),
@@ -1434,9 +1482,45 @@ def _default_production_driver_row_templates(
     products: Optional[Sequence[str]] = None,
 ) -> list[dict[str, object]]:
     all_rows: Dict[str, dict[str, object]] = {
+        "Female Kids": {
+            "Product": "Female Kids",
+            "Unit": "Head",
+            "Business Unit": "Breeding",
+            "Quantity Source": "Breeding External Sales",
+            "Quantity Mode": "Derived",
+            "Lactating Herd Share %": 0.0,
+            "Litres per Lactating Doe per Day": 0.0,
+            "Milk Allocation to Cheese %": 0.0,
+            "Cheese Yield Kg per Litre": 0.0,
+            "Slaughter Rate % of Herd per Period": 0.0,
+            "Live Herd Sales Share %": 0.0,
+            "Meat Yield Kg per Goat": 0.0,
+            "Offal Yield Kg per Goat": 0.0,
+            "Pelt Units per Goat": 0.0,
+            "Driver Growth %": 0.0,
+        },
+        "Male Kids": {
+            "Product": "Male Kids",
+            "Unit": "Head",
+            "Business Unit": "Breeding",
+            "Quantity Source": "Breeding External Sales",
+            "Quantity Mode": "Derived",
+            "Lactating Herd Share %": 0.0,
+            "Litres per Lactating Doe per Day": 0.0,
+            "Milk Allocation to Cheese %": 0.0,
+            "Cheese Yield Kg per Litre": 0.0,
+            "Slaughter Rate % of Herd per Period": 0.0,
+            "Live Herd Sales Share %": 0.0,
+            "Meat Yield Kg per Goat": 0.0,
+            "Offal Yield Kg per Goat": 0.0,
+            "Pelt Units per Goat": 0.0,
+            "Driver Growth %": 0.0,
+        },
         "Milk": {
             "Product": "Milk",
             "Unit": "Litre",
+            "Business Unit": "Milk-Cheese",
+            "Quantity Source": "Lactating Herd",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 55.0,
             "Litres per Lactating Doe per Day": 4.0,
@@ -1452,6 +1536,8 @@ def _default_production_driver_row_templates(
         "Cheese": {
             "Product": "Cheese",
             "Unit": "Kg",
+            "Business Unit": "Milk-Cheese",
+            "Quantity Source": "Lactating Herd",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 55.0,
             "Litres per Lactating Doe per Day": 4.0,
@@ -1467,6 +1553,8 @@ def _default_production_driver_row_templates(
         "Meat": {
             "Product": "Meat",
             "Unit": "Kg",
+            "Business Unit": "Meat",
+            "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
             "Litres per Lactating Doe per Day": 0.0,
@@ -1482,6 +1570,8 @@ def _default_production_driver_row_templates(
         "Offal": {
             "Product": "Offal",
             "Unit": "Kg",
+            "Business Unit": "Meat",
+            "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
             "Litres per Lactating Doe per Day": 0.0,
@@ -1497,6 +1587,8 @@ def _default_production_driver_row_templates(
         "Pelt": {
             "Product": "Pelt",
             "Unit": "Piece",
+            "Business Unit": "Meat",
+            "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
             "Litres per Lactating Doe per Day": 0.0,
@@ -1512,6 +1604,8 @@ def _default_production_driver_row_templates(
         "Live Herd": {
             "Product": "Live Herd",
             "Unit": "Head",
+            "Business Unit": "Meat",
+            "Quantity Source": "Slaughter Output",
             "Quantity Mode": "Derived",
             "Lactating Herd Share %": 0.0,
             "Litres per Lactating Doe per Day": 0.0,
@@ -2429,6 +2523,8 @@ DEFAULT_PRODUCTION_DRIVER_ROWS = _default_production_driver_row_templates()
 _PRODUCTION_DRIVER_REQUIRED_COLUMNS = [
     "Product",
     "Unit",
+    "Business Unit",
+    "Quantity Source",
     "Quantity Mode",
     "Lactating Herd Share %",
     "Litres per Lactating Doe per Day",
@@ -2462,6 +2558,7 @@ _PRODUCTION_DRIVER_SLAUGHTER_PRODUCTS = ("Meat", "Offal", "Pelt", "Live Herd")
 DEFAULT_OPERATING_COST_ROWS = [
     {
         "Year": 2024,
+        "Business Unit": "General",
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "unit_cost_per_head_per_month": 6.64,
@@ -2469,6 +2566,7 @@ DEFAULT_OPERATING_COST_ROWS = [
     },
     {
         "Year": 2025,
+        "Business Unit": "General",
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "unit_cost_per_head_per_month": 6.91,
@@ -2476,6 +2574,7 @@ DEFAULT_OPERATING_COST_ROWS = [
     },
     {
         "Year": 2024,
+        "Business Unit": "General",
         "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
         "unit_cost_per_head_per_month": 1.41,
@@ -2483,6 +2582,7 @@ DEFAULT_OPERATING_COST_ROWS = [
     },
     {
         "Year": 2025,
+        "Business Unit": "General",
         "Field": "variable_healthcare_cost_per_herd",
         "Category": "Healthcare",
         "unit_cost_per_head_per_month": 1.46,
@@ -2490,6 +2590,7 @@ DEFAULT_OPERATING_COST_ROWS = [
     },
     {
         "Year": 2024,
+        "Business Unit": "General",
         "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
         "unit_cost_per_head_per_month": 0.94,
@@ -2497,6 +2598,7 @@ DEFAULT_OPERATING_COST_ROWS = [
     },
     {
         "Year": 2025,
+        "Business Unit": "General",
         "Field": "fixed_utility_cost_per_herd",
         "Category": "Utilities",
         "unit_cost_per_head_per_month": 0.96,
@@ -2634,6 +2736,10 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
     work["Product"] = _series_or_default(work, "Product", "").astype(str).str.strip()
     work.loc[work["Product"] == "", "Product"] = "Product"
     work["Unit"] = _series_or_default(work, "Unit", "").astype(str).str.strip()
+    work["Business Unit"] = _series_or_default(work, "Business Unit", DEFAULT_BUSINESS_TYPE).astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = DEFAULT_BUSINESS_TYPE
+    work["Quantity Source"] = _series_or_default(work, "Quantity Source", "Slaughter Output").astype(str).str.strip()
+    work.loc[work["Quantity Source"] == "", "Quantity Source"] = "Slaughter Output"
     work["Quantity Mode"] = _series_or_default(work, "Quantity Mode", "Derived").astype(str).str.strip()
     work.loc[~work["Quantity Mode"].isin(["Derived", "Manual Override"]), "Quantity Mode"] = "Derived"
 
@@ -2653,6 +2759,10 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
         default_row = defaults.get(product)
         if default_row is not None and not str(work.at[idx, "Unit"]).strip():
             work.at[idx, "Unit"] = str(default_row.get("Unit", "")).strip()
+        if default_row is not None and not str(work.at[idx, "Business Unit"]).strip():
+            work.at[idx, "Business Unit"] = str(default_row.get("Business Unit", DEFAULT_BUSINESS_TYPE)).strip()
+        if default_row is not None and not str(work.at[idx, "Quantity Source"]).strip():
+            work.at[idx, "Quantity Source"] = str(default_row.get("Quantity Source", "Slaughter Output")).strip()
 
     remainder = [col for col in work.columns if col not in _PRODUCTION_DRIVER_REQUIRED_COLUMNS]
     return work[list(_PRODUCTION_DRIVER_REQUIRED_COLUMNS) + remainder].reset_index(drop=True)
@@ -2920,6 +3030,7 @@ DEFAULT_FINISHING_SLAUGHTER_ROWS = [
 DEFAULT_OPENING_HERD_COHORTS = [
     {
         "Cohort ID": "BD-001",
+        "Business Unit": "Breeding",
         "Sex": "Female",
         "Purpose": "breeding_doe",
         "Age in Months": 30.0,
@@ -2931,6 +3042,7 @@ DEFAULT_OPENING_HERD_COHORTS = [
     },
     {
         "Cohort ID": "BB-001",
+        "Business Unit": "Breeding",
         "Sex": "Male",
         "Purpose": "breeding_buck",
         "Age in Months": 36.0,
@@ -2942,6 +3054,7 @@ DEFAULT_OPENING_HERD_COHORTS = [
     },
     {
         "Cohort ID": "RD-001",
+        "Business Unit": "Breeding",
         "Sex": "Female",
         "Purpose": "replacement_doe",
         "Age in Months": 10.0,
@@ -2953,6 +3066,7 @@ DEFAULT_OPENING_HERD_COHORTS = [
     },
     {
         "Cohort ID": "FF-001",
+        "Business Unit": "Breeding",
         "Sex": "Female",
         "Purpose": "finishing_female",
         "Age in Months": 5.0,
@@ -2964,6 +3078,7 @@ DEFAULT_OPENING_HERD_COHORTS = [
     },
     {
         "Cohort ID": "MF-001",
+        "Business Unit": "Breeding",
         "Sex": "Male",
         "Purpose": "finishing_male",
         "Age in Months": 5.0,
@@ -3165,9 +3280,10 @@ def _normalize_finishing_slaughter_biology_table(table: pd.DataFrame) -> pd.Data
 
 def _normalize_opening_herd_cohorts_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
-    for column in ["Cohort ID", "Sex", "Purpose"]:
+    for column in ["Cohort ID", "Business Unit", "Sex", "Purpose"]:
         work[column] = _series_or_default(work, column, "").fillna("").astype(str).str.strip()
     work.loc[work["Cohort ID"] == "", "Cohort ID"] = "COHORT"
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "Breeding"
     work.loc[work["Sex"] == "", "Sex"] = "Female"
     work.loc[work["Purpose"] == "", "Purpose"] = "replacement_doe"
     for column in ["Age in Months", "Head Count", "Parity", "Days in Milk"]:
@@ -3190,8 +3306,9 @@ def _normalize_cohort_allocation_rules_table(table: pd.DataFrame) -> pd.DataFram
 
 def _normalize_biological_cost_drivers_table(table: pd.DataFrame) -> pd.DataFrame:
     work = table.copy()
-    for column in ["Field", "Category", "Applies To"]:
+    for column in ["Business Unit", "Field", "Category", "Applies To"]:
         work[column] = _series_or_default(work, column, "").fillna("").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "Breeding"
     work.loc[work["Field"] == "", "Field"] = "variable_feed_cost_per_herd"
     work.loc[work["Category"] == "", "Category"] = "Feed"
     work.loc[work["Applies To"] == "", "Applies To"] = "total_herd"
@@ -3386,6 +3503,10 @@ def _assumption_bundle_ensure_map() -> dict[str, Callable[[Optional[pd.DataFrame
         "Opening Herd Cohorts": _ensure_opening_herd_cohorts_table,
         "Cohort Allocation Rules": _ensure_cohort_allocation_rules_table,
         "Biological Cost Drivers": _ensure_biological_cost_drivers_table,
+        "Kid Routing Rules": _ensure_kid_routing_rules_table,
+        "Internal Transfer Pricing": _ensure_internal_transfer_pricing_table,
+        "Downstream Intake Rules": _ensure_downstream_intake_rules_table,
+        "Transfer Elimination Rules": _ensure_transfer_elimination_rules_table,
         "Pricing": _ensure_pricing_table,
         "Production Drivers": _ensure_production_driver_table,
         "Scenario Controls": _ensure_scenario_controls_table,
@@ -3399,7 +3520,9 @@ def _assumption_bundle_ensure_map() -> dict[str, Callable[[Optional[pd.DataFrame
 
 
 def _build_app_assumption_bundle(assumptions: Optional[dict[str, pd.DataFrame]]) -> AssumptionBundle:
-    synced_assumptions = _sync_opening_herd_cohorts_in_assumptions(assumptions)
+    synced_assumptions = _sync_transfer_tables_to_business_configuration(
+        _sync_opening_herd_cohorts_in_assumptions(assumptions)
+    )
     return build_assumption_bundle(synced_assumptions, _assumption_bundle_ensure_map())
 
 
@@ -4216,7 +4339,7 @@ def _derive_biological_schedules(
     kid_cohort_schedule = pd.DataFrame(kid_cohort_rows).set_index("Period")
     breeding_schedule = pd.DataFrame(breeding_rows).set_index("Period")
 
-    return {
+    outputs = {
         "Biological Herd Summary": summary,
         "Pregnancy Schedule": pregnancy_schedule,
         "Kidding Schedule": kidding_schedule,
@@ -4228,6 +4351,451 @@ def _derive_biological_schedules(
         "Replacement Schedule": replacement_schedule,
         "Breeding Herd Schedule": breeding_schedule,
     }
+    if _is_breeding_to_unit_mode(assumption_map):
+        outputs.update(
+            _derive_breeding_to_unit_outputs(
+                schedule_df,
+                assumption_map,
+                outputs,
+            )
+        )
+    return outputs
+
+
+def _transfer_price_lookup(
+    period: pd.Timestamp,
+    destination: str,
+    pricing_table: pd.DataFrame,
+    transfer_class: str = "Weaned Kid",
+) -> tuple[float, str]:
+    pricing = _ensure_internal_transfer_pricing_table(pricing_table)
+    if pricing.empty:
+        return 0.0, DEFAULT_TRANSFER_PRICING_METHOD
+    mask = pricing["Active"].fillna(True).astype(bool)
+    mask &= pricing["Destination"].astype(str).str.strip().eq(destination)
+    mask &= pricing["Transfer Class"].astype(str).str.strip().eq(transfer_class)
+    period_key = period.strftime("%Y-%m-%d")
+    matched = pricing.loc[
+        mask
+        & (
+            pricing["Period"].isna()
+            | pricing["Period"].astype(str).eq("")
+            | pricing["Period"].astype(str).eq(period_key)
+        )
+    ].copy()
+    if matched.empty:
+        matched = pricing.loc[mask].copy()
+    if matched.empty:
+        return 0.0, DEFAULT_TRANSFER_PRICING_METHOD
+    row = matched.iloc[-1]
+    base_value = pd.to_numeric(pd.Series([row.get("Transfer Price per Head")]), errors="coerce").iloc[0]
+    markup = pd.to_numeric(pd.Series([row.get("Markup %")]), errors="coerce").iloc[0]
+    method = _normalize_transfer_pricing_method(row.get("Pricing Method"))
+    base_price = float(base_value) if pd.notna(base_value) else 0.0
+    markup_pct = float(markup) if pd.notna(markup) else 0.0
+    if method == "Zero":
+        return 0.0, method
+    if method == "Cost Plus":
+        return base_price * (1.0 + markup_pct / 100.0), method
+    return base_price, method
+
+
+def _external_price_lookup(
+    pricing_table: pd.DataFrame,
+    product: str,
+    period: pd.Timestamp,
+) -> float:
+    pricing = _ensure_pricing_table(pricing_table)
+    if pricing.empty:
+        return 0.0
+    period_key = period.strftime("%Y-%m-%d")
+    mask = pricing["Product"].astype(str).str.strip().eq(product)
+    mask &= pricing["Revenue Channel"].astype(str).str.strip().eq("External")
+    period_match = pricing.loc[mask & pricing["Period"].astype(str).eq(period_key)]
+    target = period_match if not period_match.empty else pricing.loc[mask]
+    prices = pd.to_numeric(target.get("Base Price"), errors="coerce").dropna()
+    return float(prices.iloc[-1]) if not prices.empty else 0.0
+
+
+def _routing_rows_for_period(
+    routing_table: pd.DataFrame,
+    sex: str,
+    period_key: str,
+    destination: str,
+    allow_external_sales: bool,
+) -> pd.DataFrame:
+    routing = _ensure_kid_routing_rules_table(routing_table)
+    rows = routing.loc[
+        routing["Active"].fillna(True).astype(bool)
+        & routing["Sex"].astype(str).str.strip().str.casefold().eq(sex.casefold())
+    ].copy()
+    if rows.empty:
+        default_destination = destination or ("External Sale" if allow_external_sales else "Meat")
+        rows = pd.DataFrame(
+            {
+                "Period": [None],
+                "Sex": [sex],
+                "Transfer Class": ["Weaned Kid"],
+                "Destination": [default_destination],
+                "Allocation %": [100.0],
+                "Priority": [1.0],
+                "Min Head": [0.0],
+                "Max Head": [np.nan],
+                "Active": [True],
+            }
+        )
+    period_rows = rows.loc[
+        rows["Period"].isna()
+        | rows["Period"].astype(str).eq("")
+        | rows["Period"].astype(str).eq(period_key)
+    ].copy()
+    if period_rows.empty:
+        period_rows = rows.copy()
+    period_rows = period_rows.sort_values("Priority", kind="stable")
+    return period_rows.reset_index(drop=True)
+
+
+def _build_downstream_unit_schedule(
+    summary: pd.DataFrame,
+    intake_schedule: pd.DataFrame,
+    assumptions: Dict[str, pd.DataFrame],
+    destination: str,
+) -> pd.DataFrame:
+    if summary.empty or intake_schedule.empty:
+        return pd.DataFrame()
+    bundle = _build_app_assumption_bundle(assumptions)
+    finishing = bundle.biological.finishing_slaughter
+    lactation = bundle.biological.lactation
+    production_drivers = _ensure_production_driver_table(bundle.commercial.production_drivers)
+    pricing = _ensure_pricing_table(bundle.commercial.pricing)
+    intake_rules = _ensure_downstream_intake_rules_table(bundle.commercial.downstream_intake_rules)
+    finishing_row = _active_first_row(finishing, finishing.iloc[0] if not finishing.empty else None)
+    lactation_lookup = _build_lactation_lookup(lactation)
+    reproduction = bundle.biological.breeding_reproduction
+    reproduction_row = _active_first_row(reproduction, reproduction.iloc[0] if not reproduction.empty else None)
+    periods = pd.DatetimeIndex(pd.to_datetime(summary.index, errors="coerce")).sort_values()
+    period_days = _period_days_from_index(periods)
+    median_months = float(period_days.median() / 30.44) if not period_days.empty else 1.0
+    grain_months = max(median_months, 1.0)
+
+    months_to_market_weight = max(
+        float(pd.to_numeric(pd.Series([finishing_row.get("Months to Market Weight")]), errors="coerce").iloc[0] or 7.0),
+        1.0,
+    )
+    live_sale_share = max(
+        float(pd.to_numeric(pd.Series([finishing_row.get("Live Herd Sales Share %")]), errors="coerce").iloc[0] or 0.0),
+        0.0,
+    ) / 100.0
+    meat_yield = float(pd.to_numeric(pd.Series([finishing_row.get("Meat Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0)
+    offal_yield = float(pd.to_numeric(pd.Series([finishing_row.get("Offal Yield Kg per Goat")]), errors="coerce").iloc[0] or 0.0)
+    pelt_units = float(pd.to_numeric(pd.Series([finishing_row.get("Pelt Units per Goat")]), errors="coerce").iloc[0] or 0.0)
+    age_at_first_kidding = max(
+        float(pd.to_numeric(pd.Series([reproduction_row.get("Age at First Kidding (months)")]), errors="coerce").iloc[0] or 18.0),
+        1.0,
+    )
+    gestation_months = max(
+        float(pd.to_numeric(pd.Series([reproduction_row.get("Gestation Months")]), errors="coerce").iloc[0] or 5.0),
+        1.0,
+    )
+    milk_driver = production_drivers.loc[production_drivers["Product"].astype(str).eq("Milk")]
+    cheese_driver = production_drivers.loc[production_drivers["Product"].astype(str).eq("Cheese")]
+    milk_per_day = float(pd.to_numeric(milk_driver.get("Litres per Lactating Doe per Day"), errors="coerce").dropna().iloc[0]) if not milk_driver.empty else 0.0
+    cheese_alloc = float(pd.to_numeric(cheese_driver.get("Milk Allocation to Cheese %"), errors="coerce").dropna().iloc[0]) if not cheese_driver.empty else 0.0
+    cheese_yield = float(pd.to_numeric(cheese_driver.get("Cheese Yield Kg per Litre"), errors="coerce").dropna().iloc[0]) if not cheese_driver.empty else 0.0
+    lactation_days = float(pd.to_numeric(pd.Series([next(iter(lactation_lookup.values()), {}).get("Lactation Length Days")]), errors="coerce").iloc[0] or 260.0)
+
+    meat_queue: list[float] = []
+    milk_queue: list[float] = []
+    rows: list[dict[str, Any]] = []
+    for idx, period in enumerate(periods):
+        period_key = period.strftime("%Y-%m-%d")
+        period_intake = intake_schedule.loc[intake_schedule["Period"].astype(str).eq(period_key)].copy()
+        female_intake = pd.to_numeric(
+            period_intake.loc[period_intake["Sex"].astype(str).str.casefold().eq("female"), "Head Count"],
+            errors="coerce",
+        ).sum()
+        male_intake = pd.to_numeric(
+            period_intake.loc[period_intake["Sex"].astype(str).str.casefold().eq("male"), "Head Count"],
+            errors="coerce",
+        ).sum()
+        finishing_heads = 0.0
+        lactation_heads = 0.0
+        if destination in {"Meat", "Combined"}:
+            meat_rules = intake_rules.loc[
+                intake_rules["Active"].fillna(True).astype(bool)
+                & intake_rules["Destination"].astype(str).eq(destination)
+                & intake_rules["Eligible for Finishing"].fillna(False).astype(bool)
+            ]
+            female_finish = female_intake if not meat_rules.empty else 0.0
+            male_finish = male_intake if not meat_rules.empty else 0.0
+            if destination == "Combined":
+                female_finish = pd.to_numeric(
+                    meat_rules.loc[meat_rules["Sex"].astype(str).str.casefold().eq("female"), "Active"], errors="coerce"
+                ).count() and female_intake or 0.0
+            entry_age = pd.to_numeric(meat_rules.get("Entry Age Months"), errors="coerce").dropna()
+            lag_periods = max(int(np.ceil(max(months_to_market_weight - float(entry_age.iloc[0]) if not entry_age.empty else months_to_market_weight, 1.0) / grain_months)), 1)
+            meat_queue.append(float(female_finish + male_finish))
+            if len(meat_queue) > lag_periods:
+                finishing_heads = float(meat_queue.pop(0))
+        if destination in {"Milk-Cheese", "Combined"}:
+            milk_rules = intake_rules.loc[
+                intake_rules["Active"].fillna(True).astype(bool)
+                & intake_rules["Destination"].astype(str).eq(destination)
+                & intake_rules["Eligible for Lactation"].fillna(False).astype(bool)
+                & intake_rules["Sex"].astype(str).str.casefold().eq("female")
+            ]
+            female_dairy = float(female_intake) if not milk_rules.empty else 0.0
+            entry_age = pd.to_numeric(milk_rules.get("Entry Age Months"), errors="coerce").dropna()
+            entry_months = float(entry_age.iloc[0]) if not entry_age.empty else 3.0
+            lag_periods = max(int(np.ceil(max((age_at_first_kidding + gestation_months) - entry_months, 1.0) / grain_months)), 1)
+            milk_queue.append(female_dairy)
+            if len(milk_queue) > lag_periods:
+                lactation_heads = float(milk_queue.pop(0))
+        live_sales = finishing_heads * live_sale_share
+        slaughter_heads = max(finishing_heads - live_sales, 0.0)
+        milk_output = lactation_heads * milk_per_day * float(period_days.iloc[idx]) if idx < len(period_days) else 0.0
+        cheese_output = milk_output * (cheese_alloc / 100.0) * cheese_yield
+        direct_revenue = (
+            live_sales * _external_price_lookup(pricing, "Live Herd", period)
+            + (slaughter_heads * meat_yield) * _external_price_lookup(pricing, "Meat", period)
+            + (slaughter_heads * offal_yield) * _external_price_lookup(pricing, "Offal", period)
+            + (slaughter_heads * pelt_units) * _external_price_lookup(pricing, "Pelt", period)
+            + milk_output * _external_price_lookup(pricing, "Milk", period)
+            + cheese_output * _external_price_lookup(pricing, "Cheese", period)
+        )
+        rows.append(
+            {
+                "Period": period,
+                "Business Unit": destination,
+                "Female Transfer Intake": female_intake,
+                "Male Transfer Intake": male_intake,
+                "Lactating Does": lactation_heads,
+                "Milk Production (L)": milk_output,
+                "Cheese Output Kg": cheese_output,
+                "Saleable Goats (heads)": finishing_heads,
+                "Live Herd Sales (heads)": live_sales,
+                "Slaughter Heads": slaughter_heads,
+                "Meat Output Kg": slaughter_heads * meat_yield,
+                "Offal Output Kg": slaughter_heads * offal_yield,
+                "Pelt Output Units": slaughter_heads * pelt_units,
+                "Revenue": direct_revenue,
+            }
+        )
+    return pd.DataFrame(rows).set_index("Period")
+
+
+def _derive_breeding_to_unit_outputs(
+    schedule_df: pd.DataFrame,
+    assumptions: Dict[str, pd.DataFrame],
+    base_outputs: Dict[str, pd.DataFrame],
+) -> Dict[str, pd.DataFrame]:
+    destination = _selected_transfer_destination(assumptions)
+    if not destination:
+        return {}
+    summary = base_outputs.get("Biological Herd Summary", pd.DataFrame())
+    replacement_schedule = base_outputs.get("Replacement Schedule", pd.DataFrame())
+    if summary.empty:
+        return {}
+    bundle = _build_app_assumption_bundle(assumptions)
+    pricing = bundle.commercial.pricing
+    routing_rules = bundle.commercial.kid_routing_rules
+    transfer_pricing = bundle.commercial.internal_transfer_pricing
+    allow_external_sales = _allow_external_kid_sales(assumptions)
+    kid_rows: list[dict[str, Any]] = []
+    routing_rows: list[dict[str, Any]] = []
+    transfer_rows: list[dict[str, Any]] = []
+    external_rows: list[dict[str, Any]] = []
+    breeding_rows: list[dict[str, Any]] = []
+    elimination_rows: list[dict[str, Any]] = []
+
+    for period, row in summary.iterrows():
+        timestamp = pd.Timestamp(period)
+        period_key = timestamp.strftime("%Y-%m-%d")
+        replacement_retained = 0.0
+        if isinstance(replacement_schedule, pd.DataFrame) and not replacement_schedule.empty and period in replacement_schedule.index:
+            replacement_retained = float(
+                pd.to_numeric(
+                    pd.Series([replacement_schedule.loc[period].get("Replacement Retained")]),
+                    errors="coerce",
+                ).iloc[0]
+                or 0.0
+            )
+        female_kids = float(pd.to_numeric(pd.Series([row.get("Female Kids")]), errors="coerce").iloc[0] or 0.0)
+        male_kids = float(pd.to_numeric(pd.Series([row.get("Male Kids")]), errors="coerce").iloc[0] or 0.0)
+        female_available = max(female_kids - replacement_retained, 0.0)
+        male_available = max(male_kids, 0.0)
+        kid_rows.append(
+            {
+                "Period": timestamp,
+                "Female Kids Available": female_available,
+                "Male Kids Available": male_available,
+                "Replacement Retained": replacement_retained,
+                "Internal Destination": destination,
+            }
+        )
+
+        internal_revenue = 0.0
+        external_revenue = 0.0
+        for sex, available in (("Female", female_available), ("Male", male_available)):
+            remaining = float(available)
+            period_rules = _routing_rows_for_period(
+                routing_rules,
+                sex,
+                period_key,
+                destination,
+                allow_external_sales,
+            )
+            for _, rule in period_rules.iterrows():
+                if remaining <= 0:
+                    break
+                alloc_pct = float(pd.to_numeric(pd.Series([rule.get("Allocation %")]), errors="coerce").iloc[0] or 0.0)
+                min_head = float(pd.to_numeric(pd.Series([rule.get("Min Head")]), errors="coerce").iloc[0] or 0.0)
+                max_head_raw = pd.to_numeric(pd.Series([rule.get("Max Head")]), errors="coerce").iloc[0]
+                alloc_head = remaining * alloc_pct / 100.0
+                alloc_head = max(alloc_head, min_head)
+                if pd.notna(max_head_raw):
+                    alloc_head = min(alloc_head, float(max_head_raw))
+                alloc_head = min(alloc_head, remaining)
+                alloc_head = max(alloc_head, 0.0)
+                if alloc_head <= 0:
+                    continue
+                target = str(rule.get("Destination", destination)).strip() or destination
+                if target == "External Sale" and not allow_external_sales:
+                    target = destination
+                routing_rows.append(
+                    {
+                        "Period": timestamp,
+                        "Sex": sex,
+                        "Transfer Class": "Weaned Kid",
+                        "Destination": target,
+                        "Head Count": alloc_head,
+                        "Allocation %": alloc_pct,
+                    }
+                )
+                if target == "External Sale":
+                    product = f"{sex} Kids"
+                    price = _external_price_lookup(pricing, product, timestamp)
+                    revenue = alloc_head * price
+                    external_revenue += revenue
+                    external_rows.append(
+                        {
+                            "Period": timestamp,
+                            "Product": product,
+                            "Head Count": alloc_head,
+                            "Price per Head": price,
+                            "Revenue": revenue,
+                        }
+                    )
+                else:
+                    price, method = _transfer_price_lookup(timestamp, target, transfer_pricing)
+                    value = alloc_head * price
+                    internal_revenue += value
+                    transfer_rows.append(
+                        {
+                            "Period": timestamp,
+                            "Destination": target,
+                            "Sex": sex,
+                            "Transfer Class": "Weaned Kid",
+                            "Head Count": alloc_head,
+                            "Pricing Method": method,
+                            "Transfer Price per Head": price,
+                            "Transfer Value": value,
+                        }
+                    )
+                remaining -= alloc_head
+            if remaining > 1e-9:
+                fallback_target = "External Sale" if allow_external_sales else destination
+                routing_rows.append(
+                    {
+                        "Period": timestamp,
+                        "Sex": sex,
+                        "Transfer Class": "Weaned Kid",
+                        "Destination": fallback_target,
+                        "Head Count": remaining,
+                        "Allocation %": 100.0,
+                    }
+                )
+        breeding_rows.append(
+            {
+                "Period": timestamp,
+                "Business Unit": "Breeding",
+                "Breeding Does": row.get("Breeding Does", 0.0),
+                "Breeding Bucks": row.get("Breeding Bucks", 0.0),
+                "Replacement Does": row.get("Replacement Does", 0.0),
+                "Female Kids Available": female_available,
+                "Male Kids Available": male_available,
+                "External Kid Sales Revenue": external_revenue,
+                "Internal Transfer Revenue": internal_revenue,
+                "Revenue": external_revenue + internal_revenue,
+            }
+        )
+        elimination_rows.append(
+            {
+                "Period": timestamp,
+                "Destination": destination,
+                "Internal Transfer Revenue": internal_revenue,
+                "Internal Transfer Cost": internal_revenue,
+                "Revenue Elimination": -internal_revenue,
+                "Cost Elimination": -internal_revenue,
+            }
+        )
+
+    kid_availability = pd.DataFrame(kid_rows).set_index("Period")
+    routing_schedule = pd.DataFrame(routing_rows)
+    internal_transfer_schedule = pd.DataFrame(transfer_rows)
+    external_sales_schedule = pd.DataFrame(external_rows)
+    intake_schedule = internal_transfer_schedule.rename(columns={"Destination": "Business Unit"}).copy()
+    if not intake_schedule.empty:
+        intake_schedule["Intake Source"] = "Breeding"
+    downstream_schedule = _build_downstream_unit_schedule(
+        summary,
+        intake_schedule if not intake_schedule.empty else pd.DataFrame(columns=["Period", "Head Count", "Sex"]),
+        assumptions,
+        destination,
+    )
+    breeding_unit_schedule = pd.DataFrame(breeding_rows).set_index("Period")
+    unit_bridge = pd.DataFrame(index=pd.to_datetime(summary.index, errors="coerce"))
+    unit_bridge.index.name = "Period"
+    unit_bridge["Breeding External Revenue"] = (
+        breeding_unit_schedule.reindex(unit_bridge.index)["External Kid Sales Revenue"].fillna(0.0)
+        if not breeding_unit_schedule.empty
+        else 0.0
+    )
+    unit_bridge["Breeding Internal Revenue"] = (
+        breeding_unit_schedule.reindex(unit_bridge.index)["Internal Transfer Revenue"].fillna(0.0)
+        if not breeding_unit_schedule.empty
+        else 0.0
+    )
+    unit_bridge["Destination External Revenue"] = (
+        downstream_schedule.reindex(unit_bridge.index)["Revenue"].fillna(0.0)
+        if not downstream_schedule.empty
+        else 0.0
+    )
+    unit_bridge["Elimination"] = -pd.to_numeric(unit_bridge["Breeding Internal Revenue"], errors="coerce").fillna(0.0)
+    unit_bridge["Consolidated Revenue"] = (
+        pd.to_numeric(unit_bridge["Breeding External Revenue"], errors="coerce").fillna(0.0)
+        + pd.to_numeric(unit_bridge["Destination External Revenue"], errors="coerce").fillna(0.0)
+    )
+    outputs = {
+        "Kid Availability Schedule": kid_availability,
+        "Kid Routing Schedule": routing_schedule.set_index("Period") if not routing_schedule.empty else pd.DataFrame(),
+        "Internal Transfer Schedule": internal_transfer_schedule.set_index("Period") if not internal_transfer_schedule.empty else pd.DataFrame(),
+        "Breeding External Sales Schedule": external_sales_schedule.set_index("Period") if not external_sales_schedule.empty else pd.DataFrame(),
+        "Downstream Intake Schedule": intake_schedule.set_index("Period") if not intake_schedule.empty else pd.DataFrame(),
+        "Breeding Unit Schedule": breeding_unit_schedule,
+        "Destination Unit Schedule": downstream_schedule,
+        "Internal Transfer Elimination Schedule": pd.DataFrame(elimination_rows).set_index("Period"),
+        "Unit Revenue Bridge": unit_bridge,
+    }
+    reporting_views = _build_reporting_unit_schedules(
+        schedule_df,
+        assumptions,
+        outputs,
+        pricing_table=pricing,
+    )
+    for entity, report_schedule in reporting_views.items():
+        outputs[f"Reporting Schedule - {entity}"] = report_schedule
+    return outputs
 
 
 def _apply_biological_assumptions_to_schedule(
@@ -4297,6 +4865,8 @@ def _default_pricing_table_from_core(
                 {
                     "Period": period,
                     "Product": product,
+                    "Business Unit": str(row.get("Business Unit", business_type)).strip() or str(business_type),
+                    "Revenue Channel": str(row.get("Revenue Channel", "External")).strip() or "External",
                     "Active": is_active,
                     "Allocation %": 100.0 if is_active else 0.0,
                     "Quantity Mode": "Derived",
@@ -4315,6 +4885,8 @@ def _default_pricing_table_from_core(
             {
                 "Period": ["2024-01-31"],
                 "Product": ["Milk"],
+                "Business Unit": [DEFAULT_BUSINESS_TYPE],
+                "Revenue Channel": ["External"],
                 "Active": [True],
                 "Allocation %": [100.0],
                 "Quantity Mode": ["Derived"],
@@ -4508,6 +5080,40 @@ def _period_year_offsets(periods: Sequence[str]) -> list[int]:
     return offsets
 
 
+def _normalize_business_unit_name(value: Any, default: str = "General") -> str:
+    unit = str(value or "").strip()
+    return unit or default
+
+
+def _sum_schedule_amounts_by_business_unit(
+    table: pd.DataFrame,
+    core: pd.DataFrame,
+    ensure_fn: Callable[[Optional[pd.DataFrame], pd.DataFrame], pd.DataFrame],
+    value_column: str,
+) -> pd.DataFrame:
+    work = ensure_fn(table, core)
+    periods = _normalize_period(core.get("Period", pd.Series(dtype=str)))
+    if work.empty:
+        return pd.DataFrame({"Period": periods})
+
+    grouped = (
+        work.groupby(["Period", "Business Unit"], as_index=False)[value_column].sum(min_count=1)
+        if {"Period", "Business Unit", value_column}.issubset(work.columns)
+        else pd.DataFrame(columns=["Period", "Business Unit", value_column])
+    )
+    if grouped.empty:
+        return pd.DataFrame({"Period": periods})
+
+    pivot = grouped.pivot(index="Period", columns="Business Unit", values=value_column)
+    pivot = pivot.reindex(periods, fill_value=0.0)
+    pivot.index.name = "Period"
+    pivot = pivot.reset_index()
+    ordered_cols = ["Period"] + [
+        col for col in pivot.columns if col != "Period"
+    ]
+    return pivot[ordered_cols]
+
+
 def _default_variable_expense_input_table() -> pd.DataFrame:
     base_revenue = float(_default_income_schedule(periods=1)["Revenue"].iloc[0])
     records: list[dict[str, object]] = []
@@ -4515,6 +5121,7 @@ def _default_variable_expense_input_table() -> pd.DataFrame:
         amount = base_revenue * share if share is not None else np.nan
         records.append(
             {
+                "Business Unit": "General",
                 "Item": item,
                 "Amount per Period": amount,
                 "Yearly Increase %": 0.0,
@@ -4531,11 +5138,13 @@ def _ensure_variable_expense_input_table(
     else:
         work = table.copy()
 
-    required_cols = ["Item", "Amount per Period", "Yearly Increase %"]
+    required_cols = ["Business Unit", "Item", "Amount per Period", "Yearly Increase %"]
     for column in required_cols:
         if column not in work.columns:
             work[column] = np.nan
 
+    work["Business Unit"] = _series_or_default(work, "Business Unit", "General").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "General"
     work["Item"] = _series_or_default(work, "Item", "").astype(str).str.strip()
     work.loc[work["Item"] == "", "Item"] = "Variable Expense"
     work["Amount per Period"] = pd.to_numeric(
@@ -4563,6 +5172,7 @@ def _default_direct_wage_input_table() -> pd.DataFrame:
     for item in _direct_wage_default_items():
         records.append(
             {
+                "Business Unit": "General",
                 "Position": item.get("Position", "Direct Wage"),
                 "Head Count": item.get("Head Count"),
                 "Monthly Salary per Head": item.get("Monthly Salary per Head"),
@@ -4582,6 +5192,7 @@ def _ensure_direct_wage_input_table(
         work = table.copy()
 
     required_cols = [
+        "Business Unit",
         "Position",
         "Head Count",
         "Monthly Salary per Head",
@@ -4592,9 +5203,12 @@ def _ensure_direct_wage_input_table(
         if column not in work.columns:
             work[column] = np.nan
 
+    work["Business Unit"] = _series_or_default(work, "Business Unit", "General").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "General"
     records: list[dict[str, object]] = []
     for _, row in work.iterrows():
         item = _coerce_direct_wage_item(row, include_share=False)
+        item["Business Unit"] = str(row.get("Business Unit", "General")).strip() or "General"
         yearly_increase = pd.to_numeric(
             pd.Series([row.get("Yearly Increase %")]), errors="coerce"
         ).iloc[0]
@@ -4614,6 +5228,7 @@ def _default_admin_wage_input_table() -> pd.DataFrame:
     for item in _admin_wage_default_items():
         records.append(
             {
+                "Business Unit": "General",
                 "Position": item.get("Position", "Admin Wage"),
                 "Head Count": item.get("Head Count"),
                 "Monthly Salary per Head": item.get("Monthly Salary per Head"),
@@ -4633,6 +5248,7 @@ def _ensure_admin_wage_input_table(
         work = table.copy()
 
     required_cols = [
+        "Business Unit",
         "Position",
         "Head Count",
         "Monthly Salary per Head",
@@ -4643,9 +5259,12 @@ def _ensure_admin_wage_input_table(
         if column not in work.columns:
             work[column] = np.nan
 
+    work["Business Unit"] = _series_or_default(work, "Business Unit", "General").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "General"
     records: list[dict[str, object]] = []
     for _, row in work.iterrows():
         item = _coerce_admin_wage_item(row, include_share=False)
+        item["Business Unit"] = str(row.get("Business Unit", "General")).strip() or "General"
         yearly_increase = pd.to_numeric(
             pd.Series([row.get("Yearly Increase %")]), errors="coerce"
         ).iloc[0]
@@ -4699,6 +5318,7 @@ def _propagate_variable_expense_inputs_to_schedule(
             rows.append(
                 {
                     "Period": period,
+                    "Business Unit": row.get("Business Unit", "General"),
                     "Item": row.get("Item", "Variable Expense"),
                     "Amount": amount,
                 }
@@ -4738,6 +5358,7 @@ def _propagate_direct_wage_inputs_to_schedule(
             rows.append(
                 {
                     "Period": period,
+                    "Business Unit": row.get("Business Unit", "General"),
                     "Position": row.get("Position", "Direct Wage"),
                     "Head Count": headcount,
                     "Monthly Salary per Head": monthly_salary,
@@ -4779,6 +5400,7 @@ def _propagate_admin_wage_inputs_to_schedule(
             rows.append(
                 {
                     "Period": period,
+                    "Business Unit": row.get("Business Unit", "General"),
                     "Position": row.get("Position", "Admin Wage"),
                     "Head Count": headcount,
                     "Monthly Salary per Head": monthly_salary,
@@ -5021,6 +5643,8 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     required_cols = [
         "Period",
         "Product",
+        "Business Unit",
+        "Revenue Channel",
         "Active",
         "Allocation %",
         "Quantity Mode",
@@ -5037,6 +5661,10 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
     work["Product"] = _series_or_default(work, "Product", "").astype(str).str.strip()
     work.loc[work["Product"] == "", "Product"] = "Product"
+    work["Business Unit"] = _series_or_default(work, "Business Unit", DEFAULT_BUSINESS_TYPE).astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = DEFAULT_BUSINESS_TYPE
+    work["Revenue Channel"] = _series_or_default(work, "Revenue Channel", "External").astype(str).str.strip()
+    work.loc[~work["Revenue Channel"].isin(["External", "Internal"]), "Revenue Channel"] = "External"
     work["Active"] = _series_or_default(work, "Active", False).fillna(False).astype(bool)
     work["Allocation %"] = pd.to_numeric(work.get("Allocation %"), errors="coerce")
     work["Quantity Mode"] = _series_or_default(work, "Quantity Mode", "Derived").astype(str).str.strip()
@@ -5062,6 +5690,8 @@ def _ensure_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
         default_row = product_defaults.get(product, {})
         if not str(work.at[idx, "Unit"]).strip():
             work.at[idx, "Unit"] = str(default_row.get("Unit", "Unit")).strip() or "Unit"
+        if not str(work.at[idx, "Business Unit"]).strip():
+            work.at[idx, "Business Unit"] = str(default_row.get("Business Unit", DEFAULT_BUSINESS_TYPE)).strip()
         if pd.isna(work.at[idx, "Base Price"]):
             default_price = pd.to_numeric(
                 pd.Series([default_row.get("Base Price")]), errors="coerce"
@@ -5500,13 +6130,14 @@ def _default_operating_cost_table() -> pd.DataFrame:
     rows = _get_template("operating_rows", DEFAULT_OPERATING_COST_ROWS)
     table = _template_to_dataframe(
         rows,
-        ["Year", "Field", "Category", "unit_cost_per_head_per_month", "Inflation %"],
+        ["Year", "Business Unit", "Field", "Category", "unit_cost_per_head_per_month", "Inflation %"],
     )
 
     if table.empty:
         return pd.DataFrame(
             {
                 "Year": [pd.Timestamp.today().year],
+                "Business Unit": ["General"],
                 "Field": ["variable_feed_cost_per_herd"],
                 "Category": ["Operating Item"],
                 "unit_cost_per_head_per_month": [np.nan],
@@ -5526,7 +6157,11 @@ def _ensure_operating_cost_table(
     work = table.copy()
     if "Field" not in work.columns:
         work["Field"] = np.nan
+    if "Business Unit" not in work.columns:
+        work["Business Unit"] = "General"
     work["Year"] = pd.to_numeric(work.get("Year"), errors="coerce")
+    work["Business Unit"] = _series_or_default(work, "Business Unit", "General").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "General"
     work["Field"] = _series_or_default(work, "Field", "").astype(str).str.strip()
     work["Category"] = _series_or_default(work, "Category", "").astype(str).str.strip()
     work.loc[work["Category"] == "", "Category"] = np.nan
@@ -5577,6 +6212,7 @@ def _ensure_operating_cost_table(
 
     required_cols = [
         "Year",
+        "Business Unit",
         "Field",
         "Category",
         "unit_cost_per_head_per_month",
@@ -5600,6 +6236,7 @@ def _add_operating_cost_row(table: pd.DataFrame) -> pd.DataFrame:
         default_year = pd.Timestamp.today().year
     new_row = {
         "Year": default_year,
+        "Business Unit": "General",
         "Field": "variable_feed_cost_per_herd",
         "Category": "Feed",
         "unit_cost_per_head_per_month": np.nan,
@@ -5774,6 +6411,591 @@ def _apply_operating_cost_assumptions_to_schedule(
             work["Fixed Expenses"] = utility
 
     return _synchronize_financial_algorithms(work)
+
+
+def _zero_series(index: pd.Index) -> pd.Series:
+    return pd.Series(0.0, index=index, dtype=float)
+
+
+def _normalized_period_series_from_index(index: pd.Index) -> pd.Series:
+    period_index = pd.to_datetime(index, errors="coerce")
+    return pd.Series(
+        [
+            value.strftime("%Y-%m-%d") if pd.notna(value) else ""
+            for value in period_index
+        ],
+        index=index,
+        dtype="object",
+    )
+
+
+def _series_from_period_map(
+    period_map: dict[str, float],
+    index: pd.Index,
+) -> pd.Series:
+    normalized_map: dict[str, float] = {}
+    for raw_key, value in period_map.items():
+        timestamp = pd.to_datetime(pd.Series([raw_key]), errors="coerce").iloc[0]
+        normalized_key = (
+            timestamp.strftime("%Y-%m-%d")
+            if pd.notna(timestamp)
+            else str(raw_key).strip()
+        )
+        if not normalized_key:
+            continue
+        normalized_map[normalized_key] = float(value)
+    period_labels = _normalized_period_series_from_index(index)
+    return pd.to_numeric(period_labels.map(normalized_map), errors="coerce").fillna(0.0)
+
+
+def _reporting_source_series(
+    schedule_df: pd.DataFrame,
+    column: str,
+) -> pd.Series:
+    if column in schedule_df.columns:
+        return pd.to_numeric(schedule_df[column], errors="coerce").fillna(0.0)
+    return _zero_series(schedule_df.index)
+
+
+def _sync_reporting_adjusted_columns(schedule_df: pd.DataFrame) -> pd.DataFrame:
+    work = schedule_df.copy()
+    adjusted_pairs = {
+        "Revenue": "Revenue_adj",
+        "COGS": "COGS_adj",
+        "Gross Margin": "Gross Margin_adj",
+        "EBITDA": "EBITDA_adj",
+        "EBIT": "EBIT_adj",
+        "NPAT": "NPAT_adj",
+        "Interest Expense": "Interest Expense_adj",
+        "CFO": "CFO_adj",
+        "CFI": "CFI_adj",
+        "CFF": "CFF_adj",
+        "Net Cash Flow": "Net Cash Flow_adj",
+        "Closing Cash Balance": "Closing Cash Balance_adj",
+        "Cash and Cash Equivalents": "Cash and Cash Equivalents_adj",
+        "Current Assets": "Current Assets_adj",
+        "Current Liabilities": "Current Liabilities_adj",
+        "Non-current Liabilities": "Non-current Liabilities_adj",
+        "Equity": "Equity_adj",
+        "Term Debt": "Term Debt_adj",
+    }
+    for base_col, adj_col in adjusted_pairs.items():
+        if base_col in work.columns and adj_col in work.columns:
+            work[adj_col] = pd.to_numeric(work[base_col], errors="coerce")
+    return work
+
+
+def _operating_cost_series_by_business_unit(
+    schedule_df: pd.DataFrame,
+    operating_table: Optional[pd.DataFrame],
+    biological_cost_table: Optional[pd.DataFrame] = None,
+) -> dict[str, dict[str, pd.Series]]:
+    if schedule_df.empty:
+        return {}
+
+    work = schedule_df.copy()
+    biological_costs = (
+        _ensure_biological_cost_drivers_table(biological_cost_table)
+        if isinstance(biological_cost_table, pd.DataFrame) and not biological_cost_table.empty
+        else pd.DataFrame()
+    )
+    biological_active = (
+        not biological_costs.empty
+        and "Applies To" in biological_costs.columns
+        and biological_costs["Active"].fillna(True).astype(bool).any()
+    )
+    assumptions = (
+        _ensure_operating_cost_table(operating_table)
+        if isinstance(operating_table, pd.DataFrame) and not operating_table.empty
+        else pd.DataFrame()
+    )
+    herd_raw = work.get("Herd Size (heads)")
+    herd = pd.to_numeric(herd_raw, errors="coerce")
+    if not isinstance(herd, pd.Series):
+        herd = pd.Series(herd, index=work.index, dtype=float)
+    else:
+        herd = herd.reindex(work.index)
+    herd = herd.ffill().bfill() if herd.notna().any() else _zero_series(work.index)
+    period_days = work.index.to_series().diff().dt.days.astype(float)
+    valid_days = period_days.iloc[1:][np.isfinite(period_days.iloc[1:])]
+    default_days = float(np.median(valid_days)) if not valid_days.empty else 30.44
+    if not np.isfinite(default_days) or default_days <= 0:
+        default_days = 30.44
+    months_factor = (period_days / 30.44).fillna(default_days / 30.44).clip(lower=1e-6)
+    year_values = work.index.year
+
+    series_map: dict[str, dict[str, pd.Series]] = {}
+
+    def _add_cost(unit: str, field: str, series: pd.Series) -> None:
+        unit_key = _normalize_business_unit_name(unit, "General")
+        unit_store = series_map.setdefault(unit_key, {})
+        if field in unit_store:
+            unit_store[field] = unit_store[field].add(series, fill_value=0.0)
+        else:
+            unit_store[field] = pd.to_numeric(series, errors="coerce").fillna(0.0)
+
+    if biological_active:
+        active_rows = biological_costs.loc[
+            biological_costs["Active"].fillna(True).astype(bool)
+        ].copy()
+        for _, row in active_rows.iterrows():
+            applies_to = str(row.get("Applies To", "")).strip().lower()
+            basis_column = BIOLOGICAL_COST_APPLIES_TO_MAP.get(applies_to)
+            if not basis_column or basis_column not in work.columns:
+                continue
+            basis_series = pd.to_numeric(work.get(basis_column), errors="coerce").fillna(0.0)
+            field = str(row.get("Field", "")).strip()
+            if not field:
+                continue
+            row_year = pd.to_numeric(pd.Series([row.get("Year")]), errors="coerce").iloc[0]
+            unit_cost = pd.to_numeric(
+                pd.Series([row.get("unit_cost_per_head_per_month")]), errors="coerce"
+            ).iloc[0]
+            inflation = pd.to_numeric(pd.Series([row.get("Inflation %")]), errors="coerce").iloc[0]
+            if pd.isna(unit_cost):
+                continue
+            base_year = int(row_year) if pd.notna(row_year) else int(year_values.min())
+            inflation_rate = float(inflation) / 100.0 if pd.notna(inflation) else 0.0
+            unit_series = pd.Series(
+                [
+                    float(unit_cost) * ((1.0 + inflation_rate) ** max(int(year) - base_year, 0))
+                    for year in year_values
+                ],
+                index=work.index,
+                dtype=float,
+            )
+            _add_cost(
+                row.get("Business Unit", "Breeding"),
+                field,
+                unit_series * basis_series * months_factor,
+            )
+        return series_map
+
+    if assumptions.empty:
+        return series_map
+
+    assumptions = assumptions.sort_values(["Business Unit", "Field", "Year"], kind="stable")
+    for (unit, field), group in assumptions.groupby(["Business Unit", "Field"], dropna=False):
+        unit_map = {
+            int(row["Year"]): float(row["unit_cost_per_head_per_month"])
+            for _, row in group.iterrows()
+            if pd.notna(row.get("Year")) and pd.notna(row.get("unit_cost_per_head_per_month"))
+        }
+        if not unit_map:
+            continue
+        unit_series = pd.Series(
+            [unit_map.get(int(year), np.nan) for year in year_values],
+            index=work.index,
+            dtype=float,
+        ).ffill()
+        _add_cost(unit, str(field), unit_series * herd * months_factor)
+    return series_map
+
+
+def _pricing_revenue_by_business_unit(
+    pricing_table: Optional[pd.DataFrame],
+    schedule_index: pd.Index,
+) -> dict[str, pd.Series]:
+    pricing = (
+        _ensure_pricing_table(pricing_table)
+        if isinstance(pricing_table, pd.DataFrame) and not pricing_table.empty
+        else pd.DataFrame()
+    )
+    if pricing.empty:
+        return {}
+
+    work = pricing.copy()
+    work["Revenue"] = pd.to_numeric(work.get("Revenue"), errors="coerce").fillna(0.0)
+    work["Active"] = work["Active"].fillna(False).astype(bool)
+    work["Business Unit"] = work.get("Business Unit", pd.Series(dtype=str)).apply(
+        _normalize_business_unit_name
+    )
+    work["Revenue Channel"] = (
+        _series_or_default(work, "Revenue Channel", "External").astype(str).str.strip().str.casefold()
+    )
+    work = work.loc[work["Active"] & work["Revenue Channel"].ne("internal")].copy()
+    if work.empty:
+        return {}
+
+    grouped = work.groupby(["Period", "Business Unit"], as_index=False)["Revenue"].sum(min_count=1)
+    result: dict[str, pd.Series] = {}
+    for unit, group in grouped.groupby("Business Unit", dropna=False):
+        period_map = {
+            str(period): float(value)
+            for period, value in zip(group["Period"], group["Revenue"])
+            if str(period).strip() and pd.notna(value)
+        }
+        result[_normalize_business_unit_name(unit)] = _series_from_period_map(period_map, schedule_index)
+    return result
+
+
+def _supplementary_unit_weight_frame(
+    schedule_index: pd.Index,
+    units: Sequence[str],
+    revenue_series_map: dict[str, pd.Series],
+    supplementary: Optional[dict[str, pd.DataFrame]] = None,
+) -> pd.DataFrame:
+    weight_frame = pd.DataFrame(index=schedule_index)
+    for unit in units:
+        weight_frame[unit] = pd.to_numeric(
+            revenue_series_map.get(unit, _zero_series(schedule_index)),
+            errors="coerce",
+        ).fillna(0.0)
+
+    row_totals = weight_frame.sum(axis=1)
+    zero_mask = row_totals <= 0
+    if zero_mask.any():
+        breeding_schedule = (supplementary or {}).get("Breeding Unit Schedule")
+        destination_schedule = (supplementary or {}).get("Destination Unit Schedule")
+        fallback = pd.DataFrame(index=schedule_index)
+        for unit in units:
+            fallback[unit] = 0.0
+        if isinstance(breeding_schedule, pd.DataFrame) and not breeding_schedule.empty and units:
+            breeding_cols = [
+                col
+                for col in [
+                    "Breeding Does",
+                    "Breeding Bucks",
+                    "Replacement Does",
+                    "Female Kids Available",
+                    "Male Kids Available",
+                ]
+                if col in breeding_schedule.columns
+            ]
+            if breeding_cols:
+                fallback[units[0]] = pd.to_numeric(
+                    breeding_schedule.reindex(schedule_index)[breeding_cols].sum(axis=1, min_count=1),
+                    errors="coerce",
+                ).fillna(0.0)
+        if isinstance(destination_schedule, pd.DataFrame) and not destination_schedule.empty and len(units) > 1:
+            destination_cols = [
+                col
+                for col in [
+                    "Female Transfer Intake",
+                    "Male Transfer Intake",
+                    "Lactating Does",
+                    "Saleable Goats (heads)",
+                ]
+                if col in destination_schedule.columns
+            ]
+            if destination_cols:
+                fallback[units[1]] = pd.to_numeric(
+                    destination_schedule.reindex(schedule_index)[destination_cols].sum(axis=1, min_count=1),
+                    errors="coerce",
+                ).fillna(0.0)
+        fallback_totals = fallback.sum(axis=1)
+        zero_both = fallback_totals <= 0
+        for unit in units:
+            weight_frame.loc[zero_mask, unit] = fallback.loc[zero_mask, unit]
+        row_totals = weight_frame.sum(axis=1)
+        if zero_both.any():
+            for unit in units:
+                weight_frame.loc[zero_both, unit] = 1.0 / max(len(units), 1)
+            row_totals = weight_frame.sum(axis=1)
+
+    row_totals = row_totals.replace(0.0, np.nan)
+    for unit in units:
+        weight_frame[unit] = (weight_frame[unit] / row_totals).fillna(1.0 / max(len(units), 1))
+    return weight_frame
+
+
+def _detail_table_for_reporting(
+    detail_tables: Optional[dict[str, pd.DataFrame]],
+    assumptions: dict[str, pd.DataFrame],
+    schedule_name: str,
+    schedule_index: pd.Index,
+) -> pd.DataFrame:
+    detail_map = detail_tables or {}
+    if isinstance(detail_map.get(schedule_name), pd.DataFrame) and not detail_map[schedule_name].empty:
+        return detail_map[schedule_name].copy()
+
+    core_stub = pd.DataFrame({"Period": _normalized_period_series_from_index(schedule_index).tolist()})
+    if schedule_name == "Variable Expenses Schedule":
+        return _propagate_variable_expense_inputs_to_schedule(
+            assumptions.get("Variable Expenses", pd.DataFrame()),
+            core_stub,
+        )
+    if schedule_name == "Direct Wages Schedule":
+        return _propagate_direct_wage_inputs_to_schedule(
+            assumptions.get("Direct Wages", pd.DataFrame()),
+            core_stub,
+        )
+    if schedule_name == "Admin Wages Schedule":
+        return _propagate_admin_wage_inputs_to_schedule(
+            assumptions.get("Admin Wages", pd.DataFrame()),
+            core_stub,
+        )
+    return pd.DataFrame()
+
+
+def _unit_series_lookup(
+    aggregated_table: pd.DataFrame,
+    unit: str,
+    schedule_index: pd.Index,
+) -> pd.Series:
+    if aggregated_table.empty or unit not in aggregated_table.columns:
+        return _zero_series(schedule_index)
+    period_map = {
+        str(period): float(value)
+        for period, value in zip(aggregated_table["Period"], aggregated_table[unit])
+        if str(period).strip() and pd.notna(value)
+    }
+    return _series_from_period_map(period_map, schedule_index)
+
+
+def _allocate_reporting_column(
+    total_series: pd.Series,
+    units: Sequence[str],
+    weights: pd.DataFrame,
+    explicit_map: Optional[dict[str, pd.Series]] = None,
+    extra_map: Optional[dict[str, pd.Series]] = None,
+) -> dict[str, pd.Series]:
+    explicit = explicit_map or {}
+    extra = extra_map or {}
+    explicit_total = _zero_series(total_series.index)
+    for unit in units:
+        explicit_total = explicit_total.add(
+            pd.to_numeric(explicit.get(unit, _zero_series(total_series.index)), errors="coerce").fillna(0.0),
+            fill_value=0.0,
+        )
+    residual = pd.to_numeric(total_series, errors="coerce").fillna(0.0) - explicit_total
+    allocated: dict[str, pd.Series] = {}
+    for unit in units:
+        base_series = pd.to_numeric(explicit.get(unit, _zero_series(total_series.index)), errors="coerce").fillna(0.0)
+        extra_series = pd.to_numeric(extra.get(unit, _zero_series(total_series.index)), errors="coerce").fillna(0.0)
+        weight_series = pd.to_numeric(weights.get(unit), errors="coerce").fillna(0.0)
+        allocated[unit] = base_series + (residual * weight_series) + extra_series
+    return allocated
+
+
+def _build_reporting_unit_schedules(
+    schedule_df: pd.DataFrame,
+    assumptions: Optional[dict[str, pd.DataFrame]],
+    supplementary: Optional[dict[str, pd.DataFrame]] = None,
+    detail_tables: Optional[dict[str, pd.DataFrame]] = None,
+    pricing_table: Optional[pd.DataFrame] = None,
+) -> dict[str, pd.DataFrame]:
+    if schedule_df is None or schedule_df.empty:
+        return {}
+
+    assumption_map = dict(assumptions or {})
+    working = schedule_df.copy()
+    working.index = pd.to_datetime(working.index, errors="coerce")
+    working = working.loc[working.index.notna()].sort_index()
+    if working.empty:
+        return {}
+
+    if not _is_breeding_to_unit_mode(assumption_map):
+        return {"Consolidated": _sync_reporting_adjusted_columns(_synchronize_financial_algorithms(working))}
+
+    destination = _selected_transfer_destination(assumption_map)
+    if not destination:
+        return {"Consolidated": _sync_reporting_adjusted_columns(_synchronize_financial_algorithms(working))}
+
+    units = ["Breeding", destination]
+    pricing_source = pricing_table if isinstance(pricing_table, pd.DataFrame) and not pricing_table.empty else assumption_map.get("Pricing")
+    external_revenue = _pricing_revenue_by_business_unit(pricing_source, working.index)
+    weights = _supplementary_unit_weight_frame(working.index, units, external_revenue, supplementary)
+
+    unit_frames = {
+        unit: _sync_reporting_adjusted_columns(
+            working.apply(pd.to_numeric, errors="ignore").copy().mul(weights[unit], axis=0)
+        )
+        for unit in units
+    }
+
+    operating_costs = _operating_cost_series_by_business_unit(
+        working,
+        assumption_map.get("Operating Costs"),
+        assumption_map.get("Biological Cost Drivers"),
+    )
+    variable_detail = _aggregate_variable_expenses_by_business_unit(
+        _detail_table_for_reporting(detail_tables, assumption_map, "Variable Expenses Schedule", working.index),
+        pd.DataFrame({"Period": _normalized_period_series_from_index(working.index).tolist()}),
+    )
+    direct_detail = _aggregate_direct_wages_by_business_unit(
+        _detail_table_for_reporting(detail_tables, assumption_map, "Direct Wages Schedule", working.index),
+        pd.DataFrame({"Period": _normalized_period_series_from_index(working.index).tolist()}),
+    )
+    admin_detail = _aggregate_admin_wages_by_business_unit(
+        _detail_table_for_reporting(detail_tables, assumption_map, "Admin Wages Schedule", working.index),
+        pd.DataFrame({"Period": _normalized_period_series_from_index(working.index).tolist()}),
+    )
+
+    transfer_schedule = (supplementary or {}).get("Internal Transfer Schedule", pd.DataFrame())
+    internal_revenue_map = {unit: _zero_series(working.index) for unit in units}
+    internal_cost_map = {unit: _zero_series(working.index) for unit in units}
+    if isinstance(transfer_schedule, pd.DataFrame) and not transfer_schedule.empty:
+        transfer_work = transfer_schedule.copy()
+        if "Period" not in transfer_work.columns:
+            transfer_work = transfer_work.reset_index()
+        transfer_work["Transfer Value"] = pd.to_numeric(transfer_work.get("Transfer Value"), errors="coerce").fillna(0.0)
+        transfer_work["Destination"] = transfer_work.get("Destination", pd.Series(dtype=str)).apply(
+            lambda value: _normalize_business_unit_name(value, destination)
+        )
+        grouped_transfer = transfer_work.groupby(["Period", "Destination"], as_index=False)["Transfer Value"].sum(min_count=1)
+        total_internal = _series_from_period_map(
+            {
+                str(period): float(value)
+                for period, value in zip(grouped_transfer["Period"], grouped_transfer["Transfer Value"])
+                if str(period).strip() and pd.notna(value)
+            },
+            working.index,
+        )
+        internal_revenue_map["Breeding"] = total_internal
+        destination_transfer = grouped_transfer.loc[grouped_transfer["Destination"].eq(destination)].copy()
+        internal_cost_map[destination] = _series_from_period_map(
+            {
+                str(period): float(value)
+                for period, value in zip(destination_transfer["Period"], destination_transfer["Transfer Value"])
+                if str(period).strip() and pd.notna(value)
+            },
+            working.index,
+        )
+
+    explicit_variable = {
+        unit: pd.to_numeric(
+            operating_costs.get(unit, {}).get("variable_healthcare_cost_per_herd", _zero_series(working.index)),
+            errors="coerce",
+        ).fillna(0.0).add(_unit_series_lookup(variable_detail, unit, working.index), fill_value=0.0)
+        for unit in units
+    }
+    explicit_direct = {
+        unit: _unit_series_lookup(direct_detail, unit, working.index)
+        for unit in units
+    }
+    explicit_admin = {
+        unit: _unit_series_lookup(admin_detail, unit, working.index)
+        for unit in units
+    }
+    explicit_fixed = {
+        unit: pd.to_numeric(
+            operating_costs.get(unit, {}).get("fixed_utility_cost_per_herd", _zero_series(working.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        for unit in units
+    }
+    explicit_cogs = {
+        unit: pd.to_numeric(
+            operating_costs.get(unit, {}).get("variable_feed_cost_per_herd", _zero_series(working.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        for unit in units
+    }
+
+    revenue_allocated = _allocate_reporting_column(
+        _reporting_source_series(working, "Revenue_adj" if "Revenue_adj" in working.columns else "Revenue"),
+        units,
+        weights,
+        explicit_map={unit: external_revenue.get(unit, _zero_series(working.index)) for unit in units},
+        extra_map=internal_revenue_map,
+    )
+    cogs_allocated = _allocate_reporting_column(
+        _reporting_source_series(working, "COGS_adj" if "COGS_adj" in working.columns else "COGS"),
+        units,
+        weights,
+        explicit_map=explicit_cogs,
+        extra_map=internal_cost_map,
+    )
+    variable_allocated = _allocate_reporting_column(
+        _reporting_source_series(working, "Variable Expenses"),
+        units,
+        weights,
+        explicit_map=explicit_variable,
+    )
+    fixed_allocated = _allocate_reporting_column(
+        _reporting_source_series(working, "Fixed Expenses"),
+        units,
+        weights,
+        explicit_map=explicit_fixed,
+    )
+    direct_allocated = _allocate_reporting_column(
+        _reporting_source_series(working, "Direct Wages"),
+        units,
+        weights,
+        explicit_map=explicit_direct,
+    )
+    admin_allocated = _allocate_reporting_column(
+        _reporting_source_series(working, "Admin Wages"),
+        units,
+        weights,
+        explicit_map=explicit_admin,
+    )
+
+    for unit in units:
+        frame = unit_frames[unit].copy()
+        for column, allocated in [
+            ("Revenue", revenue_allocated),
+            ("COGS", cogs_allocated),
+            ("Variable Expenses", variable_allocated),
+            ("Fixed Expenses", fixed_allocated),
+            ("Direct Wages", direct_allocated),
+            ("Admin Wages", admin_allocated),
+        ]:
+            frame[column] = pd.to_numeric(allocated.get(unit), errors="coerce").fillna(0.0)
+        frame = _sync_reporting_adjusted_columns(_synchronize_financial_algorithms(frame))
+        unit_frames[unit] = frame
+
+    consolidated = unit_frames[units[0]].copy()
+    for unit in units[1:]:
+        consolidated = consolidated.add(unit_frames[unit], fill_value=0.0)
+
+    elimination_table = (supplementary or {}).get("Internal Transfer Elimination Schedule", pd.DataFrame())
+    if isinstance(elimination_table, pd.DataFrame) and not elimination_table.empty:
+        elimination_work = elimination_table.copy()
+        if "Period" not in elimination_work.columns:
+            elimination_work = elimination_work.reset_index()
+        revenue_elimination = _series_from_period_map(
+            {
+                str(period): float(value)
+                for period, value in zip(
+                    elimination_work.get("Period", pd.Series(dtype=str)),
+                    pd.to_numeric(elimination_work.get("Revenue Elimination"), errors="coerce").fillna(0.0),
+                )
+                if str(period).strip() and pd.notna(value)
+            },
+            working.index,
+        )
+        cost_elimination = _series_from_period_map(
+            {
+                str(period): float(value)
+                for period, value in zip(
+                    elimination_work.get("Period", pd.Series(dtype=str)),
+                    pd.to_numeric(elimination_work.get("Cost Elimination"), errors="coerce").fillna(0.0),
+                )
+                if str(period).strip() and pd.notna(value)
+            },
+            working.index,
+        )
+        if "Revenue" in consolidated.columns:
+            consolidated["Revenue"] = pd.to_numeric(consolidated["Revenue"], errors="coerce").fillna(0.0) + revenue_elimination
+        if "COGS" in consolidated.columns:
+            consolidated["COGS"] = pd.to_numeric(consolidated["COGS"], errors="coerce").fillna(0.0) + cost_elimination
+
+    consolidated = _sync_reporting_adjusted_columns(_synchronize_financial_algorithms(consolidated))
+    return {
+        "Breeding": unit_frames["Breeding"],
+        destination: unit_frames[destination],
+        "Consolidated": consolidated,
+    }
+
+
+def _reporting_entity_options(assumptions: Optional[dict[str, pd.DataFrame]]) -> list[str]:
+    assumption_map = dict(assumptions or {})
+    if not _is_breeding_to_unit_mode(assumption_map):
+        return ["Consolidated"]
+    destination = _selected_transfer_destination(assumption_map)
+    options = ["Consolidated", "Breeding"]
+    if destination:
+        options.append(destination)
+    return options
+
+
+def _default_reporting_entity(assumptions: Optional[dict[str, pd.DataFrame]]) -> str:
+    assumption_map = dict(assumptions or {})
+    if _selected_reporting_view(assumption_map) == "Standalone Unit":
+        return "Breeding"
+    return "Consolidated"
 
 
 def _default_herd_plan_table() -> pd.DataFrame:
@@ -6047,6 +7269,7 @@ def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
                 rows.append(
                     {
                         "Period": period,
+                        "Business Unit": "General",
                         "Position": item.get("Position", "Direct Wage"),
                         "Head Count": headcount,
                         "Monthly Salary per Head": monthly_salary,
@@ -6060,6 +7283,7 @@ def _default_direct_wage_table(core: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "Period": today,
+                "Business Unit": "General",
                 "Position": "Direct Wage",
                 "Head Count": 1.0,
                 "Monthly Salary per Head": np.nan,
@@ -6078,6 +7302,10 @@ def _ensure_direct_wage_table(
 
     work = table.copy()
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    if "Business Unit" not in work.columns:
+        work["Business Unit"] = "General"
+    work["Business Unit"] = _series_or_default(work, "Business Unit", "General").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "General"
     if "Position" not in work.columns:
         work["Position"] = work.get("Role", "")
     work["Position"] = _series_or_default(work, "Position", "").astype(str).str.strip()
@@ -6124,6 +7352,7 @@ def _ensure_direct_wage_table(
 
     ordered_cols = [
         "Period",
+        "Business Unit",
         "Position",
         "Head Count",
         "Monthly Salary per Head",
@@ -6149,6 +7378,7 @@ def _add_direct_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFram
 
     new_row = {
         "Period": default_period,
+        "Business Unit": "General",
         "Position": f"Direct Wage Position {len(work) + 1}",
         "Head Count": 1.0,
         "Monthly Salary per Head": np.nan,
@@ -6240,6 +7470,17 @@ def _aggregate_direct_wages(
     return result
 
 
+def _aggregate_direct_wages_by_business_unit(
+    table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    return _sum_schedule_amounts_by_business_unit(
+        table,
+        core,
+        _ensure_direct_wage_table,
+        "Total Salary",
+    )
+
+
 # ---------- Admin wages helpers ----------
 
 
@@ -6287,6 +7528,7 @@ def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
                 rows.append(
                     {
                         "Period": period,
+                        "Business Unit": "General",
                         "Position": item.get("Position", "Admin Wage"),
                         "Head Count": headcount,
                         "Monthly Salary per Head": monthly_salary,
@@ -6300,6 +7542,7 @@ def _default_admin_wage_table(core: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "Period": today,
+                "Business Unit": "General",
                 "Position": "Admin Wage",
                 "Head Count": 1.0,
                 "Monthly Salary per Head": np.nan,
@@ -6317,6 +7560,10 @@ def _ensure_admin_wage_table(
         return _default_admin_wage_table(core)
 
     work = table.copy()
+    if "Business Unit" not in work.columns:
+        work["Business Unit"] = "General"
+    work["Business Unit"] = _series_or_default(work, "Business Unit", "General").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "General"
     if "Admin Wages" in work.columns and "Amount" not in work.columns and "Total Salary" not in work.columns:
         periods = _normalize_period(work.get("Period", pd.Series(dtype=str)))
         totals = pd.to_numeric(work.get("Admin Wages"), errors="coerce")
@@ -6413,6 +7660,7 @@ def _ensure_admin_wage_table(
 
     ordered_cols = [
         "Period",
+        "Business Unit",
         "Position",
         "Head Count",
         "Monthly Salary per Head",
@@ -6438,6 +7686,7 @@ def _add_admin_wage_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.DataFrame
 
     new_row = {
         "Period": default_period,
+        "Business Unit": "General",
         "Position": f"Admin Wage Position {len(work) + 1}",
         "Head Count": 1.0,
         "Monthly Salary per Head": np.nan,
@@ -6529,6 +7778,17 @@ def _aggregate_admin_wages(
     return result
 
 
+def _aggregate_admin_wages_by_business_unit(
+    table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    return _sum_schedule_amounts_by_business_unit(
+        table,
+        core,
+        _ensure_admin_wage_table,
+        "Total Salary",
+    )
+
+
 # ---------- Variable expenses helpers ----------
 
 
@@ -6548,6 +7808,7 @@ def _default_variable_expense_table(core: pd.DataFrame) -> pd.DataFrame:
                 )
                 rows.append({
                     "Period": period,
+                    "Business Unit": "General",
                     "Item": item,
                     "Amount": amount,
                 })
@@ -6555,7 +7816,7 @@ def _default_variable_expense_table(core: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         period_type = _infer_period_type_from_schedule(core)
         today = _next_period_from_last(None, period_type).strftime("%Y-%m-%d")
-        rows.append({"Period": today, "Item": "Variable Expense", "Amount": np.nan})
+        rows.append({"Period": today, "Business Unit": "General", "Item": "Variable Expense", "Amount": np.nan})
 
     return pd.DataFrame(rows)
 
@@ -6568,6 +7829,10 @@ def _ensure_variable_expense_table(
 
     work = table.copy()
     work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    if "Business Unit" not in work.columns:
+        work["Business Unit"] = "General"
+    work["Business Unit"] = _series_or_default(work, "Business Unit", "General").astype(str).str.strip()
+    work.loc[work["Business Unit"] == "", "Business Unit"] = "General"
     work["Item"] = _series_or_default(work, "Item", "").astype(str).str.strip()
     work.loc[work["Item"] == "", "Item"] = "Variable Expense"
     work["Amount"] = pd.to_numeric(work.get("Amount"), errors="coerce")
@@ -6598,6 +7863,7 @@ def _add_variable_expense_row(table: pd.DataFrame, core: pd.DataFrame) -> pd.Dat
 
     new_row = {
         "Period": default_period,
+        "Business Unit": "General",
         "Item": f"Variable Item {len(work) + 1}",
         "Amount": np.nan,
     }
@@ -6681,6 +7947,17 @@ def _aggregate_variable_expenses(
     else:
         result["Variable Expenses"] = 0.0
     return result
+
+
+def _aggregate_variable_expenses_by_business_unit(
+    table: pd.DataFrame, core: pd.DataFrame
+) -> pd.DataFrame:
+    return _sum_schedule_amounts_by_business_unit(
+        table,
+        core,
+        _ensure_variable_expense_table,
+        "Amount",
+    )
 
 
 def _schedule_editor_save_table(schedule_name: str, table: pd.DataFrame) -> None:
@@ -7694,7 +8971,16 @@ def _default_scenario_controls_table() -> pd.DataFrame:
 
 
 def _default_business_configuration_table() -> pd.DataFrame:
-    return pd.DataFrame({"Business Type": [DEFAULT_BUSINESS_TYPE]})
+    return pd.DataFrame(
+        {
+            "Business Type": [DEFAULT_BUSINESS_TYPE],
+            "Operating Model": [DEFAULT_OPERATING_MODEL],
+            "Transfer Destination": [""],
+            "Reporting View": [DEFAULT_REPORTING_VIEW],
+            "Transfer Pricing Method": [DEFAULT_TRANSFER_PRICING_METHOD],
+            "Allow External Kid Sales": [True],
+        }
+    )
 
 
 def _ensure_business_configuration_table(
@@ -7707,8 +8993,43 @@ def _ensure_business_configuration_table(
 
     if "Business Type" not in work.columns:
         work["Business Type"] = DEFAULT_BUSINESS_TYPE
+    if "Operating Model" not in work.columns:
+        work["Operating Model"] = DEFAULT_OPERATING_MODEL
+    if "Transfer Destination" not in work.columns:
+        work["Transfer Destination"] = ""
+    if "Reporting View" not in work.columns:
+        work["Reporting View"] = DEFAULT_REPORTING_VIEW
+    if "Transfer Pricing Method" not in work.columns:
+        work["Transfer Pricing Method"] = DEFAULT_TRANSFER_PRICING_METHOD
+    if "Allow External Kid Sales" not in work.columns:
+        work["Allow External Kid Sales"] = True
     work["Business Type"] = _series_or_default(work, "Business Type", DEFAULT_BUSINESS_TYPE).apply(_normalize_business_type)
-    return work[["Business Type"]].head(1).reset_index(drop=True)
+    work["Operating Model"] = _series_or_default(work, "Operating Model", DEFAULT_OPERATING_MODEL).apply(
+        _normalize_operating_model
+    )
+    work["Transfer Destination"] = _series_or_default(work, "Transfer Destination", "").astype(str).str.strip()
+    work["Transfer Destination"] = work["Transfer Destination"].where(
+        work["Transfer Destination"].isin(["", "Meat", "Milk-Cheese", "Combined"]),
+        "",
+    )
+    work["Reporting View"] = _series_or_default(work, "Reporting View", DEFAULT_REPORTING_VIEW).apply(
+        _normalize_reporting_view
+    )
+    work["Transfer Pricing Method"] = _series_or_default(
+        work, "Transfer Pricing Method", DEFAULT_TRANSFER_PRICING_METHOD
+    ).apply(_normalize_transfer_pricing_method)
+    work["Allow External Kid Sales"] = _series_or_default(work, "Allow External Kid Sales", True).map(
+        lambda value: _coerce_bool_value(value, True)
+    )
+    ordered_cols = [
+        "Business Type",
+        "Operating Model",
+        "Transfer Destination",
+        "Reporting View",
+        "Transfer Pricing Method",
+        "Allow External Kid Sales",
+    ]
+    return work[ordered_cols].head(1).reset_index(drop=True)
 
 
 def _selected_business_type(table_or_assumptions: Any) -> str:
@@ -7718,6 +9039,288 @@ def _selected_business_type(table_or_assumptions: Any) -> str:
         table = _ensure_business_configuration_table(table_or_assumptions)
     value = table.iloc[0].get("Business Type") if not table.empty else DEFAULT_BUSINESS_TYPE
     return _normalize_business_type(value)
+
+
+def _selected_operating_model(table_or_assumptions: Any) -> str:
+    if isinstance(table_or_assumptions, dict):
+        table = _ensure_business_configuration_table(table_or_assumptions.get("Business Configuration"))
+    else:
+        table = _ensure_business_configuration_table(table_or_assumptions)
+    value = table.iloc[0].get("Operating Model") if not table.empty else DEFAULT_OPERATING_MODEL
+    return _normalize_operating_model(value)
+
+
+def _selected_transfer_destination(table_or_assumptions: Any) -> str:
+    if isinstance(table_or_assumptions, dict):
+        table = _ensure_business_configuration_table(table_or_assumptions.get("Business Configuration"))
+    else:
+        table = _ensure_business_configuration_table(table_or_assumptions)
+    value = str(table.iloc[0].get("Transfer Destination", "")).strip() if not table.empty else ""
+    return value if value in {"", "Meat", "Milk-Cheese", "Combined"} else ""
+
+
+def _selected_reporting_view(table_or_assumptions: Any) -> str:
+    if isinstance(table_or_assumptions, dict):
+        table = _ensure_business_configuration_table(table_or_assumptions.get("Business Configuration"))
+    else:
+        table = _ensure_business_configuration_table(table_or_assumptions)
+    value = table.iloc[0].get("Reporting View") if not table.empty else DEFAULT_REPORTING_VIEW
+    return _normalize_reporting_view(value)
+
+
+def _selected_transfer_pricing_method(table_or_assumptions: Any) -> str:
+    if isinstance(table_or_assumptions, dict):
+        table = _ensure_business_configuration_table(table_or_assumptions.get("Business Configuration"))
+    else:
+        table = _ensure_business_configuration_table(table_or_assumptions)
+    value = (
+        table.iloc[0].get("Transfer Pricing Method")
+        if not table.empty
+        else DEFAULT_TRANSFER_PRICING_METHOD
+    )
+    return _normalize_transfer_pricing_method(value)
+
+
+def _allow_external_kid_sales(table_or_assumptions: Any) -> bool:
+    if isinstance(table_or_assumptions, dict):
+        table = _ensure_business_configuration_table(table_or_assumptions.get("Business Configuration"))
+    else:
+        table = _ensure_business_configuration_table(table_or_assumptions)
+    value = table.iloc[0].get("Allow External Kid Sales", True) if not table.empty else True
+    return _coerce_bool_value(value, True)
+
+
+def _is_breeding_to_unit_mode(table_or_assumptions: Any) -> bool:
+    return _selected_operating_model(table_or_assumptions) == "Breeding-to-Unit"
+
+
+def _default_kid_routing_rules_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Period": [None, None],
+            "Sex": ["Female", "Male"],
+            "Transfer Class": ["Weaned Kid", "Weaned Kid"],
+            "Destination": ["External Sale", "External Sale"],
+            "Allocation %": [100.0, 100.0],
+            "Priority": [1, 1],
+            "Min Head": [0.0, 0.0],
+            "Max Head": [np.nan, np.nan],
+            "Active": [True, True],
+        }
+    )
+
+
+def _ensure_kid_routing_rules_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_kid_routing_rules_table()
+    else:
+        work = table.copy()
+    required_cols = [
+        "Period",
+        "Sex",
+        "Transfer Class",
+        "Destination",
+        "Allocation %",
+        "Priority",
+        "Min Head",
+        "Max Head",
+        "Active",
+    ]
+    for col in required_cols:
+        if col not in work.columns:
+            work[col] = np.nan
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    work["Sex"] = _series_or_default(work, "Sex", "Female").astype(str).str.strip().replace({"": "Female"})
+    work["Transfer Class"] = _series_or_default(work, "Transfer Class", "Weaned Kid").astype(str).str.strip()
+    work["Transfer Class"] = work["Transfer Class"].replace({"": "Weaned Kid"})
+    work["Destination"] = _series_or_default(work, "Destination", "External Sale").astype(str).str.strip()
+    work["Destination"] = work["Destination"].replace({"": "External Sale"})
+    for col in ["Allocation %", "Priority", "Min Head", "Max Head"]:
+        work[col] = pd.to_numeric(work.get(col), errors="coerce")
+    work["Allocation %"] = work["Allocation %"].fillna(0.0)
+    work["Priority"] = work["Priority"].fillna(1.0)
+    work["Min Head"] = work["Min Head"].fillna(0.0)
+    work["Active"] = _series_or_default(work, "Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work = work.dropna(how="all")
+    if work.empty:
+        return _default_kid_routing_rules_table()
+    remainder = [col for col in work.columns if col not in required_cols]
+    return work[required_cols + remainder].reset_index(drop=True)
+
+
+def _default_internal_transfer_pricing_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Period": [None],
+            "Transfer Class": ["Weaned Kid"],
+            "Destination": ["Meat"],
+            "Pricing Method": [DEFAULT_TRANSFER_PRICING_METHOD],
+            "Transfer Price per Head": [150.0],
+            "Markup %": [0.0],
+            "Active": [True],
+        }
+    )
+
+
+def _ensure_internal_transfer_pricing_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_internal_transfer_pricing_table()
+    else:
+        work = table.copy()
+    required_cols = [
+        "Period",
+        "Transfer Class",
+        "Destination",
+        "Pricing Method",
+        "Transfer Price per Head",
+        "Markup %",
+        "Active",
+    ]
+    for col in required_cols:
+        if col not in work.columns:
+            work[col] = np.nan
+    work["Period"] = _normalize_period(work.get("Period", pd.Series(dtype=str)))
+    work["Transfer Class"] = _series_or_default(work, "Transfer Class", "Weaned Kid").astype(str).str.strip()
+    work["Transfer Class"] = work["Transfer Class"].replace({"": "Weaned Kid"})
+    work["Destination"] = _series_or_default(work, "Destination", "Meat").astype(str).str.strip()
+    work["Pricing Method"] = _series_or_default(
+        work, "Pricing Method", DEFAULT_TRANSFER_PRICING_METHOD
+    ).apply(_normalize_transfer_pricing_method)
+    work["Transfer Price per Head"] = pd.to_numeric(work.get("Transfer Price per Head"), errors="coerce")
+    work["Markup %"] = pd.to_numeric(work.get("Markup %"), errors="coerce").fillna(0.0)
+    work["Active"] = _series_or_default(work, "Active", True).map(lambda value: _coerce_bool_value(value, True))
+    work = work.dropna(how="all")
+    if work.empty:
+        return _default_internal_transfer_pricing_table()
+    remainder = [col for col in work.columns if col not in required_cols]
+    return work[required_cols + remainder].reset_index(drop=True)
+
+
+def _default_downstream_intake_rules_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Destination": ["Meat", "Milk-Cheese", "Combined", "Combined"],
+            "Sex": ["Female", "Female", "Female", "Male"],
+            "Entry Age Months": [3.0, 3.0, 3.0, 3.0],
+            "Entry Weight Kg": [12.0, 12.0, 12.0, 12.0],
+            "Mortality %": [3.5, 2.5, 2.5, 3.5],
+            "Eligible for Lactation": [False, True, True, False],
+            "Eligible for Finishing": [True, False, True, True],
+            "Active": [True, True, True, True],
+        }
+    )
+
+
+def _ensure_downstream_intake_rules_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_downstream_intake_rules_table()
+    else:
+        work = table.copy()
+    required_cols = [
+        "Destination",
+        "Sex",
+        "Entry Age Months",
+        "Entry Weight Kg",
+        "Mortality %",
+        "Eligible for Lactation",
+        "Eligible for Finishing",
+        "Active",
+    ]
+    for col in required_cols:
+        if col not in work.columns:
+            work[col] = np.nan
+    work["Destination"] = _series_or_default(work, "Destination", "Meat").astype(str).str.strip()
+    work["Sex"] = _series_or_default(work, "Sex", "Female").astype(str).str.strip()
+    for col in ["Entry Age Months", "Entry Weight Kg", "Mortality %"]:
+        work[col] = pd.to_numeric(work.get(col), errors="coerce")
+    for col in ["Eligible for Lactation", "Eligible for Finishing", "Active"]:
+        work[col] = _series_or_default(work, col, True).map(lambda value: _coerce_bool_value(value, True))
+    work = work.dropna(how="all")
+    if work.empty:
+        return _default_downstream_intake_rules_table()
+    remainder = [col for col in work.columns if col not in required_cols]
+    return work[required_cols + remainder].reset_index(drop=True)
+
+
+def _default_transfer_elimination_rules_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Destination": ["Meat", "Milk-Cheese", "Combined"],
+            "Eliminate Internal Revenue": [True, True, True],
+            "Eliminate Internal Cost": [True, True, True],
+            "Active": [True, True, True],
+        }
+    )
+
+
+def _ensure_transfer_elimination_rules_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = _default_transfer_elimination_rules_table()
+    else:
+        work = table.copy()
+    required_cols = [
+        "Destination",
+        "Eliminate Internal Revenue",
+        "Eliminate Internal Cost",
+        "Active",
+    ]
+    for col in required_cols:
+        if col not in work.columns:
+            work[col] = np.nan
+    work["Destination"] = _series_or_default(work, "Destination", "Meat").astype(str).str.strip()
+    for col in ["Eliminate Internal Revenue", "Eliminate Internal Cost", "Active"]:
+        work[col] = _series_or_default(work, col, True).map(lambda value: _coerce_bool_value(value, True))
+    work = work.dropna(how="all")
+    if work.empty:
+        return _default_transfer_elimination_rules_table()
+    remainder = [col for col in work.columns if col not in required_cols]
+    return work[required_cols + remainder].reset_index(drop=True)
+
+
+def _sync_transfer_tables_to_business_configuration(
+    assumptions: Optional[Dict[str, pd.DataFrame]],
+) -> Dict[str, pd.DataFrame]:
+    synced = dict(assumptions or {})
+    business_config = _ensure_business_configuration_table(synced.get("Business Configuration"))
+    destination = _selected_transfer_destination(business_config)
+    pricing_method = _selected_transfer_pricing_method(business_config)
+    allow_external = _allow_external_kid_sales(business_config)
+
+    routing = _ensure_kid_routing_rules_table(synced.get("Kid Routing Rules"))
+    if destination:
+        default_destination = destination
+        if routing.empty or not routing["Active"].fillna(True).astype(bool).any():
+            routing = _default_kid_routing_rules_table()
+        if "Destination" in routing.columns:
+            no_internal_destinations = ~routing["Destination"].isin(["Meat", "Milk-Cheese", "Combined"])
+            if no_internal_destinations.all():
+                routing = routing.copy()
+                female_mask = routing["Sex"].astype(str).str.strip().str.casefold() == "female"
+                male_mask = routing["Sex"].astype(str).str.strip().str.casefold() == "male"
+                if female_mask.any():
+                    routing.loc[female_mask, "Destination"] = default_destination
+                    routing.loc[female_mask, "Allocation %"] = 100.0
+                if male_mask.any():
+                    routing.loc[male_mask, "Destination"] = (
+                        "External Sale" if allow_external else default_destination
+                    )
+                    routing.loc[male_mask, "Allocation %"] = 100.0
+    synced["Kid Routing Rules"] = _ensure_kid_routing_rules_table(routing)
+
+    transfer_pricing = _ensure_internal_transfer_pricing_table(synced.get("Internal Transfer Pricing"))
+    if destination:
+        transfer_pricing = transfer_pricing.copy()
+        transfer_pricing["Destination"] = destination
+        transfer_pricing["Pricing Method"] = pricing_method
+    synced["Internal Transfer Pricing"] = _ensure_internal_transfer_pricing_table(transfer_pricing)
+    synced["Downstream Intake Rules"] = _ensure_downstream_intake_rules_table(
+        synced.get("Downstream Intake Rules")
+    )
+    synced["Transfer Elimination Rules"] = _ensure_transfer_elimination_rules_table(
+        synced.get("Transfer Elimination Rules")
+    )
+    synced["Business Configuration"] = business_config
+    return synced
 
 
 def _ensure_scenario_controls_table(
@@ -8485,6 +10088,149 @@ def _build_schedule_dataframe(
     return schedule_df
 
 
+def _results_assumption_tables(results: Optional[dict[str, Any]]) -> dict[str, pd.DataFrame]:
+    if isinstance(results, dict):
+        assumption_tables = results.get("assumption_tables")
+        if isinstance(assumption_tables, dict):
+            return {
+                name: table.copy()
+                for name, table in assumption_tables.items()
+                if isinstance(table, pd.DataFrame)
+            }
+    session_assumptions = st.session_state.get("assumptions", {})
+    return {
+        name: table.copy()
+        for name, table in (session_assumptions or {}).items()
+        if isinstance(table, pd.DataFrame)
+    }
+
+
+def _results_detail_tables(results: Optional[dict[str, Any]]) -> dict[str, pd.DataFrame]:
+    if isinstance(results, dict):
+        detail_tables = results.get("detail_tables")
+        if isinstance(detail_tables, dict):
+            return {
+                name: table.copy()
+                for name, table in detail_tables.items()
+                if isinstance(table, pd.DataFrame)
+            }
+    session_details = st.session_state.get("detail_schedules", {})
+    return {
+        name: table.copy()
+        for name, table in (session_details or {}).items()
+        if isinstance(table, pd.DataFrame)
+    }
+
+
+def _reporting_views_for_result(
+    result_payload: dict[str, Any],
+) -> dict[str, Any]:
+    assumptions = _results_assumption_tables(result_payload)
+    detail_tables = _results_detail_tables(result_payload)
+    scenario_supplementary = result_payload.get("supplementary", {})
+    if not isinstance(scenario_supplementary, dict):
+        scenario_supplementary = {}
+
+    scenario_pricing = result_payload.get("pricing_assumptions")
+    if not isinstance(scenario_pricing, pd.DataFrame):
+        scenario_pricing = assumptions.get("Pricing", pd.DataFrame())
+
+    base_schedule = result_payload.get("base")
+    scenario_schedule = result_payload.get("scenario")
+    if not isinstance(base_schedule, pd.DataFrame) or not isinstance(scenario_schedule, pd.DataFrame):
+        return {"assumptions": assumptions, "entity_options": ["Consolidated"], "default_entity": "Consolidated", "base_schedules": {}, "scenario_schedules": {}}
+
+    base_supplementary = _derive_biological_schedules(base_schedule, assumptions)
+    scenario_views = _build_reporting_unit_schedules(
+        scenario_schedule,
+        assumptions,
+        scenario_supplementary,
+        detail_tables,
+        scenario_pricing,
+    )
+    base_views = _build_reporting_unit_schedules(
+        base_schedule,
+        assumptions,
+        base_supplementary,
+        detail_tables,
+        assumptions.get("Pricing"),
+    )
+    entity_options = _reporting_entity_options(assumptions)
+    default_entity = _default_reporting_entity(assumptions)
+    return {
+        "assumptions": assumptions,
+        "entity_options": entity_options,
+        "default_entity": default_entity if default_entity in entity_options else entity_options[0],
+        "base_schedules": base_views,
+        "scenario_schedules": scenario_views,
+    }
+
+
+def _reporting_schedule_for_entity(
+    result_payload: dict[str, Any],
+    entity: str,
+) -> pd.DataFrame:
+    views = _reporting_views_for_result(result_payload)
+    scenario_schedules = views.get("scenario_schedules", {})
+    if entity in scenario_schedules:
+        return scenario_schedules[entity]
+    return result_payload.get("scenario", pd.DataFrame())
+
+
+def _reporting_scenario_viability_table(
+    results_map: dict[str, dict[str, Any]],
+    entity: str,
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for scenario_name, payload in (results_map or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        model = payload.get("model")
+        if model is None:
+            continue
+        schedule_view = _reporting_schedule_for_entity(payload, entity)
+        if not isinstance(schedule_view, pd.DataFrame) or schedule_view.empty:
+            continue
+        valuation = model.valuation_summary(schedule_view, annual=True)
+        debt_capacity = model.debt_capacity_schedule(schedule_view, annual=True)
+        rows.append(
+            {
+                "Scenario": scenario_name,
+                "NPV": valuation.get("npv"),
+                "IRR": valuation.get("irr"),
+                "Payback (Years)": valuation.get("payback_years"),
+                "Terminal Value": valuation.get("terminal_value"),
+                "Min DSCR": (
+                    pd.to_numeric(debt_capacity.get("DSCR"), errors="coerce").min()
+                    if not debt_capacity.empty and "DSCR" in debt_capacity.columns
+                    else np.nan
+                ),
+                "Min DSCR Headroom": (
+                    pd.to_numeric(debt_capacity.get("DSCR Headroom"), errors="coerce").min()
+                    if not debt_capacity.empty and "DSCR Headroom" in debt_capacity.columns
+                    else np.nan
+                ),
+                "Min Cash Headroom": (
+                    pd.to_numeric(
+                        debt_capacity.get("Cash Reserve Headroom"), errors="coerce"
+                    ).min()
+                    if not debt_capacity.empty
+                    and "Cash Reserve Headroom" in debt_capacity.columns
+                    else np.nan
+                ),
+                "Covenant Breach Periods": (
+                    int(debt_capacity.get("Covenant Breach", pd.Series(dtype=bool)).sum())
+                    if not debt_capacity.empty and "Covenant Breach" in debt_capacity.columns
+                    else 0
+                ),
+            }
+        )
+    comparison = pd.DataFrame(rows)
+    if comparison.empty:
+        return comparison
+    return comparison.set_index("Scenario")
+
+
 def _computed_default_valuation_inputs() -> Dict[str, float]:
     global _CACHED_DEFAULT_VALUATION_INPUTS
     if _CACHED_DEFAULT_VALUATION_INPUTS is not None:
@@ -8504,6 +10250,10 @@ def _computed_default_valuation_inputs() -> Dict[str, float]:
             "Opening Herd Cohorts": _default_opening_herd_cohorts_table(),
             "Cohort Allocation Rules": _default_cohort_allocation_rules_table(),
             "Biological Cost Drivers": _default_biological_cost_drivers_table(),
+            "Kid Routing Rules": _default_kid_routing_rules_table(),
+            "Internal Transfer Pricing": _default_internal_transfer_pricing_table(),
+            "Downstream Intake Rules": _default_downstream_intake_rules_table(),
+            "Transfer Elimination Rules": _default_transfer_elimination_rules_table(),
             "Pricing": _default_pricing_table(),
             "Production Drivers": _default_production_driver_table(),
             "Operating Costs": _default_operating_cost_table(),
@@ -8625,7 +10375,7 @@ def _valuation_table_to_inputs(table: pd.DataFrame) -> Dict[str, float]:
 
 
 def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
-    return {
+    return _sync_transfer_tables_to_business_configuration({
         "Business Configuration": _default_business_configuration_table(),
         "Scenario Controls": _default_scenario_controls_table(),
         "Production Horizon": _default_production_horizon_table(),
@@ -8637,6 +10387,10 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
         "Opening Herd Cohorts": _default_opening_herd_cohorts_table(),
         "Cohort Allocation Rules": _default_cohort_allocation_rules_table(),
         "Biological Cost Drivers": _default_biological_cost_drivers_table(),
+        "Kid Routing Rules": _default_kid_routing_rules_table(),
+        "Internal Transfer Pricing": _default_internal_transfer_pricing_table(),
+        "Downstream Intake Rules": _default_downstream_intake_rules_table(),
+        "Transfer Elimination Rules": _default_transfer_elimination_rules_table(),
         "Pricing": _default_pricing_table(),
         "Production Drivers": _default_production_driver_table(),
         "Operating Costs": _default_operating_cost_table(),
@@ -8645,7 +10399,7 @@ def _default_assumption_tables() -> Dict[str, pd.DataFrame]:
         "Admin Wages": _default_admin_wage_input_table(),
         "Capital & Financing": _default_capital_financing_table(),
         "Valuation Inputs": _default_valuation_inputs_table(),
-    }
+    })
 
 
 def _ensure_default_results_loaded() -> None:
@@ -8956,6 +10710,35 @@ def _render_stale_results_notice() -> None:
 
 def _assumption_validation_issues(assumptions: Dict[str, pd.DataFrame]) -> list[str]:
     issues: list[str] = []
+    if _is_breeding_to_unit_mode(assumptions):
+        destination = _selected_transfer_destination(assumptions)
+        if not destination:
+            issues.append("Business Configuration requires a Transfer Destination in Breeding-to-Unit mode.")
+        routing = _ensure_kid_routing_rules_table(assumptions.get("Kid Routing Rules"))
+        if not routing.empty:
+            internal_destinations = routing.loc[
+                routing["Active"].fillna(True).astype(bool)
+                & routing["Destination"].isin(["Meat", "Milk-Cheese", "Combined"]),
+                "Destination",
+            ].dropna().astype(str).unique().tolist()
+            if len(internal_destinations) > 1:
+                issues.append("Kid Routing Rules supports only one internal destination in the current implementation.")
+            grouped = routing.loc[routing["Active"].fillna(True).astype(bool)].groupby("Sex")["Allocation %"].sum()
+            for sex, total in grouped.items():
+                if pd.notna(total) and float(total) > 100.001:
+                    issues.append(f"Kid Routing Rules allocation exceeds 100% for {sex} kids.")
+        transfer_pricing = _ensure_internal_transfer_pricing_table(assumptions.get("Internal Transfer Pricing"))
+        if destination and transfer_pricing.loc[
+            transfer_pricing["Active"].fillna(True).astype(bool)
+            & transfer_pricing["Destination"].astype(str).eq(destination)
+        ].empty:
+            issues.append("Internal Transfer Pricing is missing an active row for the selected transfer destination.")
+        intake_rules = _ensure_downstream_intake_rules_table(assumptions.get("Downstream Intake Rules"))
+        if destination and intake_rules.loc[
+            intake_rules["Active"].fillna(True).astype(bool)
+            & intake_rules["Destination"].astype(str).eq(destination)
+        ].empty:
+            issues.append("Downstream Intake Rules is missing active rows for the selected transfer destination.")
     operating = assumptions.get("Operating Costs", pd.DataFrame())
     if isinstance(operating, pd.DataFrame) and not operating.empty and {"Year", "Field"}.issubset(operating.columns):
         duplicate_mask = operating.duplicated(subset=["Year", "Field"], keep=False)
@@ -10496,6 +12279,20 @@ def main() -> None:
             "Direct Wages Schedule",
             "Admin Wages Schedule",
         ]
+        current_assumption_snapshot = {
+            name: table.copy()
+            for name, table in (st.session_state.get("assumptions") or {}).items()
+            if isinstance(table, pd.DataFrame)
+        }
+        generated_schedule_tab_names: list[str] = []
+        if _is_breeding_to_unit_mode(current_assumption_snapshot):
+            generated_schedule_tab_names = [
+                "Kid Availability",
+                "Kid Routing",
+                "Internal Transfers",
+                "Downstream Intake",
+                "Unit Herd Schedules",
+            ]
         schedule_tabs = st.tabs(
             [
                 "1. Core Schedule",
@@ -10503,6 +12300,10 @@ def main() -> None:
                 "3. Variable Expenses",
                 "4. Direct Wages",
                 "5. Admin Wages",
+                *[
+                    f"{idx}. {name}"
+                    for idx, name in enumerate(generated_schedule_tab_names, start=6)
+                ],
             ]
         )
 
@@ -11133,6 +12934,56 @@ def main() -> None:
                         st.session_state.detail_schedules.get(name, table),
                         _save_other,
                     )
+
+        if generated_schedule_tab_names:
+            preview_outputs: dict[str, pd.DataFrame] = {}
+            preview_error: Optional[str] = None
+            try:
+                preview_schedule = _build_schedule_dataframe(
+                    st.session_state.core_schedule,
+                    st.session_state.detail_schedules,
+                    current_assumption_snapshot,
+                )
+                preview_outputs = _derive_biological_schedules(
+                    preview_schedule,
+                    current_assumption_snapshot,
+                )
+            except ValueError as exc:
+                preview_error = str(exc)
+
+            generated_tab_lookup = {
+                "Kid Availability": "Kid Availability Schedule",
+                "Kid Routing": "Kid Routing Schedule",
+                "Internal Transfers": "Internal Transfer Schedule",
+                "Downstream Intake": "Downstream Intake Schedule",
+            }
+            for offset, tab_name in enumerate(generated_schedule_tab_names, start=len(schedule_tab_names)):
+                with schedule_tabs[offset]:
+                    if preview_error:
+                        st.info(preview_error)
+                        continue
+                    if tab_name == "Unit Herd Schedules":
+                        st.markdown("#### Breeding Unit Schedule")
+                        _render_table(
+                            "Breeding Unit Schedule",
+                            preview_outputs.get("Breeding Unit Schedule"),
+                        )
+                        st.markdown("#### Destination Unit Schedule")
+                        _render_table(
+                            "Destination Unit Schedule",
+                            preview_outputs.get("Destination Unit Schedule"),
+                        )
+                        st.markdown("#### Consolidated Reporting Schedule")
+                        _render_table(
+                            "Reporting Schedule - Consolidated",
+                            preview_outputs.get("Reporting Schedule - Consolidated"),
+                        )
+                        continue
+                    schedule_name = generated_tab_lookup.get(tab_name, "")
+                    _render_table(
+                        schedule_name,
+                        preview_outputs.get(schedule_name),
+                    )
                     detail_tables_for_run[name] = st.session_state.detail_schedules.get(
                         name, table
                     )
@@ -11164,21 +13015,81 @@ def main() -> None:
             "Schedule and the Scenario Explorer on the Input Schedule page."
         )
 
-        st.markdown("#### Business Type")
+        st.markdown("#### Business Structure")
         business_config = _ensure_business_configuration_table(
             st.session_state.assumptions.get("Business Configuration")
         )
         st.session_state.assumptions["Business Configuration"] = business_config
         current_business_type = _selected_business_type(business_config)
-        selected_business_type = st.selectbox(
-            "Select business type",
+        current_operating_model = _selected_operating_model(business_config)
+        current_destination = _selected_transfer_destination(business_config)
+        current_reporting_view = _selected_reporting_view(business_config)
+        current_transfer_pricing_method = _selected_transfer_pricing_method(business_config)
+        current_allow_external_sales = _allow_external_kid_sales(business_config)
+
+        structure_cols = st.columns(3)
+        selected_business_type = structure_cols[0].selectbox(
+            "Business type",
             options=list(BUSINESS_TYPE_OPTIONS),
             index=list(BUSINESS_TYPE_OPTIONS).index(current_business_type),
             key="assump::business_type",
         )
-        if selected_business_type != current_business_type:
-            st.session_state.assumptions["Business Configuration"] = pd.DataFrame(
-                {"Business Type": [selected_business_type]}
+        selected_operating_model = structure_cols[1].selectbox(
+            "Operating model",
+            options=list(OPERATING_MODEL_OPTIONS),
+            index=list(OPERATING_MODEL_OPTIONS).index(current_operating_model),
+            key="assump::operating_model",
+        )
+        destination_options = ["", "Meat", "Milk-Cheese", "Combined"]
+        selected_destination = structure_cols[2].selectbox(
+            "Transfer destination",
+            options=destination_options,
+            index=destination_options.index(current_destination),
+            key="assump::transfer_destination",
+            disabled=selected_operating_model != "Breeding-to-Unit",
+        )
+        structure_cols_2 = st.columns(3)
+        selected_reporting_view = structure_cols_2[0].selectbox(
+            "Reporting view",
+            options=list(REPORTING_VIEW_OPTIONS),
+            index=list(REPORTING_VIEW_OPTIONS).index(current_reporting_view),
+            key="assump::reporting_view",
+        )
+        selected_transfer_pricing_method = structure_cols_2[1].selectbox(
+            "Transfer pricing method",
+            options=list(TRANSFER_PRICING_METHOD_OPTIONS),
+            index=list(TRANSFER_PRICING_METHOD_OPTIONS).index(current_transfer_pricing_method),
+            key="assump::transfer_pricing_method",
+            disabled=selected_operating_model != "Breeding-to-Unit",
+        )
+        selected_allow_external_sales = structure_cols_2[2].checkbox(
+            "Allow external kid sales",
+            value=current_allow_external_sales,
+            key="assump::allow_external_kid_sales",
+            disabled=selected_operating_model != "Breeding-to-Unit",
+        )
+        if (
+            selected_business_type != current_business_type
+            or selected_operating_model != current_operating_model
+            or selected_destination != current_destination
+            or selected_reporting_view != current_reporting_view
+            or selected_transfer_pricing_method != current_transfer_pricing_method
+            or bool(selected_allow_external_sales) != bool(current_allow_external_sales)
+        ):
+            st.session_state.assumptions["Business Configuration"] = _ensure_business_configuration_table(
+                pd.DataFrame(
+                    {
+                        "Business Type": [selected_business_type],
+                        "Operating Model": [selected_operating_model],
+                        "Transfer Destination": [selected_destination],
+                        "Reporting View": [selected_reporting_view],
+                        "Transfer Pricing Method": [selected_transfer_pricing_method],
+                        "Allow External Kid Sales": [selected_allow_external_sales],
+                    }
+                )
+            )
+            st.session_state.assumptions = _sync_transfer_tables_to_business_configuration(
+                st.session_state.assumptions
             )
             st.session_state.assumptions = _sync_commercial_assumptions_to_core(
                 st.session_state.assumptions,
@@ -11418,7 +13329,81 @@ def main() -> None:
         for definition in biological_editors:
             assumption_tables[definition.name] = st.session_state.assumptions[definition.name]
 
-        st.markdown("### 3. Commercial Drivers")
+        if _is_breeding_to_unit_mode(st.session_state.assumptions):
+            st.markdown("### 3. Kid Routing")
+            st.caption(
+                "Route weaned kids from the Breeding unit into external sale or one downstream operating unit. "
+                "This is the explicit transfer layer between the breeding engine and the downstream business."
+            )
+
+            routing_table = _ensure_kid_routing_rules_table(
+                st.session_state.assumptions.get("Kid Routing Rules")
+            )
+            st.session_state.assumptions["Kid Routing Rules"] = routing_table
+
+            def _save_kid_routing(updated: pd.DataFrame) -> None:
+                st.session_state.assumptions["Kid Routing Rules"] = _ensure_kid_routing_rules_table(updated)
+                _reset_cached_results()
+
+            _render_schedule_row_editor(
+                "assump::kid_routing_rules",
+                routing_table,
+                _save_kid_routing,
+            )
+            assumption_tables["Kid Routing Rules"] = st.session_state.assumptions["Kid Routing Rules"]
+
+            transfer_pricing_table = _ensure_internal_transfer_pricing_table(
+                st.session_state.assumptions.get("Internal Transfer Pricing")
+            )
+            st.session_state.assumptions["Internal Transfer Pricing"] = transfer_pricing_table
+
+            def _save_transfer_pricing(updated: pd.DataFrame) -> None:
+                st.session_state.assumptions["Internal Transfer Pricing"] = _ensure_internal_transfer_pricing_table(updated)
+                _reset_cached_results()
+
+            st.markdown("#### Internal Transfer Pricing")
+            _render_schedule_row_editor(
+                "assump::internal_transfer_pricing",
+                transfer_pricing_table,
+                _save_transfer_pricing,
+            )
+            assumption_tables["Internal Transfer Pricing"] = st.session_state.assumptions["Internal Transfer Pricing"]
+
+            downstream_intake = _ensure_downstream_intake_rules_table(
+                st.session_state.assumptions.get("Downstream Intake Rules")
+            )
+            st.session_state.assumptions["Downstream Intake Rules"] = downstream_intake
+
+            def _save_downstream_intake(updated: pd.DataFrame) -> None:
+                st.session_state.assumptions["Downstream Intake Rules"] = _ensure_downstream_intake_rules_table(updated)
+                _reset_cached_results()
+
+            st.markdown("### 4. Downstream Unit Rules")
+            _render_schedule_row_editor(
+                "assump::downstream_intake_rules",
+                downstream_intake,
+                _save_downstream_intake,
+            )
+            assumption_tables["Downstream Intake Rules"] = st.session_state.assumptions["Downstream Intake Rules"]
+
+            elimination_rules = _ensure_transfer_elimination_rules_table(
+                st.session_state.assumptions.get("Transfer Elimination Rules")
+            )
+            st.session_state.assumptions["Transfer Elimination Rules"] = elimination_rules
+
+            def _save_elimination_rules(updated: pd.DataFrame) -> None:
+                st.session_state.assumptions["Transfer Elimination Rules"] = _ensure_transfer_elimination_rules_table(updated)
+                _reset_cached_results()
+
+            st.markdown("#### Transfer Elimination Rules")
+            _render_schedule_row_editor(
+                "assump::transfer_elimination_rules",
+                elimination_rules,
+                _save_elimination_rules,
+            )
+            assumption_tables["Transfer Elimination Rules"] = st.session_state.assumptions["Transfer Elimination Rules"]
+
+        st.markdown("### 5. Commercial Drivers")
         st.caption(
             "These assumptions define product pricing logic and growth patterns that should align with the revenue "
             "and gross margin structure used in the Input Schedule."
@@ -11746,7 +13731,7 @@ def main() -> None:
 
         assumption_tables["Pricing"] = st.session_state.assumptions["Pricing"]
 
-        st.markdown("### 3. Operating Drivers")
+        st.markdown("### 6. Operating Drivers")
         st.caption(
             "These assumptions establish the operating-cost baseline that should stay coordinated with the COGS, "
             "variable expenses, and wage schedules on the Input Schedule page."
@@ -12038,6 +14023,29 @@ def main() -> None:
         else:
             _render_stale_results_notice()
             results = st.session_state.results
+            scenario_label = results.get("selected_scenario", "Scenario")
+            reporting_context = _cached_result_view(
+                "reporting_views",
+                scenario_label,
+                lambda: _reporting_views_for_result(results),
+            )
+            entity_options = reporting_context.get("entity_options", ["Consolidated"])
+            default_entity = reporting_context.get("default_entity", entity_options[0])
+            if st.session_state.get("reporting_entity_selector") not in entity_options:
+                st.session_state["reporting_entity_selector"] = default_entity
+            selected_reporting_entity = st.selectbox(
+                "Reporting entity",
+                options=entity_options,
+                key="reporting_entity_selector",
+            )
+            base_reporting_schedule = reporting_context.get("base_schedules", {}).get(
+                selected_reporting_entity,
+                results["base"],
+            )
+            scenario_reporting_schedule = reporting_context.get("scenario_schedules", {}).get(
+                selected_reporting_entity,
+                results["scenario"],
+            )
             financial_tabs = st.tabs(
                 [
                         "Statement of Financial Performance",
@@ -12045,32 +14053,30 @@ def main() -> None:
                         "Statement of Cash Flow",
                     ]
                 )
-    
-            scenario_label = results.get("selected_scenario", "Scenario")
 
             with financial_tabs[0]:
                 try:
                     financial_views = _cached_result_view(
                         "financial_statements",
-                        scenario_label,
+                        f"{scenario_label}::{selected_reporting_entity}",
                         lambda: {
                             "sop_base": results["model"].statement_of_financial_performance(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "sop_scenario": results["model"].statement_of_financial_performance(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                             "sofp_base": results["model"].statement_of_financial_position(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "sofp_scenario": results["model"].statement_of_financial_position(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                             "socf_base": results["model"].statement_of_cash_flow(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "socf_scenario": results["model"].statement_of_cash_flow(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                         },
                     )
@@ -12093,25 +14099,25 @@ def main() -> None:
                 try:
                     financial_views = _cached_result_view(
                         "financial_statements",
-                        scenario_label,
+                        f"{scenario_label}::{selected_reporting_entity}",
                         lambda: {
                             "sop_base": results["model"].statement_of_financial_performance(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "sop_scenario": results["model"].statement_of_financial_performance(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                             "sofp_base": results["model"].statement_of_financial_position(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "sofp_scenario": results["model"].statement_of_financial_position(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                             "socf_base": results["model"].statement_of_cash_flow(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "socf_scenario": results["model"].statement_of_cash_flow(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                         },
                     )
@@ -12134,25 +14140,25 @@ def main() -> None:
                 try:
                     financial_views = _cached_result_view(
                         "financial_statements",
-                        scenario_label,
+                        f"{scenario_label}::{selected_reporting_entity}",
                         lambda: {
                             "sop_base": results["model"].statement_of_financial_performance(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "sop_scenario": results["model"].statement_of_financial_performance(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                             "sofp_base": results["model"].statement_of_financial_position(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "sofp_scenario": results["model"].statement_of_financial_position(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                             "socf_base": results["model"].statement_of_cash_flow(
-                                results["base"], annual=True
+                                base_reporting_schedule, annual=True
                             ),
                             "socf_scenario": results["model"].statement_of_cash_flow(
-                                results["scenario"], annual=True
+                                scenario_reporting_schedule, annual=True
                             ),
                         },
                     )
@@ -12304,6 +14310,24 @@ def main() -> None:
             "%Y-%m-%d %H:%M UTC"
         )
 
+        assumptions_snapshot = {
+            name: table.copy()
+            for name, table in assumption_tables.items()
+            if isinstance(table, pd.DataFrame)
+        }
+        detail_snapshot = {
+            name: table.copy()
+            for name, table in st.session_state.detail_schedules.items()
+            if isinstance(table, pd.DataFrame)
+        }
+        for payload in scenario_results.values():
+            payload["assumption_tables"] = {
+                name: table.copy() for name, table in assumptions_snapshot.items()
+            }
+            payload["detail_tables"] = {
+                name: table.copy() for name, table in detail_snapshot.items()
+            }
+
         st.session_state.all_scenario_results = scenario_results
 
         previous_selection = st.session_state.get("selected_scenario_name")
@@ -12435,21 +14459,32 @@ def main() -> None:
             st.info("Supplementary schedules will appear once the model has been run.")
         else:
             _render_stale_results_notice()
-            valuation_summary = results.get("valuation", {}) or {}
-            model_audit = results.get("model_audit")
-            if not isinstance(model_audit, dict):
-                model_audit = results["model"].model_audit(results["scenario"], annual=True)
-            working_capital_annual = results.get("working_capital_annual")
-            if not isinstance(working_capital_annual, pd.DataFrame):
-                working_capital_annual = pd.DataFrame()
-            debt_capacity_annual = results.get("debt_capacity_annual")
-            if not isinstance(debt_capacity_annual, pd.DataFrame):
-                debt_capacity_annual = pd.DataFrame()
-            ufcf_schedule_annual = results.get("ufcf_schedule_annual")
-            if not isinstance(ufcf_schedule_annual, pd.DataFrame):
-                ufcf_schedule_annual = pd.DataFrame()
-            scenario_comparison = _scenario_viability_table(
-                st.session_state.get("all_scenario_results", {})
+            reporting_context = _cached_result_view(
+                "reporting_views",
+                results.get("selected_scenario", "Scenario"),
+                lambda: _reporting_views_for_result(results),
+            )
+            entity_options = reporting_context.get("entity_options", ["Consolidated"])
+            default_entity = reporting_context.get("default_entity", entity_options[0])
+            if st.session_state.get("reporting_entity_selector") not in entity_options:
+                st.session_state["reporting_entity_selector"] = default_entity
+            selected_reporting_entity = st.selectbox(
+                "Reporting entity",
+                options=entity_options,
+                key="reporting_entity_selector",
+            )
+            scenario = reporting_context.get("scenario_schedules", {}).get(
+                selected_reporting_entity,
+                results["scenario"],
+            )
+            valuation_summary = results["model"].valuation_summary(scenario, annual=True)
+            model_audit = results["model"].model_audit(scenario, annual=True)
+            working_capital_annual = results["model"].working_capital_schedule(scenario, annual=True)
+            debt_capacity_annual = results["model"].debt_capacity_schedule(scenario, annual=True)
+            ufcf_schedule_annual = results["model"].ufcf_schedule(scenario, annual=True)
+            scenario_comparison = _reporting_scenario_viability_table(
+                st.session_state.get("all_scenario_results", {}),
+                selected_reporting_entity,
             )
             pricing_assumptions = results.get("pricing_assumptions")
             if not isinstance(pricing_assumptions, pd.DataFrame):
@@ -12516,14 +14551,24 @@ def main() -> None:
                         st.line_chart(qty_chart)
 
             st.subheader("KPIs (Annual)")
+            kpis = results["model"].kpis(scenario, annual=True)
             st.dataframe(_format_kpis_for_display(kpis))
 
-            scenario = results["scenario"]
-            break_even = results["break_even"]
+            break_even = results["model"].break_even(scenario, annual=True)
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("#### Revenue vs NPAT")
-                st.line_chart(scenario[["Revenue_adj", "NPAT_adj"]])
+                revenue_chart_cols = [
+                    col for col in ["Revenue_adj", "NPAT_adj", "Revenue", "NPAT"] if col in scenario.columns
+                ]
+                if {"Revenue_adj", "NPAT_adj"}.issubset(scenario.columns):
+                    st.line_chart(scenario[["Revenue_adj", "NPAT_adj"]])
+                elif {"Revenue", "NPAT"}.issubset(scenario.columns):
+                    st.line_chart(scenario[["Revenue", "NPAT"]])
+                elif revenue_chart_cols:
+                    st.line_chart(scenario[revenue_chart_cols])
+                else:
+                    st.info("Revenue and profitability series are not available for this view.")
                 st.markdown("#### Expense Breakdown")
                 expense_cols = [
                     col
@@ -12543,9 +14588,17 @@ def main() -> None:
 
             with col2:
                 st.markdown("#### Gross Margin vs EBITDA")
-                st.line_chart(scenario[["Gross Margin_adj", "EBITDA_adj"]])
+                if {"Gross Margin_adj", "EBITDA_adj"}.issubset(scenario.columns):
+                    st.line_chart(scenario[["Gross Margin_adj", "EBITDA_adj"]])
+                elif {"Gross Margin", "EBITDA"}.issubset(scenario.columns):
+                    st.line_chart(scenario[["Gross Margin", "EBITDA"]])
+                else:
+                    st.info("Margin series are not available for this view.")
                 st.markdown("#### Break-even Revenue")
-                st.bar_chart(break_even["Break-even Revenue"])
+                if not break_even.empty and "Break-even Revenue" in break_even.columns:
+                    st.bar_chart(break_even["Break-even Revenue"])
+                else:
+                    st.info("Break-even schedule is not available for this view.")
 
             viability_col1, viability_col2 = st.columns(2)
             with viability_col1:
@@ -12603,7 +14656,7 @@ def main() -> None:
             st.download_button(
                 "Download Scenario CSV",
                 scenario.to_csv().encode("utf-8"),
-                file_name="scenario_timeseries.csv",
+                file_name=f"{_scenario_key_suffix(selected_reporting_entity)}_scenario_timeseries.csv",
                 mime="text/csv",
             )
 
@@ -12620,6 +14673,20 @@ def main() -> None:
                 "Benchmark KPIs",
                 "Commercial Revenue by Product",
                 "Commercial Quantity by Period",
+                "Kid Availability Schedule",
+                "Kid Routing Schedule",
+                "Internal Transfer Schedule",
+                "Breeding External Sales Schedule",
+                "Downstream Intake Schedule",
+                "Breeding Unit Schedule",
+                "Destination Unit Schedule",
+                "Internal Transfer Elimination Schedule",
+                "Unit Revenue Bridge",
+                "Reporting Schedule - Breeding",
+                "Reporting Schedule - Consolidated",
+                "Reporting Schedule - Meat",
+                "Reporting Schedule - Milk-Cheese",
+                "Reporting Schedule - Combined",
                 "Debt Schedule",
                 "Equity Schedule",
                 "Working Capital Schedule",

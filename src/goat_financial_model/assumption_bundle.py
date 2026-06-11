@@ -25,6 +25,10 @@ class CommercialConfig:
     pricing: pd.DataFrame = field(default_factory=pd.DataFrame)
     production_drivers: pd.DataFrame = field(default_factory=pd.DataFrame)
     scenario_controls: pd.DataFrame = field(default_factory=pd.DataFrame)
+    kid_routing_rules: pd.DataFrame = field(default_factory=pd.DataFrame)
+    internal_transfer_pricing: pd.DataFrame = field(default_factory=pd.DataFrame)
+    downstream_intake_rules: pd.DataFrame = field(default_factory=pd.DataFrame)
+    transfer_elimination_rules: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,10 @@ def build_assumption_bundle(
             pricing=tables.get("Pricing", pd.DataFrame()),
             production_drivers=tables.get("Production Drivers", pd.DataFrame()),
             scenario_controls=tables.get("Scenario Controls", pd.DataFrame()),
+            kid_routing_rules=tables.get("Kid Routing Rules", pd.DataFrame()),
+            internal_transfer_pricing=tables.get("Internal Transfer Pricing", pd.DataFrame()),
+            downstream_intake_rules=tables.get("Downstream Intake Rules", pd.DataFrame()),
+            transfer_elimination_rules=tables.get("Transfer Elimination Rules", pd.DataFrame()),
         ),
         financing=FinancingConfig(
             capital_financing=tables.get("Capital & Financing", pd.DataFrame()),

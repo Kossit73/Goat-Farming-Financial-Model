@@ -147,6 +147,10 @@ def build_scenario_seed(
             production_driver_table,
             adjustments,
         )
+        scenario_assumptions = dict(scenario_assumptions)
+        scenario_assumptions["Pricing"] = scenario_pricing
+        if production_driver_table is not None:
+            scenario_assumptions["Production Drivers"] = production_driver_table
         scenario_seed = hooks.apply_pricing_assumptions_to_schedule(
             scenario_seed,
             scenario_pricing,
