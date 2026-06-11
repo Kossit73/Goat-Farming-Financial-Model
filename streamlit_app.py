@@ -7082,10 +7082,11 @@ def _build_reporting_unit_schedules(
     pricing_source = pricing_table if isinstance(pricing_table, pd.DataFrame) and not pricing_table.empty else assumption_map.get("Pricing")
     external_revenue = _pricing_revenue_by_business_unit(pricing_source, working.index)
     weights = _supplementary_unit_weight_frame(working.index, units, external_revenue, supplementary)
+    numeric_working = working.apply(pd.to_numeric, errors="coerce")
 
     unit_frames = {
         unit: _sync_reporting_adjusted_columns(
-            working.apply(pd.to_numeric, errors="ignore").copy().mul(weights[unit], axis=0)
+            numeric_working.copy().mul(weights[unit], axis=0)
         )
         for unit in units
     }
