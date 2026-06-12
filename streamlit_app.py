@@ -13251,7 +13251,10 @@ def main() -> None:
                     _save_other,
                 )
 
-        if generated_schedule_tab_names:
+        preview_generated_schedule = (
+            active_schedule_section in schedule_section_labels[len(schedule_tab_names):]
+        )
+        if generated_schedule_tab_names and preview_generated_schedule:
             preview_outputs: dict[str, pd.DataFrame] = {}
             preview_error: Optional[str] = None
             try:
@@ -14377,31 +14380,39 @@ def main() -> None:
             try:
                 financial_views = _cached_result_view(
                     "financial_statements",
-                    f"{scenario_label}::{selected_reporting_entity}",
-                    lambda: {
-                        "sop_base": results["model"].statement_of_financial_performance(
-                            base_reporting_schedule, annual=True
-                        ),
-                        "sop_scenario": results["model"].statement_of_financial_performance(
-                            scenario_reporting_schedule, annual=True
-                        ),
-                        "sofp_base": results["model"].statement_of_financial_position(
-                            base_reporting_schedule, annual=True
-                        ),
-                        "sofp_scenario": results["model"].statement_of_financial_position(
-                            scenario_reporting_schedule, annual=True
-                        ),
-                        "socf_base": results["model"].statement_of_cash_flow(
-                            base_reporting_schedule, annual=True
-                        ),
-                        "socf_scenario": results["model"].statement_of_cash_flow(
-                            scenario_reporting_schedule, annual=True
-                        ),
-                    },
+                    f"{scenario_label}::{selected_reporting_entity}::{active_financial_section}",
+                    lambda: (
+                        {
+                            "base": results["model"].statement_of_financial_performance(
+                                base_reporting_schedule, annual=True
+                            ),
+                            "scenario": results["model"].statement_of_financial_performance(
+                                scenario_reporting_schedule, annual=True
+                            ),
+                        }
+                        if active_financial_section == financial_section_labels[0]
+                        else {
+                            "base": results["model"].statement_of_financial_position(
+                                base_reporting_schedule, annual=True
+                            ),
+                            "scenario": results["model"].statement_of_financial_position(
+                                scenario_reporting_schedule, annual=True
+                            ),
+                        }
+                        if active_financial_section == financial_section_labels[1]
+                        else {
+                            "base": results["model"].statement_of_cash_flow(
+                                base_reporting_schedule, annual=True
+                            ),
+                            "scenario": results["model"].statement_of_cash_flow(
+                                scenario_reporting_schedule, annual=True
+                            ),
+                        }
+                    ),
                 )
                 if active_financial_section == financial_section_labels[0]:
-                    sop_base = financial_views["sop_base"]
-                    sop_scenario = financial_views["sop_scenario"]
+                    sop_base = financial_views["base"]
+                    sop_scenario = financial_views["scenario"]
                     st.dataframe(
                         pd.concat(
                             {"Base": sop_base, scenario_label: sop_scenario}, axis=1
@@ -14413,8 +14424,8 @@ def main() -> None:
                         sop_base, sop_scenario, scenario_label
                     )
                 elif active_financial_section == financial_section_labels[1]:
-                    sofp_base = financial_views["sofp_base"]
-                    sofp_scenario = financial_views["sofp_scenario"]
+                    sofp_base = financial_views["base"]
+                    sofp_scenario = financial_views["scenario"]
                     st.dataframe(
                         pd.concat(
                             {"Base": sofp_base, scenario_label: sofp_scenario}, axis=1
@@ -14426,8 +14437,8 @@ def main() -> None:
                         sofp_base, sofp_scenario, scenario_label
                     )
                 else:
-                    socf_base = financial_views["socf_base"]
-                    socf_scenario = financial_views["socf_scenario"]
+                    socf_base = financial_views["base"]
+                    socf_scenario = financial_views["scenario"]
                     st.dataframe(
                         pd.concat(
                             {"Base": socf_base, scenario_label: socf_scenario}, axis=1
@@ -14613,32 +14624,29 @@ def main() -> None:
 
     results = st.session_state.results
     results_stale = bool(st.session_state.get(MODEL_RESULTS_STALE_KEY, True))
+    show_results_summary = active_main_section in {
+        "Financials",
+        "Dashboard",
+    }
 
     if results is None:
-        with excel_download_container:
-            st.info("Run the model to enable the Excel workbook download.")
-
-        st.info(
-            "Complete the assumptions and schedules, then press *Run model* "
-            "to generate the scenario outputs."
-        )
-    else:
+        if show_results_summary:
+            with excel_download_container:
+                st.info("Run the model to enable the Excel workbook download.")
+            st.info(
+                "Complete the assumptions and schedules, then press *Run model* "
+                "to generate the scenario outputs."
+            )
+    elif show_results_summary:
         _render_stale_results_notice()
         model = results["model"]
         scenario = results["scenario"]
-        kpis = results["kpis"]
-        break_even = results["break_even"]
         selected_scenario = results.get("selected_scenario", "Scenario")
         model.scenario_name = selected_scenario
-        model_audit = results.get("model_audit")
-        if not isinstance(model_audit, dict):
-            model_audit = model.model_audit(scenario, annual=True)
 
         valuation_issues = _valuation_diagnostic_messages(model)
         if valuation_issues:
             st.warning("Valuation diagnostics: " + " ".join(f"- {msg}" for msg in valuation_issues))
-
-        _render_model_audit(model_audit)
 
         valuation_summary = results.get("valuation", {}) or {}
         debt_capacity_annual = results.get("debt_capacity_annual")
