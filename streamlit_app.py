@@ -232,6 +232,30 @@ def _cached_result_view(cache_name: str, scenario_name: str, builder: Callable[[
         _safe_session_state_set(MODEL_VIEW_CACHE_KEY, cache)
     return cache[key]
 
+
+def _section_selector(
+    label: str,
+    options: Sequence[str],
+    key: str,
+    *,
+    help: Optional[str] = None,
+) -> str:
+    choices = list(options)
+    if not choices:
+        raise ValueError(f"{label} requires at least one option.")
+    current = _safe_session_state_get(key, choices[0])
+    if current not in choices:
+        current = choices[0]
+        _safe_session_state_set(key, current)
+    return st.radio(
+        label,
+        options=choices,
+        index=choices.index(current),
+        key=key,
+        horizontal=True,
+        help=help,
+    )
+
 st.set_page_config(page_title="Goat Farm Financial Model", layout="wide")
 
 
@@ -10364,9 +10388,9 @@ def _reporting_scenario_viability_table(
         if not isinstance(schedule_view, pd.DataFrame) or schedule_view.empty:
             continue
         if use_cached_consolidated:
-            valuation = payload.get("valuation_annual")
+            valuation = payload.get("valuation")
             if not isinstance(valuation, dict) or not valuation:
-                valuation = model.valuation_summary(schedule_view, annual=True)
+                valuation = model.valuation_summary(schedule_view)
             debt_capacity = payload.get("debt_capacity_annual")
             if not isinstance(debt_capacity, pd.DataFrame):
                 debt_capacity = model.debt_capacity_schedule(schedule_view, annual=True)
@@ -11439,6 +11463,15 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
         key="analytics_module_filter",
         help="Show only selected modules below.",
     )
+    if active_modules:
+        active_module_title = _section_selector(
+            "Analytics Module",
+            active_modules,
+            key="analytics_active_module_selector",
+            help="Only the selected analytics module is rendered.",
+        )
+    else:
+        active_module_title = ""
 
     linked_sources = [
         "Input Schedule",
@@ -11456,6 +11489,8 @@ def _render_analytics_framework(results: Optional[Dict[str, Any]]) -> None:
 
     for tool in ANALYTICS_FRAMEWORK_TOOLS:
         if tool["title"] not in active_modules:
+            continue
+        if tool["title"] != active_module_title:
             continue
         tool_key = tool["key"]
         config = framework[tool_key]
@@ -12496,18 +12531,22 @@ def main() -> None:
     detail_tables_for_run: Dict[str, pd.DataFrame] = {}
     core_editor: Optional[pd.DataFrame] = None
 
-    tabs = st.tabs(
-        [
-            "Assumptions",
-            "Input Schedule",
-            "Financials",
-            "Dashboard",
-            "Advanced Analytics",
-            "AI Decision Making",
-        ]
+    main_sections = [
+        "Assumptions",
+        "Input Schedule",
+        "Financials",
+        "Dashboard",
+        "Advanced Analytics",
+        "AI Decision Making",
+    ]
+    active_main_section = _section_selector(
+        "Workspace Section",
+        main_sections,
+        key="main_section_selector",
+        help="Only the selected section is rendered to keep the app responsive.",
     )
 
-    with tabs[1]:
+    if active_main_section == "Input Schedule":
         st.subheader("Input Schedule")
         _render_workflow_status_strip()
         st.caption(
@@ -12565,21 +12604,25 @@ def main() -> None:
                 "Downstream Intake",
                 "Unit Herd Schedules",
             ]
-        schedule_tabs = st.tabs(
-            [
-                "1. Core Schedule",
-                "2. COGS Schedule",
-                "3. Variable Expenses",
-                "4. Direct Wages",
-                "5. Admin Wages",
-                *[
-                    f"{idx}. {name}"
-                    for idx, name in enumerate(generated_schedule_tab_names, start=6)
-                ],
-            ]
+        schedule_section_labels = [
+            "1. Core Schedule",
+            "2. COGS Schedule",
+            "3. Variable Expenses",
+            "4. Direct Wages",
+            "5. Admin Wages",
+            *[
+                f"{idx}. {name}"
+                for idx, name in enumerate(generated_schedule_tab_names, start=6)
+            ],
+        ]
+        active_schedule_section = _section_selector(
+            "Schedule Section",
+            schedule_section_labels,
+            key="input_schedule_section_selector",
+            help="Only the selected schedule editor is rendered.",
         )
 
-        with schedule_tabs[0]:
+        if active_schedule_section == schedule_section_labels[0]:
             core_table = st.session_state.get("core_schedule")
             if not isinstance(core_table, pd.DataFrame):
                 core_table = pd.DataFrame()
@@ -13080,132 +13123,133 @@ def main() -> None:
                     )
 
         for idx, name in enumerate(schedule_tab_names[1:], start=1):
-            with schedule_tabs[idx]:
-                if name == "COGS Schedule":
-                    st.markdown("#### Cost of Goods Sold Schedule")
-                    st.caption(
-                        "Adjust COGS as a percentage of revenue, add or remove periods, and apply "
-                        "automatic yearly increments. Amounts update automatically when revenue is available."
-                    )
+            if active_schedule_section != schedule_section_labels[idx]:
+                continue
+            if name == "COGS Schedule":
+                st.markdown("#### Cost of Goods Sold Schedule")
+                st.caption(
+                    "Adjust COGS as a percentage of revenue, add or remove periods, and apply "
+                    "automatic yearly increments. Amounts update automatically when revenue is available."
+                )
 
-                    cogs_table = _ensure_cogs_schedule(
-                        st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        st.session_state.core_schedule,
-                    )
-                    cogs_table = _sync_cogs_from_operating_assumptions(
-                        cogs_table,
-                        st.session_state.core_schedule,
-                        st.session_state.get("assumptions"),
-                    )
-                    cogs_table = render_cogs_schedule_editor(
-                        cogs_table=cogs_table,
-                        core_schedule=st.session_state.core_schedule,
-                        save_table=lambda updated, schedule_name=name: _schedule_editor_save_table(
-                            schedule_name,
-                            updated,
-                        ),
-                        render_row_editor=_render_schedule_row_editor,
-                        clear_editor_state=_clear_schedule_editor_state,
-                        apply_pct_fn=_apply_cogs_percentage,
-                        apply_increment_fn=_apply_yearly_increment,
-                        add_row_fn=_add_cogs_row,
-                        remove_row_fn=_remove_cogs_row,
-                        sync_fn=_sync_cogs_table,
-                        ensure_fn=_ensure_cogs_schedule,
-                    )
-                    detail_tables_for_run[name] = cogs_table
-                elif name == "Variable Expenses Schedule":
-                    st.markdown("#### Variable Expenses Schedule")
-                    st.caption(
-                        "Manage individual variable cost items, add or remove rows, and apply yearly increments "
-                        "to quickly escalate recurring expenses. Amounts roll up into the income statement automatically."
-                    )
+                cogs_table = _ensure_cogs_schedule(
+                    st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                    st.session_state.core_schedule,
+                )
+                cogs_table = _sync_cogs_from_operating_assumptions(
+                    cogs_table,
+                    st.session_state.core_schedule,
+                    st.session_state.get("assumptions"),
+                )
+                cogs_table = render_cogs_schedule_editor(
+                    cogs_table=cogs_table,
+                    core_schedule=st.session_state.core_schedule,
+                    save_table=lambda updated, schedule_name=name: _schedule_editor_save_table(
+                        schedule_name,
+                        updated,
+                    ),
+                    render_row_editor=_render_schedule_row_editor,
+                    clear_editor_state=_clear_schedule_editor_state,
+                    apply_pct_fn=_apply_cogs_percentage,
+                    apply_increment_fn=_apply_yearly_increment,
+                    add_row_fn=_add_cogs_row,
+                    remove_row_fn=_remove_cogs_row,
+                    sync_fn=_sync_cogs_table,
+                    ensure_fn=_ensure_cogs_schedule,
+                )
+                detail_tables_for_run[name] = cogs_table
+            elif name == "Variable Expenses Schedule":
+                st.markdown("#### Variable Expenses Schedule")
+                st.caption(
+                    "Manage individual variable cost items, add or remove rows, and apply yearly increments "
+                    "to quickly escalate recurring expenses. Amounts roll up into the income statement automatically."
+                )
 
-                    variable_spec = _variable_expense_schedule_editor_spec()
-                    variable_table, aggregated_variable = render_incremental_schedule_editor(
-                        spec=variable_spec,
-                        table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        core_schedule=st.session_state.core_schedule,
-                        save_table=_schedule_editor_save_table,
-                        render_row_editor=_render_schedule_row_editor,
-                        clear_editor_state=_clear_schedule_editor_state,
-                    )
+                variable_spec = _variable_expense_schedule_editor_spec()
+                _, aggregated_variable = render_incremental_schedule_editor(
+                    spec=variable_spec,
+                    table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                    core_schedule=st.session_state.core_schedule,
+                    save_table=_schedule_editor_save_table,
+                    render_row_editor=_render_schedule_row_editor,
+                    clear_editor_state=_clear_schedule_editor_state,
+                )
 
-                    st.info(
-                        "Master variable-expense inputs now live on the Assumptions page. Use `Apply to Schedule` "
-                        "there to regenerate this schedule across the full production horizon, then refine period "
-                        "rows here only when needed."
-                    )
+                st.info(
+                    "Master variable-expense inputs now live on the Assumptions page. Use `Apply to Schedule` "
+                    "there to regenerate this schedule across the full production horizon, then refine period "
+                    "rows here only when needed."
+                )
 
-                    detail_tables_for_run[name] = aggregated_variable
+                detail_tables_for_run[name] = aggregated_variable
 
-                    render_schedule_summary("Variable Expenses Summary", aggregated_variable)
-                elif name == "Direct Wages Schedule":
-                    st.markdown("#### Direct Wages Schedule")
-                    st.caption(
-                        "Capture direct labour by position, headcount, and monthly salary per head. Position totals "
-                        "roll up automatically into the model's EBITDA calculations."
-                    )
+                render_schedule_summary("Variable Expenses Summary", aggregated_variable)
+            elif name == "Direct Wages Schedule":
+                st.markdown("#### Direct Wages Schedule")
+                st.caption(
+                    "Capture direct labour by position, headcount, and monthly salary per head. Position totals "
+                    "roll up automatically into the model's EBITDA calculations."
+                )
 
-                    direct_spec = _direct_wage_schedule_editor_spec()
-                    direct_table, aggregated_direct = render_incremental_schedule_editor(
-                        spec=direct_spec,
-                        table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        core_schedule=st.session_state.core_schedule,
-                        save_table=_schedule_editor_save_table,
-                        render_row_editor=_render_schedule_row_editor,
-                        clear_editor_state=_clear_schedule_editor_state,
-                    )
+                direct_spec = _direct_wage_schedule_editor_spec()
+                _, aggregated_direct = render_incremental_schedule_editor(
+                    spec=direct_spec,
+                    table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                    core_schedule=st.session_state.core_schedule,
+                    save_table=_schedule_editor_save_table,
+                    render_row_editor=_render_schedule_row_editor,
+                    clear_editor_state=_clear_schedule_editor_state,
+                )
 
-                    st.info(
-                        "Master direct-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
-                        "to rebuild labour rows across the full horizon, then use this schedule for downstream "
-                        "refinements only."
-                    )
+                st.info(
+                    "Master direct-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
+                    "to rebuild labour rows across the full horizon, then use this schedule for downstream "
+                    "refinements only."
+                )
 
-                    detail_tables_for_run[name] = aggregated_direct
+                detail_tables_for_run[name] = aggregated_direct
 
-                    render_schedule_summary("Direct Wages Summary", aggregated_direct)
-                elif name == "Admin Wages Schedule":
-                    st.markdown("#### Admin Wages Schedule")
-                    st.caption(
-                        "Capture administrative labour by position, headcount, and monthly salary per head. Position totals "
-                        "roll up automatically into the income statement."
-                    )
+                render_schedule_summary("Direct Wages Summary", aggregated_direct)
+            elif name == "Admin Wages Schedule":
+                st.markdown("#### Admin Wages Schedule")
+                st.caption(
+                    "Capture administrative labour by position, headcount, and monthly salary per head. Position totals "
+                    "roll up automatically into the income statement."
+                )
 
-                    admin_spec = _admin_wage_schedule_editor_spec()
-                    admin_table, aggregated_admin = render_incremental_schedule_editor(
-                        spec=admin_spec,
-                        table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
-                        core_schedule=st.session_state.core_schedule,
-                        save_table=_schedule_editor_save_table,
-                        render_row_editor=_render_schedule_row_editor,
-                        clear_editor_state=_clear_schedule_editor_state,
-                    )
+                admin_spec = _admin_wage_schedule_editor_spec()
+                _, aggregated_admin = render_incremental_schedule_editor(
+                    spec=admin_spec,
+                    table=st.session_state.detail_schedules.get(name, pd.DataFrame()),
+                    core_schedule=st.session_state.core_schedule,
+                    save_table=_schedule_editor_save_table,
+                    render_row_editor=_render_schedule_row_editor,
+                    clear_editor_state=_clear_schedule_editor_state,
+                )
 
-                    st.info(
-                        "Master admin-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
-                        "to regenerate this schedule across the active production horizon, then fine-tune rows here "
-                        "if the live plan needs adjustments."
-                    )
+                st.info(
+                    "Master admin-wage inputs now live on the Assumptions page. Use `Apply to Schedule` there "
+                    "to regenerate this schedule across the active production horizon, then fine-tune rows here "
+                    "if the live plan needs adjustments."
+                )
 
-                    detail_tables_for_run[name] = aggregated_admin
+                detail_tables_for_run[name] = aggregated_admin
 
-                    render_schedule_summary("Admin Wages Summary", aggregated_admin)
-                else:
-                    table = st.session_state.detail_schedules.get(name, pd.DataFrame())
-                    if not isinstance(table, pd.DataFrame):
-                        table = pd.DataFrame()
-                        st.session_state.detail_schedules[name] = table
+                render_schedule_summary("Admin Wages Summary", aggregated_admin)
+            else:
+                table = st.session_state.detail_schedules.get(name, pd.DataFrame())
+                if not isinstance(table, pd.DataFrame):
+                    table = pd.DataFrame()
+                    st.session_state.detail_schedules[name] = table
 
-                    def _save_other(updated: pd.DataFrame, schedule_name: str = name) -> None:
-                        st.session_state.detail_schedules[schedule_name] = updated
+                def _save_other(updated: pd.DataFrame, schedule_name: str = name) -> None:
+                    st.session_state.detail_schedules[schedule_name] = updated
 
-                    _render_schedule_row_editor(
-                        f"detail::{_scenario_key_suffix(name)}",
-                        st.session_state.detail_schedules.get(name, table),
-                        _save_other,
-                    )
+                _render_schedule_row_editor(
+                    f"detail::{_scenario_key_suffix(name)}",
+                    st.session_state.detail_schedules.get(name, table),
+                    _save_other,
+                )
 
         if generated_schedule_tab_names:
             preview_outputs: dict[str, pd.DataFrame] = {}
@@ -13230,35 +13274,36 @@ def main() -> None:
                 "Downstream Intake": "Downstream Intake Schedule",
             }
             for offset, tab_name in enumerate(generated_schedule_tab_names, start=len(schedule_tab_names)):
-                with schedule_tabs[offset]:
-                    if preview_error:
-                        st.info(preview_error)
-                        continue
-                    if tab_name == "Unit Herd Schedules":
-                        st.markdown("#### Breeding Unit Schedule")
-                        _render_table(
-                            "Breeding Unit Schedule",
-                            preview_outputs.get("Breeding Unit Schedule"),
-                        )
-                        st.markdown("#### Destination Unit Schedule")
-                        _render_table(
-                            "Destination Unit Schedule",
-                            preview_outputs.get("Destination Unit Schedule"),
-                        )
-                        st.markdown("#### Consolidated Reporting Schedule")
-                        _render_table(
-                            "Reporting Schedule - Consolidated",
-                            preview_outputs.get("Reporting Schedule - Consolidated"),
-                        )
-                        continue
-                    schedule_name = generated_tab_lookup.get(tab_name, "")
+                if active_schedule_section != schedule_section_labels[offset]:
+                    continue
+                if preview_error:
+                    st.info(preview_error)
+                    continue
+                if tab_name == "Unit Herd Schedules":
+                    st.markdown("#### Breeding Unit Schedule")
                     _render_table(
-                        schedule_name,
-                        preview_outputs.get(schedule_name),
+                        "Breeding Unit Schedule",
+                        preview_outputs.get("Breeding Unit Schedule"),
                     )
-                    detail_tables_for_run[name] = st.session_state.detail_schedules.get(
-                        name, table
+                    st.markdown("#### Destination Unit Schedule")
+                    _render_table(
+                        "Destination Unit Schedule",
+                        preview_outputs.get("Destination Unit Schedule"),
                     )
+                    st.markdown("#### Consolidated Reporting Schedule")
+                    _render_table(
+                        "Reporting Schedule - Consolidated",
+                        preview_outputs.get("Reporting Schedule - Consolidated"),
+                    )
+                    continue
+                schedule_name = generated_tab_lookup.get(tab_name, "")
+                _render_table(
+                    schedule_name,
+                    preview_outputs.get(schedule_name),
+                )
+                detail_tables_for_run[name] = st.session_state.detail_schedules.get(
+                    name, table
+                )
 
     if core_editor is None:
         core_editor = st.session_state.core_schedule
@@ -13268,7 +13313,7 @@ def main() -> None:
 
     assumption_tables: Dict[str, pd.DataFrame] = {}
 
-    with tabs[0]:
+    if active_main_section == "Assumptions":
         st.subheader("Assumptions")
         _render_workflow_status_strip()
         _render_assumption_validation_summary(st.session_state.assumptions)
@@ -14288,7 +14333,7 @@ def main() -> None:
             "Valuation Inputs"
         ]
 
-    with tabs[2]:
+    if active_main_section == "Financials":
         st.subheader("Financial Statements")
         if st.session_state.results is None:
             st.info("Run the model to generate the financial statements.")
@@ -14318,40 +14363,43 @@ def main() -> None:
                 selected_reporting_entity,
                 results["scenario"],
             )
-            financial_tabs = st.tabs(
-                [
-                        "Statement of Financial Performance",
-                        "Statement of Financial Position",
-                        "Statement of Cash Flow",
-                    ]
+            financial_section_labels = [
+                "Statement of Financial Performance",
+                "Statement of Financial Position",
+                "Statement of Cash Flow",
+            ]
+            active_financial_section = _section_selector(
+                "Financial Statement",
+                financial_section_labels,
+                key="financial_statement_selector",
+                help="Only the selected statement is rendered.",
                 )
-
-            with financial_tabs[0]:
-                try:
-                    financial_views = _cached_result_view(
-                        "financial_statements",
-                        f"{scenario_label}::{selected_reporting_entity}",
-                        lambda: {
-                            "sop_base": results["model"].statement_of_financial_performance(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "sop_scenario": results["model"].statement_of_financial_performance(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                            "sofp_base": results["model"].statement_of_financial_position(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "sofp_scenario": results["model"].statement_of_financial_position(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                            "socf_base": results["model"].statement_of_cash_flow(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "socf_scenario": results["model"].statement_of_cash_flow(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                        },
-                    )
+            try:
+                financial_views = _cached_result_view(
+                    "financial_statements",
+                    f"{scenario_label}::{selected_reporting_entity}",
+                    lambda: {
+                        "sop_base": results["model"].statement_of_financial_performance(
+                            base_reporting_schedule, annual=True
+                        ),
+                        "sop_scenario": results["model"].statement_of_financial_performance(
+                            scenario_reporting_schedule, annual=True
+                        ),
+                        "sofp_base": results["model"].statement_of_financial_position(
+                            base_reporting_schedule, annual=True
+                        ),
+                        "sofp_scenario": results["model"].statement_of_financial_position(
+                            scenario_reporting_schedule, annual=True
+                        ),
+                        "socf_base": results["model"].statement_of_cash_flow(
+                            base_reporting_schedule, annual=True
+                        ),
+                        "socf_scenario": results["model"].statement_of_cash_flow(
+                            scenario_reporting_schedule, annual=True
+                        ),
+                    },
+                )
+                if active_financial_section == financial_section_labels[0]:
                     sop_base = financial_views["sop_base"]
                     sop_scenario = financial_views["sop_scenario"]
                     st.dataframe(
@@ -14364,35 +14412,7 @@ def main() -> None:
                     _render_financial_performance_charts(
                         sop_base, sop_scenario, scenario_label
                     )
-                except ValueError as exc:
-                    st.info(str(exc))
-
-            with financial_tabs[1]:
-                try:
-                    financial_views = _cached_result_view(
-                        "financial_statements",
-                        f"{scenario_label}::{selected_reporting_entity}",
-                        lambda: {
-                            "sop_base": results["model"].statement_of_financial_performance(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "sop_scenario": results["model"].statement_of_financial_performance(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                            "sofp_base": results["model"].statement_of_financial_position(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "sofp_scenario": results["model"].statement_of_financial_position(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                            "socf_base": results["model"].statement_of_cash_flow(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "socf_scenario": results["model"].statement_of_cash_flow(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                        },
-                    )
+                elif active_financial_section == financial_section_labels[1]:
                     sofp_base = financial_views["sofp_base"]
                     sofp_scenario = financial_views["sofp_scenario"]
                     st.dataframe(
@@ -14405,35 +14425,7 @@ def main() -> None:
                     _render_financial_position_charts(
                         sofp_base, sofp_scenario, scenario_label
                     )
-                except ValueError as exc:
-                    st.info(str(exc))
-
-            with financial_tabs[2]:
-                try:
-                    financial_views = _cached_result_view(
-                        "financial_statements",
-                        f"{scenario_label}::{selected_reporting_entity}",
-                        lambda: {
-                            "sop_base": results["model"].statement_of_financial_performance(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "sop_scenario": results["model"].statement_of_financial_performance(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                            "sofp_base": results["model"].statement_of_financial_position(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "sofp_scenario": results["model"].statement_of_financial_position(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                            "socf_base": results["model"].statement_of_cash_flow(
-                                base_reporting_schedule, annual=True
-                            ),
-                            "socf_scenario": results["model"].statement_of_cash_flow(
-                                scenario_reporting_schedule, annual=True
-                            ),
-                        },
-                    )
+                else:
                     socf_base = financial_views["socf_base"]
                     socf_scenario = financial_views["socf_scenario"]
                     st.dataframe(
@@ -14446,8 +14438,8 @@ def main() -> None:
                     _render_cash_flow_charts(
                         socf_base, socf_scenario, scenario_label
                     )
-                except ValueError as exc:
-                    st.info(str(exc))
+            except ValueError as exc:
+                st.info(str(exc))
 
     if run_clicked:
         core_clean = _clean_editor_table(core_editor)
@@ -14722,7 +14714,7 @@ def main() -> None:
             if not excel_bytes:
                 st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
-    with tabs[3]:
+    if active_main_section == "Dashboard":
         st.subheader("Dashboard")
         if results is None:
             st.info("Run the model to populate the dashboard charts.")
@@ -14975,7 +14967,7 @@ def main() -> None:
             ]:
                 _render_table(name, supplementary_render.get(name))
 
-    with tabs[4]:
+    if active_main_section == "Advanced Analytics":
         st.subheader("Advanced Analytics")
         st.markdown(
             "Use the framework below to configure inputs, assumptions, model drivers, "
@@ -15165,7 +15157,7 @@ def main() -> None:
             except ValueError as exc:
                 st.info(str(exc))
 
-    with tabs[5]:
+    if active_main_section == "AI Decision Making":
         _render_ai_orchestration_layer(results)
 
 # ---------------------------------------------------------------------------
