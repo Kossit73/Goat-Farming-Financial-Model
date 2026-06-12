@@ -46,7 +46,12 @@ def build_remove_options(
     labels: list[str] = []
     index_lookup: dict[str, int] = {}
     for row_index, row in table.iterrows():
-        label = label_builder(row)
+        base_label = str(label_builder(row)).strip() or f"Row {row_index + 1}"
+        label = base_label
+        duplicate_idx = 2
+        while label in index_lookup:
+            label = f"{base_label} [{duplicate_idx}]"
+            duplicate_idx += 1
         labels.append(label)
         index_lookup[label] = row_index
     return labels, index_lookup

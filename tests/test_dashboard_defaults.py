@@ -6,6 +6,8 @@ import sys
 import pandas as pd
 import pytest
 
+from goat_financial_model.editor_registry import build_remove_options
+
 
 _STREAMLIT_APP_PATH = Path(__file__).resolve().parents[1] / "streamlit_app.py"
 _spec = importlib.util.spec_from_file_location("streamlit_app", _STREAMLIT_APP_PATH)
@@ -16,6 +18,50 @@ _spec.loader.exec_module(streamlit_app)
 
 def _reset_local_state() -> None:
     streamlit_app._LOCAL_SESSION_STATE.clear()
+
+
+def test_row_selector_labels_prioritize_operating_cost_fields():
+    df = pd.DataFrame(
+        [
+            {
+                "Year": 2027,
+                "Business Unit": "General",
+                "Field": "variable_feed_cost_per_herd",
+                "Category": "Feed",
+            }
+        ]
+    )
+
+    label = streamlit_app._format_row_label(df, 0)
+
+    assert "Field: variable_feed_cost_per_herd" in label
+    assert "Category: Feed" in label
+
+
+def test_build_remove_options_preserves_duplicate_labels():
+    df = pd.DataFrame(
+        [
+            {"Field": "variable_feed_cost_per_herd", "Category": "Feed", "Year": 2027},
+            {"Field": "variable_feed_cost_per_herd", "Category": "Feed", "Year": 2027},
+        ]
+    )
+
+    labels, index_lookup = build_remove_options(
+        df,
+        lambda row: " | ".join(
+            [
+                str(row.get("Field", "")).strip(),
+                str(row.get("Category", "")).strip(),
+                str(int(row["Year"])) if pd.notna(row.get("Year")) else "",
+            ]
+        ).strip(" | "),
+    )
+
+    assert len(labels) == 2
+    assert labels[0] == "variable_feed_cost_per_herd | Feed | 2027"
+    assert labels[1] == "variable_feed_cost_per_herd | Feed | 2027 [2]"
+    assert index_lookup[labels[0]] == 0
+    assert index_lookup[labels[1]] == 1
 
 
 def test_default_results_wait_for_explicit_run():

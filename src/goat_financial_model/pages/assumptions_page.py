@@ -247,9 +247,20 @@ def render_operating_cost_editor(
     labels, label_index = build_remove_options(
         operating_table,
         lambda row: (
-            f"{str(row.get('Category', '')).strip() or f'Item {row.name + 1}'} ({int(row['Year'])})"
-            if pd.notna(row.get("Year"))
-            else str(row.get("Category", "")).strip() or f"Item {row.name + 1}"
+            " | ".join(
+                part
+                for part in [
+                    str(row.get("Field", "")).strip(),
+                    str(row.get("Category", "")).strip(),
+                    (
+                        str(int(row["Year"]))
+                        if pd.notna(row.get("Year"))
+                        else ""
+                    ),
+                ]
+                if part
+            )
+            or f"Item {row.name + 1}"
         ),
     )
     remove_select_col.selectbox(

@@ -1115,7 +1115,20 @@ def _format_row_label(df: pd.DataFrame, idx: int) -> str:
 
     row = df.iloc[idx]
     parts: list[str] = []
-    for column in df.columns[:3]:
+    preferred_columns = [
+        "Field",
+        "Category",
+        "Item",
+        "Position",
+        "Product",
+        "Period",
+        "Year",
+        "Business Unit",
+    ]
+    ordered_columns = [
+        column for column in preferred_columns if column in df.columns
+    ] + [column for column in df.columns if column not in preferred_columns]
+    for column in ordered_columns:
         value = row[column]
         if pd.isna(value):
             continue
@@ -1123,7 +1136,7 @@ def _format_row_label(df: pd.DataFrame, idx: int) -> str:
         if text.strip() == "":
             continue
         parts.append(f"{column}: {text}")
-        if len(parts) == 2:
+        if len(parts) == 3:
             break
 
     if not parts:
