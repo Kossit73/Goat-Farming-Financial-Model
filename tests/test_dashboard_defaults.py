@@ -1670,3 +1670,39 @@ def test_standalone_app_bootstraps_and_runs_without_top_level_exceptions():
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "exc_count 0" in completed.stdout
+
+
+def test_assumptions_run_model_button_executes_without_duplicate_period_error():
+    repo_root = _STREAMLIT_APP_PATH.parent
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from streamlit.testing.v1 import AppTest; "
+            "at = AppTest.from_file('streamlit_app.py'); "
+            "at.run(timeout=60); "
+            "run_buttons = [b for b in at.button if getattr(b, 'label', '') == 'Run model']; "
+            "assert run_buttons, 'Run model button not found'; "
+            "run_buttons[0].click(); "
+            "at.run(timeout=180); "
+            "errors = [getattr(x, 'value', '') for x in at.error]; "
+            "has_results = 'results' in at.session_state; "
+            "results = at.session_state['results'] if has_results else None; "
+            "print('exc_count', len(at.exception)); "
+            "print('errors', errors); "
+            "print('has_results', has_results); "
+            "print('results_type', type(results).__name__ if has_results else 'missing'); "
+            "raise SystemExit(0 if len(at.exception) == 0 and has_results and isinstance(results, dict) and not any('Each period in the schedule must be unique.' in err for err in errors) else 1)"
+        ),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "exc_count 0" in completed.stdout
+    assert "has_results True" in completed.stdout

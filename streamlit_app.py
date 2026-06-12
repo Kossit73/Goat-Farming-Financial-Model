@@ -14477,33 +14477,16 @@ def main() -> None:
             st.error(f"Core Schedule: {exc}")
             return
 
-        prepared_details: Dict[str, pd.DataFrame] = {}
-        for name, table in detail_tables_for_run.items():
-            cleaned = _clean_editor_table(table)
-            if cleaned is None:
-                continue
-            try:
-                prepared = _prepare_timeline_table(cleaned)
-            except ValueError as exc:
-                st.error(f"{name}: {exc}")
-                return
-
-            expected_cols = DETAIL_SCHEDULE_COLUMNS.get(name)
-            if expected_cols:
-                missing = [col for col in expected_cols if col not in prepared.columns]
-                if missing:
-                    st.error(
-                        f"{name} is missing required column(s): {', '.join(missing)}"
-                    )
-                    return
-                prepared = prepared[expected_cols]
-            prepared_details[name] = prepared
-
-        schedule_df = _build_schedule_dataframe(
-            core_clean,
-            detail_tables_for_run,
-            assumption_tables,
-        )
+        try:
+            _prepare_detail_tables_for_schedule(core_clean, detail_tables_for_run)
+            schedule_df = _build_schedule_dataframe(
+                core_clean,
+                detail_tables_for_run,
+                assumption_tables,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            return
 
         if schedule_df["Revenue"].isna().all():
             st.error("Core Schedule must include revenue values.")
