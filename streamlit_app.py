@@ -12549,6 +12549,7 @@ def main() -> None:
     valuation_inputs: Dict[str, float] = {}
     include_valuation = False
     run_clicked = False
+    run_feedback_slot = None
 
     supplementary_tables: Dict[str, pd.DataFrame] = {}
     detail_tables_for_run: Dict[str, pd.DataFrame] = {}
@@ -12562,6 +12563,10 @@ def main() -> None:
         "Advanced Analytics",
         "AI Decision Making",
     ]
+    pending_main_section = st.session_state.pop("_pending_main_section_selector", None)
+    if pending_main_section in main_sections:
+        _safe_session_state_set("main_section_selector", pending_main_section)
+
     active_main_section = _section_selector(
         "Workspace Section",
         main_sections,
@@ -13535,6 +13540,7 @@ def main() -> None:
             "Scenario Controls"
         ]
         run_clicked = st.button("Run model", type="primary")
+        run_feedback_slot = st.empty()
 
         st.markdown("#### Production Time Horizon")
         production_table = _ensure_production_horizon_table(
@@ -14476,15 +14482,23 @@ def main() -> None:
                 st.info(str(exc))
 
     if run_clicked:
+        def _show_run_validation_error(message: str) -> None:
+            if run_feedback_slot is not None:
+                run_feedback_slot.error(message)
+            else:
+                st.error(message)
+
         core_clean = _clean_editor_table(core_editor)
         if core_clean is None:
-            st.error("Provide at least one period in the core schedule before running the scenario.")
+            _show_run_validation_error(
+                "Provide at least one period in the core schedule before running the scenario."
+            )
             return
 
         try:
             core_prepared = _prepare_timeline_table(core_clean)
         except ValueError as exc:
-            st.error(f"Core Schedule: {exc}")
+            _show_run_validation_error(f"Core Schedule: {exc}")
             return
 
         try:
@@ -14495,14 +14509,14 @@ def main() -> None:
                 assumption_tables,
             )
         except ValueError as exc:
-            st.error(str(exc))
+            _show_run_validation_error(str(exc))
             return
 
         if schedule_df["Revenue"].isna().all():
-            st.error("Core Schedule must include revenue values.")
+            _show_run_validation_error("Core Schedule must include revenue values.")
             return
         if schedule_df["COGS"].isna().all():
-            st.error("COGS Schedule must include at least one value.")
+            _show_run_validation_error("COGS Schedule must include at least one value.")
             return
 
         production_horizon = assumption_tables.get("Production Horizon")
@@ -14518,14 +14532,16 @@ def main() -> None:
                 start = int(start_year.iloc[0])
                 end = int(end_year.iloc[0])
                 if start > end:
-                    st.error("Production start year must be before the end year.")
+                    _show_run_validation_error(
+                        "Production start year must be before the end year."
+                    )
                     return
                 mask = (horizon_filtered.index.year >= start) & (
                     horizon_filtered.index.year <= end
                 )
                 horizon_filtered = horizon_filtered.loc[mask]
                 if horizon_filtered.empty:
-                    st.error(
+                    _show_run_validation_error(
                         "No schedule periods fall within the selected production horizon."
                     )
                     return
@@ -14583,10 +14599,13 @@ def main() -> None:
                 scenario_suite,
             )
         except ValueError as exc:
-            st.error(str(exc))
+            _show_run_validation_error(str(exc))
             return
 
-        st.success("Scenario suite complete")
+        if run_feedback_slot is not None:
+            run_feedback_slot.success("Scenario suite complete. Opening Dashboard...")
+        else:
+            st.success("Scenario suite complete")
         st.session_state["model_last_run_at"] = pd.Timestamp.utcnow().strftime(
             "%Y-%m-%d %H:%M UTC"
         )
@@ -14627,6 +14646,8 @@ def main() -> None:
             _safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0
         )
         st.session_state[MODEL_RESULTS_STALE_KEY] = False
+        st.session_state["_pending_main_section_selector"] = "Dashboard"
+        _maybe_rerun()
 
     results = st.session_state.results
     results_stale = bool(st.session_state.get(MODEL_RESULTS_STALE_KEY, True))
