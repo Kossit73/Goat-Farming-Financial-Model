@@ -1386,6 +1386,8 @@ DAIRY_PRODUCTS: tuple[str, ...] = ("Milk", "Cheese")
 LIVESTOCK_PRODUCTS: tuple[str, ...] = ("Meat", "Offal", "Pelt", "Live Herd")
 BREEDING_PRODUCTS: tuple[str, ...] = ("Female Kids", "Male Kids")
 ALL_MODEL_PRODUCTS: tuple[str, ...] = BREEDING_PRODUCTS + DAIRY_PRODUCTS + LIVESTOCK_PRODUCTS
+ANNUAL_SLAUGHTER_RATE_COLUMN = "Annual Slaughter Rate % of Herd"
+LEGACY_SLAUGHTER_RATE_COLUMN = "Slaughter Rate % of Herd per Period"
 
 BUSINESS_TYPE_ACTIVE_PRODUCTS: Dict[str, tuple[str, ...]] = {
     "Breeding": ("Female Kids", "Male Kids", "Meat", "Offal", "Pelt", "Live Herd"),
@@ -1535,7 +1537,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 0.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 0.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1552,7 +1554,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 0.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 0.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1569,7 +1571,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 4.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 0.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 0.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1586,7 +1588,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 4.0,
             "Milk Allocation to Cheese %": 25.0,
             "Cheese Yield Kg per Litre": 0.14,
-            "Slaughter Rate % of Herd per Period": 0.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 0.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1603,7 +1605,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 36.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 36.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 22.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1620,7 +1622,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 36.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 36.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 4.0,
@@ -1637,7 +1639,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 36.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 36.0,
             "Live Herd Sales Share %": 0.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -1654,7 +1656,7 @@ def _default_production_driver_row_templates(
             "Litres per Lactating Doe per Day": 0.0,
             "Milk Allocation to Cheese %": 0.0,
             "Cheese Yield Kg per Litre": 0.0,
-            "Slaughter Rate % of Herd per Period": 36.0,
+            ANNUAL_SLAUGHTER_RATE_COLUMN: 36.0,
             "Live Herd Sales Share %": 30.0,
             "Meat Yield Kg per Goat": 0.0,
             "Offal Yield Kg per Goat": 0.0,
@@ -2456,10 +2458,10 @@ def _render_scenario_selector(prefix: str = "main") -> None:
             if isinstance(value, (int, float)) and not pd.isna(value)
         ]
         if numeric_adjustments:
-            details.append(f"Adjustments – {', '.join(numeric_adjustments)}")
+            details.append(f"Adjustments - {', '.join(numeric_adjustments)}")
 
     if isinstance(author_name, str) and author_name.strip():
-        details.append(f"Prepared by – {author_name.strip()}")
+        details.append(f"Prepared by - {author_name.strip()}")
 
     if details:
         st.caption(" \n".join(details))
@@ -2614,7 +2616,7 @@ _PRODUCTION_DRIVER_REQUIRED_COLUMNS = [
     "Litres per Lactating Doe per Day",
     "Milk Allocation to Cheese %",
     "Cheese Yield Kg per Litre",
-    "Slaughter Rate % of Herd per Period",
+    ANNUAL_SLAUGHTER_RATE_COLUMN,
     "Live Herd Sales Share %",
     "Meat Yield Kg per Goat",
     "Offal Yield Kg per Goat",
@@ -2627,7 +2629,7 @@ _PRODUCTION_DRIVER_NUMERIC_COLUMNS = [
     "Litres per Lactating Doe per Day",
     "Milk Allocation to Cheese %",
     "Cheese Yield Kg per Litre",
-    "Slaughter Rate % of Herd per Period",
+    ANNUAL_SLAUGHTER_RATE_COLUMN,
     "Live Herd Sales Share %",
     "Meat Yield Kg per Goat",
     "Offal Yield Kg per Goat",
@@ -2813,6 +2815,14 @@ def _ensure_production_driver_table(table: Optional[pd.DataFrame]) -> pd.DataFra
     else:
         work = table.copy()
 
+    if (
+        ANNUAL_SLAUGHTER_RATE_COLUMN not in work.columns
+        and LEGACY_SLAUGHTER_RATE_COLUMN in work.columns
+    ):
+        work[ANNUAL_SLAUGHTER_RATE_COLUMN] = work[LEGACY_SLAUGHTER_RATE_COLUMN]
+    if LEGACY_SLAUGHTER_RATE_COLUMN in work.columns:
+        work = work.drop(columns=[LEGACY_SLAUGHTER_RATE_COLUMN])
+
     for column in _PRODUCTION_DRIVER_REQUIRED_COLUMNS:
         if column not in work.columns:
             work[column] = np.nan
@@ -2992,7 +3002,7 @@ def _production_driver_column_config(
         "Cheese Yield Kg per Litre": st.column_config.NumberColumn(
             "Cheese Yield (Kg/Litre)", format="%.3f", step=0.01
         ),
-        "Slaughter Rate % of Herd per Period": st.column_config.NumberColumn(
+        ANNUAL_SLAUGHTER_RATE_COLUMN: st.column_config.NumberColumn(
             "Annual Slaughter Rate (%)", format="%.2f", step=0.1
         ),
         "Live Herd Sales Share %": st.column_config.NumberColumn(
@@ -14561,7 +14571,7 @@ def main() -> None:
             custom_label = (
                 "Custom Scenario"
                 if suffix == "Base Scenario"
-                else f"Custom Scenario – {suffix}"
+                else f"Custom Scenario - {suffix}"
             )
             scenario_suite = _build_scenario_suite(custom_label, custom_adjustments)
 

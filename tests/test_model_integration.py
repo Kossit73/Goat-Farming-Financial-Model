@@ -219,27 +219,27 @@ def test_scenario_and_statements_pipeline():
     assert expected_columns.issubset(scenario.columns)
 
     performance = model.statement_of_financial_performance(scenario, annual=True)
-    assert "Income – Revenue" in performance.columns
-    assert "Cost of sales – Gross profit" in performance.columns
-    assert "Operating profit – EBIT" in performance.columns
-    assert "Profit – Profit for the period" in performance.columns
-    assert not performance["Income – Revenue"].isna().all()
-    assert not performance["Profit – Profit for the period"].isna().all()
+    assert "Income - Revenue" in performance.columns
+    assert "Cost of sales - Gross profit" in performance.columns
+    assert "Operating profit - EBIT" in performance.columns
+    assert "Profit - Profit for the period" in performance.columns
+    assert not performance["Income - Revenue"].isna().all()
+    assert not performance["Profit - Profit for the period"].isna().all()
 
     cash_flow = model.statement_of_cash_flow(scenario, annual=True)
     assert (
-        "Operating activities – Net cash from operating activities"
+        "Operating activities - Net cash from operating activities"
         in cash_flow.columns
     )
     assert (
-        "Net change – Cash and cash equivalents at end of period"
+        "Net change - Cash and cash equivalents at end of period"
         in cash_flow.columns
     )
 
     position = model.statement_of_financial_position(scenario, annual=True)
-    assert "Assets – Total assets" in position.columns
+    assert "Assets - Total assets" in position.columns
     assert (
-        "Equity and liabilities – Total equity and liabilities"
+        "Equity and liabilities - Total equity and liabilities"
         in position.columns
     )
 
@@ -256,6 +256,20 @@ def test_scenario_and_statements_pipeline():
 
     break_even = model.break_even(scenario, annual=True)
     assert "Break-even Revenue" in break_even.columns
+
+
+def test_valuation_summary_handles_short_timelines():
+    model = _build_valuation_model(
+        [100.0, 125.0],
+        depreciation_values=[10.0, 10.0],
+        capex_values=[20.0, 20.0],
+        valuation_inputs={"WACC": 0.1, "Terminal Growth Rate": 0.02},
+    )
+
+    summary = model.valuation_summary()
+
+    assert isinstance(summary, dict)
+    assert "npv" in summary
 
 
 def test_annual_advanced_analytics_uses_costs():

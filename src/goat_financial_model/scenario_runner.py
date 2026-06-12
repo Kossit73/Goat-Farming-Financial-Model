@@ -96,6 +96,16 @@ def _extract_biological_assumptions(
     }
 
 
+def _prefixed_assumption_tables(
+    assumptions: dict[str, pd.DataFrame],
+) -> dict[str, pd.DataFrame]:
+    return {
+        f"Assumptions - {name}": table.copy()
+        for name, table in (assumptions or {}).items()
+        if isinstance(table, pd.DataFrame) and not table.empty
+    }
+
+
 def build_scenario_seed(
     *,
     schedule_df: pd.DataFrame,
@@ -185,10 +195,15 @@ def run_single_scenario(
         hooks=hooks,
     )
 
+    scenario_model_supplementary = _copy_supplementary_tables(base_supplementary)
+    scenario_model_supplementary.update(
+        _prefixed_assumption_tables(scenario_assumptions)
+    )
+
     scenario_schedule = hooks.input_schedule_cls(
         data=scenario_seed,
         valuation_inputs=valuation_inputs,
-        supplementary_tables=base_supplementary,
+        supplementary_tables=scenario_model_supplementary,
     )
     scenario_model = scenario_schedule.to_model()
     scenario_df = scenario_model.scenario(
@@ -196,7 +211,9 @@ def run_single_scenario(
         feed_cost_pct=feed_pct / 100.0,
     )
 
-    scenario_supplementary = _copy_supplementary_tables(base_supplementary)
+    scenario_supplementary = _copy_supplementary_tables(
+        scenario_model_supplementary
+    )
     biological_bundle = hooks.derive_biological_schedules(
         scenario_seed,
         scenario_assumptions,

@@ -4,6 +4,9 @@ from typing import Any, Callable, Dict, Optional, Sequence
 
 import pandas as pd
 
+ANNUAL_SLAUGHTER_RATE_COLUMN = "Annual Slaughter Rate % of Herd"
+LEGACY_SLAUGHTER_RATE_COLUMN = "Slaughter Rate % of Herd per Period"
+
 
 def build_pricing_validation_messages(
     pricing_table: pd.DataFrame,
@@ -89,7 +92,16 @@ def build_pricing_validation_messages(
     ]
     slaughter_rates = {
         product: pd.to_numeric(
-            pd.Series([driver_lookup.get(product, {}).get("Slaughter Rate % of Herd per Period")]),
+            pd.Series(
+                [
+                    driver_lookup.get(product, {}).get(
+                        ANNUAL_SLAUGHTER_RATE_COLUMN,
+                        driver_lookup.get(product, {}).get(
+                            LEGACY_SLAUGHTER_RATE_COLUMN
+                        ),
+                    )
+                ]
+            ),
             errors="coerce",
         ).iloc[0]
         for product in active_livestock_products

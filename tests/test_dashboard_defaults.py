@@ -642,7 +642,7 @@ def test_scenario_presets_cover_key_cases():
 
 def test_build_scenario_suite_supports_custom_entries():
     custom_adjustments = {"Milk price change (%)": 5.0, "Feed cost change (%)": -3.0}
-    custom_label = "Custom Scenario – Milk +5%, Feed -3%"
+    custom_label = "Custom Scenario - Milk +5%, Feed -3%"
 
     base_suite = streamlit_app._build_scenario_suite()
     assert custom_label not in base_suite
@@ -961,7 +961,7 @@ def test_default_assumption_tables_include_master_schedule_inputs():
         "Product",
         "Quantity Mode",
         "Lactating Herd Share %",
-        "Slaughter Rate % of Herd per Period",
+        "Annual Slaughter Rate % of Herd",
     }.issubset(assumptions["Production Drivers"].columns)
 
 
@@ -1072,7 +1072,7 @@ def test_production_drivers_derive_milk_and_cheese_quantities_from_herd():
             "Litres per Lactating Doe per Day": [2.0, 2.0],
             "Milk Allocation to Cheese %": [0.0, 25.0],
             "Cheese Yield Kg per Litre": [0.0, 0.2],
-            "Slaughter Rate % of Herd per Period": [0.0, 0.0],
+            "Annual Slaughter Rate % of Herd": [0.0, 0.0],
             "Meat Yield Kg per Goat": [0.0, 0.0],
             "Pelt Units per Goat": [0.0, 0.0],
             "Driver Growth %": [0.0, 0.0],
@@ -1118,7 +1118,7 @@ def test_production_drivers_derive_meat_and_pelt_from_slaughter():
             "Litres per Lactating Doe per Day": [0.0, 0.0],
             "Milk Allocation to Cheese %": [0.0, 0.0],
             "Cheese Yield Kg per Litre": [0.0, 0.0],
-            "Slaughter Rate % of Herd per Period": [5.0, 5.0],
+            "Annual Slaughter Rate % of Herd": [5.0, 5.0],
             "Meat Yield Kg per Goat": [20.0, 0.0],
             "Pelt Units per Goat": [0.0, 1.0],
             "Driver Growth %": [0.0, 0.0],
@@ -1166,7 +1166,7 @@ def test_production_drivers_derive_offal_and_live_herd_from_saleable_stream():
             "Litres per Lactating Doe per Day": [0.0, 0.0, 0.0, 0.0],
             "Milk Allocation to Cheese %": [0.0, 0.0, 0.0, 0.0],
             "Cheese Yield Kg per Litre": [0.0, 0.0, 0.0, 0.0],
-            "Slaughter Rate % of Herd per Period": [5.0, 5.0, 5.0, 5.0],
+            "Annual Slaughter Rate % of Herd": [5.0, 5.0, 5.0, 5.0],
             "Live Herd Sales Share %": [20.0, 20.0, 20.0, 20.0],
             "Meat Yield Kg per Goat": [20.0, 0.0, 0.0, 0.0],
             "Offal Yield Kg per Goat": [0.0, 4.0, 0.0, 0.0],
@@ -1206,7 +1206,7 @@ def test_add_production_driver_column_preserves_core_schema():
         "Product",
         "Quantity Mode",
         "Lactating Herd Share %",
-        "Slaughter Rate % of Herd per Period",
+        "Annual Slaughter Rate % of Herd",
     }.issubset(updated.columns)
 
 
@@ -1618,7 +1618,7 @@ def test_commercial_shocks_apply_to_multiple_products():
             "Litres per Lactating Doe per Day": [0.0, 0.0],
             "Milk Allocation to Cheese %": [0.0, 0.0],
             "Cheese Yield Kg per Litre": [0.0, 0.0],
-            "Slaughter Rate % of Herd per Period": [5.0, 5.0],
+            "Annual Slaughter Rate % of Herd": [5.0, 5.0],
             "Meat Yield Kg per Goat": [20.0, 0.0],
             "Pelt Units per Goat": [0.0, 1.0],
             "Driver Growth %": [0.0, 0.0],

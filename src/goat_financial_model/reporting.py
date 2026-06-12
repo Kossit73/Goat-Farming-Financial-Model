@@ -34,6 +34,7 @@ class ExportBundle:
     kpis_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     break_even_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     statements: Dict[str, pd.DataFrame] = field(default_factory=dict)
+    statement_errors: Dict[str, str] = field(default_factory=dict)
     supplementary: Dict[str, pd.DataFrame] = field(default_factory=dict)
     scenario_inputs: Dict[str, Any] = field(default_factory=dict)
     export_timestamp_utc: datetime = field(
@@ -80,10 +81,14 @@ def _annualize_schedule(df: pd.DataFrame) -> pd.DataFrame:
     return annual
 
 
-def _build_statements(model: Any, scenario_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+def _build_statements(
+    model: Any,
+    scenario_df: pd.DataFrame,
+) -> tuple[Dict[str, pd.DataFrame], Dict[str, str]]:
     statements: Dict[str, pd.DataFrame] = {}
+    errors: Dict[str, str] = {}
     if scenario_df.empty:
-        return statements
+        return statements, errors
     for title, builder_name in (
         ("Statement of Financial Performance", "statement_of_financial_performance"),
         ("Statement of Financial Position", "statement_of_financial_position"),
@@ -92,11 +97,12 @@ def _build_statements(model: Any, scenario_df: pd.DataFrame) -> Dict[str, pd.Dat
         try:
             builder = getattr(model, builder_name)
             frame = builder(scenario_df, annual=True)
-        except (AttributeError, KeyError, TypeError, ValueError):
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            errors[title] = str(exc) or "Statement build failed."
             continue
         if isinstance(frame, pd.DataFrame) and not frame.empty:
             statements[title] = frame.copy()
-    return statements
+    return statements, errors
 
 
 def prepare_export_bundle(
@@ -126,6 +132,7 @@ def prepare_export_bundle(
             break_even_frame = _ensure_dataframe(model.break_even(scenario_frame, annual=True))
         except ValueError:
             break_even_frame = pd.DataFrame()
+    statements, statement_errors = _build_statements(model, scenario_frame)
     return ExportBundle(
         model=model,
         scenario_name=scenario_name,
@@ -135,7 +142,8 @@ def prepare_export_bundle(
         annual_df=annual_df,
         kpis_df=kpis_frame,
         break_even_df=break_even_frame,
-        statements=_build_statements(model, scenario_frame),
+        statements=statements,
+        statement_errors=statement_errors,
         supplementary={
             str(name): table.copy()
             for name, table in (supplementary or {}).items()
@@ -255,6 +263,17 @@ def _metadata_frame(bundle: ExportBundle) -> pd.DataFrame:
     for key, value in bundle.scenario_inputs.items():
         rows.append((str(key), value))
     return pd.DataFrame(rows, columns=["Field", "Value"])
+
+
+def _statement_warnings_frame(bundle: ExportBundle) -> pd.DataFrame:
+    if not bundle.statement_errors:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        [
+            {"Statement": statement, "Error": error}
+            for statement, error in bundle.statement_errors.items()
+        ]
+    )
 
 
 def _comparison_chart_frame(
@@ -641,6 +660,7 @@ def generate_excel_workbook(bundle: ExportBundle) -> bytes:
             }
         ))
         write_sheet("Model Metadata", _metadata_frame(bundle))
+        write_sheet("Statement Warnings", _statement_warnings_frame(bundle))
         for statement_name, statement_df in bundle.statements.items():
             write_sheet(statement_name, statement_df)
         for name, table in bundle.supplementary.items():

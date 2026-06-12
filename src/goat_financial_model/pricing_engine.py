@@ -6,6 +6,9 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+ANNUAL_SLAUGHTER_RATE_COLUMN = "Annual Slaughter Rate % of Herd"
+LEGACY_SLAUGHTER_RATE_COLUMN = "Slaughter Rate % of Herd per Period"
+
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -119,7 +122,13 @@ def derive_pricing_quantities(
     cheese_allocation = _coerce_float(cheese_driver.get("Milk Allocation to Cheese %"), 0.0) / 100.0
     base_cheese_yield = _coerce_float(cheese_driver.get("Cheese Yield Kg per Litre"), 0.0)
     slaughter_growth = 1 + (_coerce_float(livestock_driver.get("Driver Growth %"), 0.0) / 100.0)
-    annual_slaughter_pct = _coerce_float(livestock_driver.get("Slaughter Rate % of Herd per Period"), 0.0)
+    annual_slaughter_pct = _coerce_float(
+        livestock_driver.get(
+            ANNUAL_SLAUGHTER_RATE_COLUMN,
+            livestock_driver.get(LEGACY_SLAUGHTER_RATE_COLUMN),
+        ),
+        0.0,
+    )
     live_herd_share = _coerce_float(live_herd_driver.get("Live Herd Sales Share %"), 0.0) / 100.0
 
     for period, period_group in work.groupby("Period", sort=False):

@@ -402,7 +402,12 @@ class GoatModel:
         if len(idx) <= 1:
             return 12
 
-        freq = pd.infer_freq(idx) if isinstance(idx, pd.DatetimeIndex) else None
+        freq = None
+        if isinstance(idx, pd.DatetimeIndex) and len(idx) >= 3:
+            try:
+                freq = pd.infer_freq(idx)
+            except ValueError:
+                freq = None
         if freq:
             normalised = self._normalise_frequency_code(freq)
             base_freq = normalised.split("-")[0] if normalised else None
@@ -1474,7 +1479,12 @@ class GoatModel:
         configured_growth = self._terminal_growth_rate()
         manual_terminal_value = self.terminal_value()
         periods_per_year = max(self._periods_per_year(ufcf_series.index), 1)
-        inferred_freq = pd.infer_freq(ufcf_series.index)
+        inferred_freq = None
+        if len(ufcf_series.index) >= 3:
+            try:
+                inferred_freq = pd.infer_freq(ufcf_series.index)
+            except ValueError:
+                inferred_freq = None
         if inferred_freq:
             period_step = 1.0 / periods_per_year
             diffs_years = pd.Series(period_step, index=ufcf_series.index, dtype=float)
@@ -2793,7 +2803,7 @@ class GoatModel:
                 return
             if not series.notna().any():
                 return
-            column_name = f"{section} – {label}"
+            column_name = f"{section} - {label}"
             out[column_name] = series
             column_order.append(column_name)
 
@@ -2942,7 +2952,7 @@ class GoatModel:
         for section, label, series in sections:
             if out.empty:
                 out = pd.DataFrame(index=series.index)
-            column_name = f"{section} – {label}"
+            column_name = f"{section} - {label}"
             out[column_name] = series
             column_order.append(column_name)
 
@@ -3105,7 +3115,7 @@ class GoatModel:
         result = pd.DataFrame(index=out.index)
         column_order: List[str] = []
         for section, label, series in sections:
-            column_name = f"{section} – {label}"
+            column_name = f"{section} - {label}"
             result[column_name] = series
             column_order.append(column_name)
 

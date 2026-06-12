@@ -106,7 +106,7 @@ def test_pricing_engine_uses_biological_quantities_when_available() -> None:
         "Meat": {
             "Meat Yield Kg per Goat": 10.0,
             "Driver Growth %": 0.0,
-            "Slaughter Rate % of Herd per Period": 5.0,
+            "Annual Slaughter Rate % of Herd": 5.0,
         },
     }
 
@@ -517,12 +517,20 @@ def test_run_scenario_suite_uses_registry_hooks() -> None:
 
     class FakeInputSchedule:
         built_frames: list[pd.DataFrame] = []
+        built_supplementaries: list[dict[str, pd.DataFrame]] = []
 
         def __init__(self, data: pd.DataFrame, valuation_inputs: dict[str, float], supplementary_tables: dict[str, pd.DataFrame]) -> None:
             self.data = data.copy()
             self.valuation_inputs = valuation_inputs
             self.supplementary_tables = supplementary_tables
             FakeInputSchedule.built_frames.append(self.data.copy())
+            FakeInputSchedule.built_supplementaries.append(
+                {
+                    name: table.copy()
+                    for name, table in supplementary_tables.items()
+                    if isinstance(table, pd.DataFrame)
+                }
+            )
 
         def to_model(self) -> FakeModel:
             return FakeModel(self.data)
@@ -544,7 +552,9 @@ def test_run_scenario_suite_uses_registry_hooks() -> None:
         },
         apply_biological_assumptions_to_schedule=lambda schedule, assumptions: schedule.assign(BioSeed=True),
         apply_operating_cost_assumptions_to_schedule=lambda schedule, operating, bio: schedule.assign(CostApplied=True),
-        apply_commercial_shocks_to_pricing=lambda pricing, schedule, drivers, adjustments: pricing.assign(Revenue=[25.0]),
+        apply_commercial_shocks_to_pricing=lambda pricing, schedule, drivers, adjustments: pricing.assign(
+            **{"Base Price": [4.0], "Revenue": [25.0]}
+        ),
         apply_pricing_assumptions_to_schedule=lambda schedule, pricing, drivers: schedule.assign(Priced=True),
         derive_biological_schedules=lambda schedule, assumptions: {
             "Biological Herd Summary": pd.DataFrame({"Period": ["2026"], "Heads": [10.0]})
@@ -580,7 +590,12 @@ def test_run_scenario_suite_uses_registry_hooks() -> None:
     assert FakeInputSchedule.built_frames[-1]["BioSeed"].all()
     assert FakeInputSchedule.built_frames[-1]["CostApplied"].all()
     assert FakeInputSchedule.built_frames[-1]["Priced"].all()
+    assert (
+        FakeInputSchedule.built_supplementaries[-1]["Assumptions - Pricing"]["Base Price"].iloc[0]
+        == pytest.approx(4.0)
+    )
     assert "Outputs" in scenario_payload["supplementary"]
     assert "Biological Herd Summary" in scenario_payload["supplementary"]
     assert "Commercial Revenue by Product" in scenario_payload["supplementary"]
+    assert scenario_payload["supplementary"]["Assumptions - Pricing"]["Base Price"].iloc[0] == pytest.approx(4.0)
     assert scenario_payload["valuation"]["npv"] == pytest.approx(123.0)

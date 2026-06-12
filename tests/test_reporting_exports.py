@@ -88,6 +88,9 @@ def test_excel_export_keeps_kpi_units_and_adds_chart_pack():
     assert "Overview" in workbook.sheetnames
     assert "Charts" in workbook.sheetnames
     assert "KPIs (Annual)" in workbook.sheetnames
+    assert any(name.startswith("Statement of Financial Performa") for name in workbook.sheetnames)
+    assert any(name.startswith("Statement of Financial Positi") for name in workbook.sheetnames)
+    assert any(name.startswith("Statement of Cash Flows") for name in workbook.sheetnames)
     assert len(workbook["Charts"]._charts) >= 3
 
     sheet = workbook["KPIs (Annual)"]
@@ -98,3 +101,41 @@ def test_excel_export_keeps_kpi_units_and_adds_chart_pack():
     assert npv_cell.value == pytest.approx(kpis.iloc[0]["NPV"])
     assert irr_cell.value == pytest.approx(kpis.iloc[0]["IRR"])
     assert irr_cell.number_format == "0.0%"
+
+
+def test_export_surfaces_statement_build_failures():
+    schedule_df = _build_sample_schedule()
+
+    class BrokenStatementModel:
+        def __init__(self, model):
+            self._model = model
+
+        def __getattr__(self, name):
+            return getattr(self._model, name)
+
+        def statement_of_financial_position(self, scenario_df, annual=True):
+            raise ValueError("balance sheet mapping failed")
+
+    base_model = InputSchedule(
+        data=schedule_df,
+        valuation_inputs={"WACC": 0.12, "Terminal Value": 100000.0},
+    ).to_model()
+    model = BrokenStatementModel(base_model)
+
+    bundle = prepare_export_bundle(
+        model,
+        scenario_name="Broken Statement Scenario",
+        author_name="Analyst",
+        base_df=schedule_df,
+        scenario_df=schedule_df,
+        kpis_df=base_model.kpis(schedule_df, annual=True),
+        break_even_df=base_model.break_even(schedule_df, annual=True),
+    )
+
+    assert bundle.statement_errors["Statement of Financial Position"] == "balance sheet mapping failed"
+    workbook = load_workbook(BytesIO(generate_excel_workbook(bundle)))
+
+    assert "Statement Warnings" in workbook.sheetnames
+    warning_sheet = workbook["Statement Warnings"]
+    assert warning_sheet["A2"].value == "Statement of Financial Position"
+    assert warning_sheet["B2"].value == "balance sheet mapping failed"
