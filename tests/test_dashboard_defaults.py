@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -1706,3 +1707,41 @@ def test_assumptions_run_model_button_executes_without_duplicate_period_error():
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "exc_count 0" in completed.stdout
     assert "has_results True" in completed.stdout
+
+
+class _FakeExcelDownloadStreamlit:
+    def __init__(self) -> None:
+        self.session_state: dict[str, object] = {}
+        self.button_labels: list[str] = []
+        self.download_labels: list[str] = []
+        self.info_messages: list[str] = []
+
+    def markdown(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    def info(self, message: str, **kwargs: object) -> None:
+        self.info_messages.append(message)
+
+    def button(self, label: str, **kwargs: object) -> bool:
+        self.button_labels.append(label)
+        return False
+
+    def download_button(self, label: str, **kwargs: object) -> bool:
+        self.download_labels.append(label)
+        return False
+
+    def spinner(self, *args: object, **kwargs: object):
+        return nullcontext()
+
+
+def test_excel_download_panel_shows_prepare_action_when_results_exist(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_st = _FakeExcelDownloadStreamlit()
+    monkeypatch.setattr(streamlit_app, "st", fake_st)
+
+    streamlit_app._render_excel_download_panel(
+        nullcontext(),
+        {"selected_scenario": "Base Case Scenario", "model": object()},
+        False,
+    )
+
+    assert "Prepare Excel Model" in fake_st.button_labels

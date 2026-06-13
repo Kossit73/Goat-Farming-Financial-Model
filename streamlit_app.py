@@ -2520,6 +2520,61 @@ def _prepare_dataframe_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def _render_excel_download_panel(
+    container: DeltaGenerator,
+    results: Optional[Dict[str, Any]],
+    results_stale: bool,
+) -> None:
+    with container:
+        st.markdown("#### Excel Model Download")
+        if results is None:
+            st.info("Run the model to enable the Excel workbook download.")
+            return
+
+        selected_scenario = str(results.get("selected_scenario", "Scenario"))
+        excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
+        excel_bytes = excel_map.get(selected_scenario)
+        key_suffix = _scenario_key_suffix(selected_scenario)
+
+        if results_stale:
+            st.info("Run the model again to prepare a workbook from the latest inputs.")
+            if not excel_bytes:
+                st.info("After rerunning, click 'Prepare Excel Model' to generate the workbook.")
+            return
+
+        if not excel_bytes:
+            if st.button(
+                "Prepare Excel Model",
+                key=f"prepare_excel_{key_suffix}",
+            ):
+                with st.spinner("Preparing Excel workbook..."):
+                    excel_bytes = _generate_excel_bytes(
+                        results["model"],
+                        results,
+                        selected_scenario,
+                        _current_model_author(),
+                    )
+                excel_map[selected_scenario] = excel_bytes
+                st.session_state.excel_bytes_map = excel_map
+
+        if excel_bytes:
+            st.download_button(
+                "Download Excel Model",
+                data=excel_bytes,
+                file_name="Goat_Farm_Financial_Model.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"download_excel_{key_suffix}",
+            )
+            if st.button(
+                "Clear Prepared Excel",
+                key=f"clear_excel_{key_suffix}",
+            ):
+                excel_map.pop(selected_scenario, None)
+                st.session_state.excel_bytes_map = excel_map
+        else:
+            st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
+
+
 def _resolve_excel_writer_engine() -> str:
     if find_spec("xlsxwriter") is not None:
         return "xlsxwriter"
@@ -14651,20 +14706,15 @@ def main() -> None:
 
     results = st.session_state.results
     results_stale = bool(st.session_state.get(MODEL_RESULTS_STALE_KEY, True))
-    show_results_summary = active_main_section in {
-        "Financials",
-        "Dashboard",
-    }
+    _render_excel_download_panel(excel_download_container, results, results_stale)
 
     if results is None:
-        if show_results_summary:
-            with excel_download_container:
-                st.info("Run the model to enable the Excel workbook download.")
+        if active_main_section in {"Financials", "Dashboard"}:
             st.info(
                 "Complete the assumptions and schedules, then press *Run model* "
                 "to generate the scenario outputs."
             )
-    elif show_results_summary:
+    elif active_main_section in {"Financials", "Dashboard"}:
         _render_stale_results_notice()
         model = results["model"]
         scenario = results["scenario"]
@@ -14708,46 +14758,6 @@ def main() -> None:
                 summary_cols[idx].metric(label, f"{value:.2f}x")
             else:
                 summary_cols[idx].metric(label, f"{value:,.2f}")
-
-        excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
-        excel_bytes = excel_map.get(selected_scenario)
-        key_suffix = _scenario_key_suffix(selected_scenario)
-
-        with excel_download_container:
-            st.markdown("#### Excel Model Download")
-            if results_stale:
-                st.info("Run the model again to prepare a workbook from the latest inputs.")
-            elif not excel_bytes:
-                if st.button(
-                    "Prepare Excel Model",
-                    key=f"prepare_excel_{key_suffix}",
-                ):
-                    with st.spinner("Preparing Excel workbook..."):
-                        excel_bytes = _generate_excel_bytes(
-                            model,
-                            results,
-                            selected_scenario,
-                            _current_model_author(),
-                        )
-                    excel_map[selected_scenario] = excel_bytes
-                    st.session_state.excel_bytes_map = excel_map
-            if excel_bytes and not results_stale:
-                st.download_button(
-                    "Download Excel Model",
-                    data=excel_bytes,
-                    file_name="Goat_Farm_Financial_Model.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"download_excel_{key_suffix}",
-                )
-                if st.button(
-                    "Clear Prepared Excel",
-                    key=f"clear_excel_{key_suffix}",
-                ):
-                    excel_map.pop(selected_scenario, None)
-                    st.session_state.excel_bytes_map = excel_map
-                    excel_bytes = None
-            if not excel_bytes:
-                st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
     if active_main_section == "Dashboard":
         st.subheader("Dashboard")
