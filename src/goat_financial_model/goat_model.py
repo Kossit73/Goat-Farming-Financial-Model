@@ -130,6 +130,7 @@ class GoatModel:
         self.data = self.data.sort_index()
         self.data.index.name = "Period"
         self.data = _coerce_numeric_frame(self.data, context="Model data")
+        self._irr_cache: dict = {}
 
     @property
     def dates(self) -> pd.DatetimeIndex:
@@ -671,7 +672,7 @@ class GoatModel:
         work["Active"] = self._coerce_bool_series(work["Active"], default=True)
 
         periods_per_year = max(self._periods_per_year(idx), 1)
-        rows: List[Dict[str, object]] = []
+        loan_dfs: List[pd.DataFrame] = []
 
         for _, row in work.iterrows():
             if not bool(row.get("Active", True)):
@@ -714,58 +715,70 @@ class GoatModel:
                 amortising_principal / amortising_periods if amortising_periods > 0 else 0.0
             )
 
+            # Build per-loan arrays — avoids creating one dict per period
+            n_max = active_periods
+            opening_arr = np.empty(n_max, dtype=float)
+            principal_arr = np.empty(n_max, dtype=float)
+
             outstanding = drawdown_amount
-            for offset in range(active_periods):
-                pos = start_pos + offset
-                period = idx[pos]
-                opening_debt = outstanding
-                interest = opening_debt * period_rate
+            n_actual = 0
+            for offset in range(n_max):
+                opening_arr[offset] = outstanding
+                interest = outstanding * period_rate
                 principal = 0.0
 
-                if offset >= grace_periods and opening_debt > 1e-9:
-                    periods_remaining = active_periods - offset
+                if offset >= grace_periods and outstanding > 1e-9:
+                    periods_remaining = n_max - offset
                     is_final_period = periods_remaining == 1
 
                     if repayment_type == "bullet":
-                        principal = opening_debt if is_final_period else 0.0
+                        principal = outstanding if is_final_period else 0.0
                     elif repayment_type == "annuity":
                         if is_final_period:
-                            principal = opening_debt
+                            principal = outstanding
                         else:
                             principal = max(annuity_payment - interest, 0.0)
                     else:
                         principal = straight_line_principal
                         if is_final_period:
-                            principal = opening_debt
+                            principal = outstanding
 
-                    principal = min(principal, opening_debt)
+                    principal = min(principal, outstanding)
 
-                ending_debt = max(opening_debt - principal, 0.0)
-                drawdown = drawdown_amount if offset == 0 else 0.0
-                period_fees = fees if offset == 0 else 0.0
-
-                rows.append(
-                    {
-                        "Period": pd.Timestamp(period),
-                        "Loan Name": row.get("Loan Name", "Loan Facility"),
-                        "Lender": row.get("Lender", ""),
-                        "Opening Debt": opening_debt,
-                        "Debt Drawdown": drawdown,
-                        "Principal Repayment": principal,
-                        "Interest Expense (Debt)": interest,
-                        "Debt Service": principal + interest,
-                        "Ending Debt": ending_debt,
-                        "Financing Fees": period_fees,
-                    }
-                )
-                outstanding = ending_debt
+                principal_arr[offset] = principal
+                outstanding = max(outstanding - principal, 0.0)
+                n_actual = offset + 1
                 if outstanding <= 1e-9 and offset >= grace_periods:
                     break
 
-        if not rows:
+            n = n_actual
+            periods_slice = idx[start_pos : start_pos + n]
+            op = opening_arr[:n]
+            pr = principal_arr[:n]
+            interest_arr = op * period_rate
+            ending_arr = np.maximum(op - pr, 0.0)
+            drawdown_col = np.zeros(n, dtype=float)
+            drawdown_col[0] = drawdown_amount
+            fees_col = np.zeros(n, dtype=float)
+            fees_col[0] = fees
+
+            loan_dfs.append(pd.DataFrame({
+                "Period": periods_slice,
+                "Loan Name": row.get("Loan Name", "Loan Facility"),
+                "Lender": row.get("Lender", ""),
+                "Opening Debt": op,
+                "Debt Drawdown": drawdown_col,
+                "Principal Repayment": pr,
+                "Interest Expense (Debt)": interest_arr,
+                "Debt Service": pr + interest_arr,
+                "Ending Debt": ending_arr,
+                "Financing Fees": fees_col,
+            }))
+
+        if not loan_dfs:
             return pd.DataFrame()
 
-        detail = pd.DataFrame(rows)
+        detail = pd.concat(loan_dfs, ignore_index=True)
         detail["Period"] = pd.to_datetime(detail["Period"], errors="coerce")
         return detail.sort_values(["Period", "Loan Name"], kind="stable").reset_index(drop=True)
 
@@ -1364,20 +1377,23 @@ class GoatModel:
 
         grouped = pd.DataFrame(index=pd.Index(sorted(idx.year.unique()), name="Year"))
         year_groups = idx.year
-        grouped["Opening Debt"] = out["Opening Debt"].groupby(year_groups).first()
-        for column in [
+        _sum_cols = [
             "Debt Drawdown",
             "Principal Repayment",
             "Interest Expense (Debt)",
             "Debt Service",
             "CFADS",
-        ]:
-            grouped[column] = out[column].groupby(year_groups).sum(min_count=1)
-        grouped["Ending Debt"] = out["Ending Debt"].groupby(year_groups).last()
-        grouped["Closing Cash"] = out["Closing Cash"].groupby(year_groups).last()
+        ]
+        _g = out.groupby(year_groups)
+        grouped["Opening Debt"] = _g["Opening Debt"].first()
+        for column in _sum_cols:
+            grouped[column] = _g[column].sum(min_count=1)
+        grouped["Ending Debt"] = _g["Ending Debt"].last()
+        grouped["Closing Cash"] = _g["Closing Cash"].last()
         grouped["Net Debt"] = grouped["Ending Debt"] - grouped["Closing Cash"]
 
-        annual_ebit = ebit.groupby(year_groups).sum(min_count=1)
+        _g_scalar = ebit.groupby(year_groups)
+        annual_ebit = _g_scalar.sum(min_count=1)
         annual_ebitda = ebitda.groupby(year_groups).sum(min_count=1)
 
         grouped["DSCR"] = self._safe_divide(
@@ -1540,42 +1556,52 @@ class GoatModel:
             discounted += terminal_value_at_rate / ((1 + test_rate) ** terminal_period)
             return float(discounted)
 
-        irr_value: Optional[float] = None
-        search_grid = np.concatenate(([-0.95], np.linspace(-0.9, 5.0, 2000)))
-        previous_rate: Optional[float] = None
-        previous_npv: Optional[float] = None
-        for candidate_rate in search_grid:
-            candidate_npv = _npv_at(float(candidate_rate))
-            if not np.isfinite(candidate_npv):
-                previous_rate = None
-                previous_npv = None
-                continue
-            if (
-                previous_rate is not None
-                and previous_npv is not None
-                and previous_npv * candidate_npv <= 0
-            ):
-                low, high = previous_rate, float(candidate_rate)
-                npv_low, npv_high = previous_npv, float(candidate_npv)
-                for _ in range(120):
-                    mid = (low + high) / 2.0
-                    npv_mid = _npv_at(mid)
-                    if not np.isfinite(npv_mid):
-                        break
-                    if abs(npv_mid) < 1e-7:
-                        irr_value = mid
-                        break
-                    if npv_low * npv_mid < 0:
-                        high = mid
-                        npv_high = npv_mid
-                    else:
-                        low = mid
-                        npv_low = npv_mid
-                if irr_value is None:
-                    irr_value = (low + high) / 2.0
-                break
-            previous_rate = float(candidate_rate)
-            previous_npv = float(candidate_npv)
+        _irr_key = (
+            int(pd.util.hash_pandas_object(ufcf_series).sum()),
+            rate,
+            configured_growth,
+            manual_terminal_value,
+        )
+        _sentinel = object()
+        irr_value: Optional[float] = self._irr_cache.get(_irr_key, _sentinel)  # type: ignore[assignment]
+        if irr_value is _sentinel:
+            irr_value = None
+            search_grid = np.concatenate(([-0.95], np.linspace(-0.9, 5.0, 2000)))
+            previous_rate: Optional[float] = None
+            previous_npv: Optional[float] = None
+            for candidate_rate in search_grid:
+                candidate_npv = _npv_at(float(candidate_rate))
+                if not np.isfinite(candidate_npv):
+                    previous_rate = None
+                    previous_npv = None
+                    continue
+                if (
+                    previous_rate is not None
+                    and previous_npv is not None
+                    and previous_npv * candidate_npv <= 0
+                ):
+                    low, high = previous_rate, float(candidate_rate)
+                    npv_low, npv_high = previous_npv, float(candidate_npv)
+                    for _ in range(120):
+                        mid = (low + high) / 2.0
+                        npv_mid = _npv_at(mid)
+                        if not np.isfinite(npv_mid):
+                            break
+                        if abs(npv_mid) < 1e-7:
+                            irr_value = mid
+                            break
+                        if npv_low * npv_mid < 0:
+                            high = mid
+                            npv_high = npv_mid
+                        else:
+                            low = mid
+                            npv_low = npv_mid
+                    if irr_value is None:
+                        irr_value = (low + high) / 2.0
+                    break
+                previous_rate = float(candidate_rate)
+                previous_npv = float(candidate_npv)
+            self._irr_cache[_irr_key] = irr_value
 
         cumulative = np.cumsum(values)
         payback_years: Optional[float] = None

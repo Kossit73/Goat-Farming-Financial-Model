@@ -14676,12 +14676,8 @@ def main() -> None:
             if isinstance(table, pd.DataFrame)
         }
         for payload in scenario_results.values():
-            payload["assumption_tables"] = {
-                name: table.copy() for name, table in assumptions_snapshot.items()
-            }
-            payload["detail_tables"] = {
-                name: table.copy() for name, table in detail_snapshot.items()
-            }
+            payload["assumption_tables"] = assumptions_snapshot
+            payload["detail_tables"] = detail_snapshot
 
         st.session_state.all_scenario_results = scenario_results
 
@@ -14696,7 +14692,6 @@ def main() -> None:
         st.session_state.excel_bytes_map = {}
         st.session_state[MODEL_VIEW_CACHE_KEY] = {}
         st.session_state[MODEL_VALIDATION_CACHE_KEY] = {}
-        st.session_state[MODEL_RUN_SIGNATURE_KEY] = _current_model_run_signature()
         st.session_state[MODEL_LAST_RUN_VERSION_KEY] = int(
             _safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0
         )
