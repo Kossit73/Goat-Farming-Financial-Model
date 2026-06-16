@@ -560,6 +560,75 @@ def test_default_asset_schedule_is_derived_from_capex_schedule():
     )
 
 
+def test_default_opening_herd_acquisition_syncs_to_opening_herd():
+    assumptions = streamlit_app._default_assumption_tables()
+    supplementary = streamlit_app._default_supplementary_tables()
+
+    acquisition = supplementary["Opening Herd Acquisition"]
+    opening = assumptions["Opening Herd Cohorts"].set_index("Cohort ID")
+
+    assert "Opening Herd Acquisition" in supplementary
+    assert acquisition["Cohort ID"].tolist() == opening.reset_index()["Cohort ID"].tolist()
+    for _, row in acquisition.iterrows():
+        cohort_id = row["Cohort ID"]
+        assert float(row["Quantity"]) == pytest.approx(float(opening.loc[cohort_id, "Head Count"]))
+        assert row["Funding Source"] == "Equity"
+
+
+def test_opening_herd_acquisition_preserves_pricing_and_rolls_into_capex():
+    assumptions = streamlit_app._default_assumption_tables()
+    supplementary = streamlit_app._default_supplementary_tables()
+    acquisition = supplementary["Opening Herd Acquisition"].copy()
+
+    acquisition.loc[acquisition["Cohort ID"] == "BD-001", "Unit Cost"] = 1200.0
+    acquisition.loc[acquisition["Cohort ID"] == "BD-001", "Funding Source"] = "Equity"
+    acquisition.loc[acquisition["Cohort ID"] == "BB-001", "Unit Cost"] = 2500.0
+    acquisition.loc[acquisition["Cohort ID"] == "BB-001", "Funding Source"] = "Debt"
+    acquisition["Purchase Year"] = 2026
+    supplementary["Opening Herd Acquisition"] = acquisition
+
+    synced = streamlit_app._sync_asset_schedule_from_capex_in_supplementary(
+        supplementary,
+        assumptions,
+    )
+    capex = synced["Capex Schedule"]
+    acquisition_synced = synced["Opening Herd Acquisition"].set_index("Cohort ID")
+
+    assert float(acquisition_synced.loc["BD-001", "Total Starter-Herd Cost"]) == pytest.approx(180000.0)
+    assert float(acquisition_synced.loc["BB-001", "Total Starter-Herd Cost"]) == pytest.approx(20000.0)
+
+    equity_row = capex.loc[capex["Category"] == "Opening Herd Acquisition - Equity"].iloc[0]
+    debt_row = capex.loc[capex["Category"] == "Opening Herd Acquisition - Debt"].iloc[0]
+
+    assert int(equity_row["Year"]) == 2026
+    assert float(equity_row["Spend"]) == pytest.approx(180000.0)
+    assert float(debt_row["Spend"]) == pytest.approx(20000.0)
+
+
+def test_opening_herd_acquisition_updates_quantity_when_opening_herd_changes():
+    assumptions = streamlit_app._default_assumption_tables()
+    supplementary = streamlit_app._default_supplementary_tables()
+    acquisition = supplementary["Opening Herd Acquisition"].copy()
+    acquisition.loc[acquisition["Cohort ID"] == "BD-001", "Unit Cost"] = 900.0
+    acquisition.loc[acquisition["Cohort ID"] == "BD-001", "Funding Source"] = "Mixed"
+    supplementary["Opening Herd Acquisition"] = acquisition
+
+    opening = assumptions["Opening Herd Cohorts"].copy()
+    opening.loc[opening["Cohort ID"] == "BD-001", "Head Count"] = 175.0
+    assumptions["Opening Herd Cohorts"] = opening
+
+    synced = streamlit_app._sync_asset_schedule_from_capex_in_supplementary(
+        supplementary,
+        assumptions,
+    )
+    acquisition_synced = synced["Opening Herd Acquisition"].set_index("Cohort ID")
+
+    assert float(acquisition_synced.loc["BD-001", "Quantity"]) == pytest.approx(175.0)
+    assert float(acquisition_synced.loc["BD-001", "Unit Cost"]) == pytest.approx(900.0)
+    assert acquisition_synced.loc["BD-001", "Funding Source"] == "Mixed"
+    assert float(acquisition_synced.loc["BD-001", "Total Starter-Herd Cost"]) == pytest.approx(157500.0)
+
+
 def test_asset_schedule_rolls_forward_from_capex_schedule():
     capex = pd.DataFrame(
         {

@@ -3259,6 +3259,21 @@ DEFAULT_OPENING_HERD_COHORTS = [
 ]
 
 
+OPENING_HERD_ACQUISITION_COLUMNS = [
+    "Cohort ID",
+    "Business Unit",
+    "Purpose",
+    "Purchase Year",
+    "Quantity",
+    "Unit Cost",
+    "Total Starter-Herd Cost",
+    "Funding Source",
+    "Active",
+]
+OPENING_HERD_ACQUISITION_CAPEX_PREFIX = "Opening Herd Acquisition"
+OPENING_HERD_ACQUISITION_FUNDING_SOURCES = {"Equity", "Debt", "Mixed"}
+
+
 DEFAULT_COHORT_ALLOCATION_RULES = [
     {"Rule": "Female Replacement Retention %", "Value": 35.0},
     {"Rule": "Male Live Sale %", "Value": 0.0},
@@ -3604,6 +3619,110 @@ def _default_opening_herd_cohorts_table() -> pd.DataFrame:
 
 def _ensure_opening_herd_cohorts_table(table: Optional[pd.DataFrame]) -> pd.DataFrame:
     return ensure_table(OPENING_HERD_COHORTS_SCHEMA, table)
+
+
+def _default_opening_herd_acquisition_year(
+    production_horizon: Optional[pd.DataFrame] = None,
+) -> int:
+    horizon = _ensure_production_horizon_table(production_horizon)
+    first_year = pd.to_numeric(horizon.get("Start Year"), errors="coerce").dropna()
+    if not first_year.empty:
+        return int(first_year.iloc[0])
+    return pd.Timestamp.today().year
+
+
+def _ensure_opening_herd_acquisition_table(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    if table is None or table.empty:
+        work = pd.DataFrame(columns=OPENING_HERD_ACQUISITION_COLUMNS)
+    else:
+        work = table.copy()
+
+    for column in OPENING_HERD_ACQUISITION_COLUMNS:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    for column in ["Cohort ID", "Business Unit", "Purpose"]:
+        work[column] = _series_or_default(work, column, "").fillna("").astype(str).str.strip()
+
+    work["Purchase Year"] = pd.to_numeric(work.get("Purchase Year"), errors="coerce").round().astype("Int64")
+    work["Quantity"] = pd.to_numeric(work.get("Quantity"), errors="coerce")
+    work["Unit Cost"] = pd.to_numeric(work.get("Unit Cost"), errors="coerce")
+
+    total_cost = pd.to_numeric(work.get("Total Starter-Herd Cost"), errors="coerce")
+    computed_total = work["Quantity"].fillna(0.0) * work["Unit Cost"].fillna(0.0)
+    work["Total Starter-Herd Cost"] = computed_total.where(total_cost.isna(), total_cost)
+
+    funding = (
+        _series_or_default(work, "Funding Source", "Equity")
+        .fillna("Equity")
+        .astype(str)
+        .str.strip()
+        .str.title()
+    )
+    funding = funding.where(funding.isin(OPENING_HERD_ACQUISITION_FUNDING_SOURCES), "Equity")
+    work["Funding Source"] = funding
+    work["Active"] = _series_or_default(work, "Active", True).map(
+        lambda value: _coerce_bool_value(value, True)
+    )
+
+    ordered = list(OPENING_HERD_ACQUISITION_COLUMNS)
+    remainder = [col for col in work.columns if col not in ordered]
+    return work[ordered + remainder].reset_index(drop=True)
+
+
+def _default_opening_herd_acquisition_table(
+    opening_herd: Optional[pd.DataFrame] = None,
+    production_horizon: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    return _sync_opening_herd_acquisition_to_opening_herd(
+        pd.DataFrame(columns=OPENING_HERD_ACQUISITION_COLUMNS),
+        opening_herd,
+        production_horizon,
+    )
+
+
+def _sync_opening_herd_acquisition_to_opening_herd(
+    table: Optional[pd.DataFrame],
+    opening_herd: Optional[pd.DataFrame],
+    production_horizon: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    work = _ensure_opening_herd_acquisition_table(table)
+    opening = _ensure_opening_herd_cohorts_table(opening_herd)
+    purchase_year = _default_opening_herd_acquisition_year(production_horizon)
+
+    if opening.empty:
+        return work
+
+    existing_rows = {
+        str(row.get("Cohort ID", "")).strip(): row
+        for _, row in work.drop_duplicates(subset=["Cohort ID"], keep="last").iterrows()
+        if str(row.get("Cohort ID", "")).strip()
+    }
+
+    rows: list[dict[str, Any]] = []
+    for _, row in opening.iterrows():
+        cohort_id = str(row.get("Cohort ID", "")).strip()
+        existing = existing_rows.get(cohort_id, {})
+        quantity = _coerce_float_scalar(row.get("Head Count"), 0.0)
+        unit_cost = _coerce_numeric_scalar(existing.get("Unit Cost"))
+        existing_year = _coerce_numeric_scalar(existing.get("Purchase Year"))
+        rows.append(
+            {
+                "Cohort ID": cohort_id or "COHORT",
+                "Business Unit": str(row.get("Business Unit", "")).strip() or "Breeding",
+                "Purpose": str(row.get("Purpose", "")).strip() or "replacement_doe",
+                "Purchase Year": int(existing_year) if pd.notna(existing_year) else purchase_year,
+                "Quantity": quantity,
+                "Unit Cost": float(unit_cost) if pd.notna(unit_cost) else 0.0,
+                "Total Starter-Herd Cost": quantity * (float(unit_cost) if pd.notna(unit_cost) else 0.0),
+                "Funding Source": str(existing.get("Funding Source", "Equity")).strip() or "Equity",
+                "Active": _coerce_bool_value(row.get("Active"), True),
+            }
+        )
+
+    return _ensure_opening_herd_acquisition_table(pd.DataFrame(rows))
 
 
 def _sync_opening_herd_cohorts_to_herd_plan(
@@ -9201,6 +9320,10 @@ def _default_schedule_components(
 
 
 def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
+    opening_herd_acquisition = _default_opening_herd_acquisition_table(
+        _default_opening_herd_cohorts_table(),
+        _default_production_horizon_table(),
+    )
     capex_schedule = pd.DataFrame(
         {
             "Year": [2024, 2025],
@@ -9209,6 +9332,10 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
             "Depreciation Rate %": [8.0, 6.5],
             "Depreciation": [40000.0, 11375.0],
         }
+    )
+    capex_schedule = _merge_opening_herd_acquisition_into_capex(
+        capex_schedule,
+        opening_herd_acquisition,
     )
     return {
         "Loan Facilities": _default_loan_facilities_table(),
@@ -9220,6 +9347,7 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
                 "Investment": [0.0, 250000.0],
             }
         ),
+        "Opening Herd Acquisition": opening_herd_acquisition,
         "Capex Schedule": capex_schedule,
         "Asset Schedules": _derive_asset_schedule_from_capex(capex_schedule),
         "Outputs": pd.DataFrame(
@@ -9237,11 +9365,86 @@ def _default_supplementary_tables() -> Dict[str, pd.DataFrame]:
     }
 
 
+def _opening_herd_acquisition_capex_rows(
+    table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    acquisition = _ensure_opening_herd_acquisition_table(table)
+    if acquisition.empty:
+        return pd.DataFrame(columns=CAPEX_TABLE_COLUMNS)
+
+    active = acquisition.loc[acquisition["Active"].fillna(True).astype(bool)].copy()
+    active["Purchase Year"] = pd.to_numeric(active.get("Purchase Year"), errors="coerce")
+    active["Total Starter-Herd Cost"] = pd.to_numeric(
+        active.get("Total Starter-Herd Cost"),
+        errors="coerce",
+    )
+    active["Funding Source"] = (
+        active.get("Funding Source", pd.Series("Equity", index=active.index))
+        .fillna("Equity")
+        .astype(str)
+        .str.strip()
+        .str.title()
+    )
+    active = active.dropna(subset=["Purchase Year", "Total Starter-Herd Cost"])
+    active = active.loc[active["Total Starter-Herd Cost"] > 0]
+    if active.empty:
+        return pd.DataFrame(columns=CAPEX_TABLE_COLUMNS)
+
+    grouped = (
+        active.groupby(["Purchase Year", "Funding Source"], dropna=False)["Total Starter-Herd Cost"]
+        .sum()
+        .reset_index()
+    )
+    return _ensure_capex_schedule(
+        pd.DataFrame(
+            {
+                "Year": grouped["Purchase Year"].astype(int),
+                "Category": grouped["Funding Source"].map(
+                    lambda source: f"{OPENING_HERD_ACQUISITION_CAPEX_PREFIX} - {source}"
+                ),
+                "Spend": grouped["Total Starter-Herd Cost"].astype(float),
+                "Depreciation Rate %": 0.0,
+                "Depreciation": 0.0,
+            }
+        )
+    )
+
+
+def _merge_opening_herd_acquisition_into_capex(
+    capex_table: Optional[pd.DataFrame],
+    acquisition_table: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    capex = _ensure_capex_schedule(capex_table)
+    manual_capex = capex.loc[
+        ~capex["Category"].fillna("").astype(str).str.startswith(
+            OPENING_HERD_ACQUISITION_CAPEX_PREFIX
+        )
+    ].copy()
+    acquisition_capex = _opening_herd_acquisition_capex_rows(acquisition_table)
+    if manual_capex.empty:
+        return _ensure_capex_schedule(acquisition_capex)
+    if acquisition_capex.empty:
+        return _ensure_capex_schedule(manual_capex)
+    combined = pd.concat([manual_capex, acquisition_capex], ignore_index=True)
+    return _ensure_capex_schedule(combined)
+
+
 def _sync_asset_schedule_from_capex_in_supplementary(
     supplementary: Optional[Dict[str, pd.DataFrame]],
+    assumptions: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> Dict[str, pd.DataFrame]:
     synced = dict(supplementary or {})
-    capex = _ensure_capex_schedule(synced.get("Capex Schedule"))
+    assumption_tables = dict(assumptions or {})
+    acquisition = _sync_opening_herd_acquisition_to_opening_herd(
+        synced.get("Opening Herd Acquisition"),
+        assumption_tables.get("Opening Herd Cohorts"),
+        assumption_tables.get("Production Horizon"),
+    )
+    synced["Opening Herd Acquisition"] = acquisition
+    capex = _merge_opening_herd_acquisition_into_capex(
+        synced.get("Capex Schedule"),
+        acquisition,
+    )
     synced["Capex Schedule"] = capex
     synced["Asset Schedules"] = _derive_asset_schedule_from_capex(capex)
     return synced
@@ -11138,8 +11341,24 @@ def _assumption_validation_issues(assumptions: Dict[str, pd.DataFrame]) -> list[
             )
         )
     supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-        st.session_state.get("supplementary", {})
+        st.session_state.get("supplementary", {}),
+        assumptions,
     )
+    acquisition = _ensure_opening_herd_acquisition_table(
+        supplementary.get("Opening Herd Acquisition")
+    )
+    missing_unit_cost = acquisition.loc[
+        acquisition["Active"].fillna(True).astype(bool)
+        & pd.to_numeric(acquisition["Quantity"], errors="coerce").fillna(0.0).gt(0.0)
+        & pd.to_numeric(acquisition["Unit Cost"], errors="coerce").fillna(0.0).le(0.0)
+    ]
+    if not missing_unit_cost.empty:
+        labels = missing_unit_cost["Cohort ID"].astype(str).tolist()
+        issues.append(
+            "Opening Herd Acquisition has starter-herd rows with quantity but zero or missing unit cost: "
+            + ", ".join(labels[:4])
+            + ("..." if len(labels) > 4 else "")
+        )
     capex_recon_issues = _capex_asset_reconciliation_issues(
         supplementary.get("Capex Schedule"),
         supplementary.get("Asset Schedules"),
@@ -12593,7 +12812,8 @@ def main() -> None:
     if "supplementary" not in st.session_state:
         st.session_state.supplementary = _default_supplementary_tables()
     st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-        st.session_state.get("supplementary")
+        st.session_state.get("supplementary"),
+        st.session_state.get("assumptions"),
     )
     if "all_scenario_results" not in st.session_state:
         st.session_state.all_scenario_results = {}
@@ -12885,6 +13105,46 @@ def main() -> None:
                     if cleaned_cap is not None:
                         supplementary_tables[name] = _ensure_capitalisation_table(cleaned_cap)
                     continue
+                if name == "Opening Herd Acquisition":
+                    st.markdown("#### Opening Herd Acquisition")
+                    st.caption(
+                        "Quantity is synced from Opening Herd Cohorts. Set unit cost and funding source here; "
+                        "total starter-herd cost rolls into the Capex Schedule automatically."
+                    )
+                    acquisition_table = _sync_opening_herd_acquisition_to_opening_herd(
+                        st.session_state.supplementary.get(name),
+                        st.session_state.get("assumptions", {}).get("Opening Herd Cohorts"),
+                        st.session_state.get("assumptions", {}).get("Production Horizon"),
+                    )
+                    st.session_state.supplementary[name] = acquisition_table
+
+                    def _save_opening_herd_acquisition(updated: pd.DataFrame) -> None:
+                        st.session_state.supplementary[name] = _sync_opening_herd_acquisition_to_opening_herd(
+                            updated,
+                            st.session_state.get("assumptions", {}).get("Opening Herd Cohorts"),
+                            st.session_state.get("assumptions", {}).get("Production Horizon"),
+                        )
+                        st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
+                            st.session_state.supplementary,
+                            st.session_state.get("assumptions"),
+                        )
+
+                    _render_schedule_row_editor(
+                        "supp::opening_herd_acquisition",
+                        acquisition_table,
+                        _save_opening_herd_acquisition,
+                    )
+
+                    cleaned_acquisition = _clean_editor_table(
+                        st.session_state.supplementary[name]
+                    )
+                    if cleaned_acquisition is not None:
+                        supplementary_tables[name] = _sync_opening_herd_acquisition_to_opening_herd(
+                            cleaned_acquisition,
+                            st.session_state.get("assumptions", {}).get("Opening Herd Cohorts"),
+                            st.session_state.get("assumptions", {}).get("Production Horizon"),
+                        )
+                    continue
                 if name == "Capex Schedule":
                     st.markdown("#### Capex Schedule")
                     capex_table = _ensure_capex_schedule(
@@ -12921,7 +13181,8 @@ def main() -> None:
                         capex_table = _apply_capex_rate(capex_table, rate_value)
                         st.session_state.supplementary[name] = capex_table
                         st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-                            st.session_state.supplementary
+                            st.session_state.supplementary,
+                            st.session_state.get("assumptions"),
                         )
                         _reset_cached_results()
                         _clear_schedule_editor_state("supp::capex_schedule")
@@ -12943,7 +13204,8 @@ def main() -> None:
                         )
                         st.session_state.supplementary[name] = capex_table
                         st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-                            st.session_state.supplementary
+                            st.session_state.supplementary,
+                            st.session_state.get("assumptions"),
                         )
                         _reset_cached_results()
                         _clear_schedule_editor_state("supp::capex_schedule")
@@ -12973,7 +13235,8 @@ def main() -> None:
                             st.session_state.capex_remove_choice = "-- Select Row --"
                             st.session_state.supplementary[name] = capex_table
                             st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-                                st.session_state.supplementary
+                                st.session_state.supplementary,
+                                st.session_state.get("assumptions"),
                             )
                             _reset_cached_results()
                             _clear_schedule_editor_state("supp::capex_schedule")
@@ -12998,7 +13261,8 @@ def main() -> None:
                         )
                         st.session_state.supplementary[name] = capex_table
                         st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-                            st.session_state.supplementary
+                            st.session_state.supplementary,
+                            st.session_state.get("assumptions"),
                         )
                         _reset_cached_results()
                         _clear_schedule_editor_state("supp::capex_schedule")
@@ -13009,7 +13273,8 @@ def main() -> None:
                         ensured = _ensure_capex_schedule(updated)
                         st.session_state.supplementary[name] = ensured
                         st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-                            st.session_state.supplementary
+                            st.session_state.supplementary,
+                            st.session_state.get("assumptions"),
                         )
 
                     _render_schedule_row_editor(
@@ -13028,7 +13293,8 @@ def main() -> None:
                         "Derived automatically from the Capex Schedule. Edit capex rows above to change asset additions, depreciation, and NBV roll-forwards."
                     )
                     st.session_state.supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-                        st.session_state.supplementary
+                        st.session_state.supplementary,
+                        st.session_state.get("assumptions"),
                     )
                     asset_table = _ensure_asset_schedule(
                         st.session_state.supplementary.get(name)
@@ -14615,7 +14881,8 @@ def main() -> None:
                     return
                 schedule_df = horizon_filtered
         combined_supplementary = _sync_asset_schedule_from_capex_in_supplementary(
-            dict(supplementary_tables)
+            dict(supplementary_tables),
+            assumption_tables,
         )
         for name, table in assumption_tables.items():
             cleaned = _clean_editor_table(table)
@@ -14990,6 +15257,7 @@ def main() -> None:
                 "Loan Facilities",
                 "Equity Facilities",
                 "Capitalisation Table",
+                "Opening Herd Acquisition",
                 "Capex Schedule",
                 "Asset Schedules",
                 "Outputs",
