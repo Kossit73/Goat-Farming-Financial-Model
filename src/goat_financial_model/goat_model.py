@@ -1992,6 +1992,9 @@ class GoatModel:
         computed_irr = valuation_summary.get("irr")
         if computed_irr is not None:
             out["IRR"] = float(computed_irr)
+        terminal_value = valuation_summary.get("terminal_value")
+        if terminal_value is not None:
+            out["Terminal Value"] = float(terminal_value)
         payback = valuation_summary.get("payback_years")
         if payback is not None:
             out["Payback Period (Years)"] = payback
@@ -2420,6 +2423,17 @@ class GoatModel:
                 message="IRR could not be solved from the current unlevered cash-flow profile.",
                 reasoning="This usually means the cash flows do not cross the zero-NPV threshold within a reasonable discount-rate range or remain one-sided in sign.",
                 recommendation="Review the UFCF profile, terminal value assumptions, and whether the project ever recovers its initial investment.",
+            )
+        payback_years = valuation_summary.get("payback_years")
+        if payback_years is None or pd.isna(payback_years):
+            self._audit_issue(
+                issues,
+                severity="Info",
+                category="Valuation",
+                metric="Payback Period",
+                message="Payback period could not be established from the current unlevered cash-flow profile.",
+                reasoning="This usually means cumulative UFCF stays negative throughout the modeled horizon, so the project never recovers its initial investment in-period.",
+                recommendation="Review early-period operating performance, capex timing, and the modeled horizon if you expect the investment to pay back.",
             )
 
         debt_capacity = self.debt_capacity_schedule(work, annual=annual)

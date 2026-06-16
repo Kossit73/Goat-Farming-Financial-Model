@@ -2214,6 +2214,7 @@ def _dynamic_benchmark_kpis_table(kpi_df: pd.DataFrame) -> pd.DataFrame:
         "Revenue per Herd Head",
         "Feed Cost per Herd Head",
         "IRR",
+        "Terminal Value",
         "Payback Period (Years)",
         "DSCR",
         "Cash Reserve Headroom",
@@ -2259,6 +2260,18 @@ def _valuation_diagnostic_messages(model: GoatModel) -> List[str]:
     ).iloc[0]
     if pd.isna(terminal_value) or terminal_value <= 0:
         messages.append("Terminal value did not compute from the current free-cash-flow profile.")
+    irr_value = pd.to_numeric(pd.Series([summary.get("irr")]), errors="coerce").iloc[0]
+    if pd.isna(irr_value):
+        messages.append(
+            "IRR is mathematically unavailable because the UFCF profile does not cross the zero-NPV threshold within the model's search range."
+        )
+    payback_years = pd.to_numeric(
+        pd.Series([summary.get("payback_years")]), errors="coerce"
+    ).iloc[0]
+    if pd.isna(payback_years):
+        messages.append(
+            "Payback Period is mathematically unavailable because cumulative UFCF never turns positive over the modeled horizon."
+        )
     return messages
 
 

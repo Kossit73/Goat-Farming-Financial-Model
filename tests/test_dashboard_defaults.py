@@ -1467,10 +1467,42 @@ def test_kpis_use_computed_npv_and_irr_only():
 
     assert "NPV" in kpis.columns
     assert "IRR" in kpis.columns
+    assert "Terminal Value" in kpis.columns
+    assert "Payback Period (Years)" in kpis.columns
     assert float(kpis["NPV"].iloc[0]) == pytest.approx(float(summary["npv"]))
     assert float(kpis["IRR"].iloc[0]) == pytest.approx(float(summary["irr"]))
+    assert float(kpis["Terminal Value"].iloc[0]) == pytest.approx(float(summary["terminal_value"]))
+    assert float(kpis["Payback Period (Years)"].iloc[0]) == pytest.approx(float(summary["payback_years"]))
     assert float(kpis["NPV"].iloc[0]) != pytest.approx(-999.0)
     assert float(kpis["IRR"].iloc[0]) != pytest.approx(-0.99)
+
+
+def test_valuation_diagnostic_messages_explain_missing_irr_and_payback():
+    model = streamlit_app.GoatModel(
+        pd.DataFrame(
+            {
+                "Revenue": [0.0, 0.0, 0.0],
+                "COGS": [0.0, 0.0, 0.0],
+                "EBITDA": [-100.0, -40.0, -10.0],
+                "Depreciation & Amortization": [0.0, 0.0, 0.0],
+                "EBIT": [-100.0, -40.0, -10.0],
+                "Interest Expense": [0.0, 0.0, 0.0],
+                "NPBT": [-100.0, -40.0, -10.0],
+                "Tax Expense": [0.0, 0.0, 0.0],
+                "NPAT": [-100.0, -40.0, -10.0],
+                "CFO": [-100.0, -40.0, -10.0],
+                "CFI": [0.0, 0.0, 0.0],
+                "CFF": [0.0, 0.0, 0.0],
+            },
+            index=pd.date_range("2024-12-31", periods=3, freq="Y"),
+        ),
+        valuation_inputs={"WACC": 0.1, "Terminal Value": 0.0},
+    )
+
+    messages = streamlit_app._valuation_diagnostic_messages(model)
+
+    assert any("IRR is mathematically unavailable" in message for message in messages)
+    assert any("Payback Period is mathematically unavailable" in message for message in messages)
 
 
 def test_sync_commercial_assumptions_filters_rows_to_business_type():
