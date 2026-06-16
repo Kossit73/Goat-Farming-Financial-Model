@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from importlib.util import find_spec
 from io import BytesIO
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -2414,6 +2415,60 @@ def _execute_scenario_suite(
     )
 
 
+_BASE_CASE_SCENARIO_NAME = "Base Case Scenario"
+_FULL_SUITE_PENDING_KEY = "_full_suite_pending"
+
+
+def _run_base_case_only(
+    schedule_df: pd.DataFrame,
+    valuation_inputs: Dict[str, float],
+    supplementary_tables: Dict[str, pd.DataFrame],
+    full_scenario_suite: Dict[str, Dict[str, Any]],
+) -> Tuple[GoatModel, pd.DataFrame, Dict[str, Dict[str, Any]]]:
+    """Run only the Base Case scenario for a fast first response.
+
+    The full suite is deferred until the user opens a multi-scenario view.
+    """
+    base_suite = {
+        name: config
+        for name, config in full_scenario_suite.items()
+        if name == _BASE_CASE_SCENARIO_NAME
+    }
+    if not base_suite:
+        base_suite = {_BASE_CASE_SCENARIO_NAME: next(iter(full_scenario_suite.values()))}
+    return _execute_scenario_suite(schedule_df, valuation_inputs, supplementary_tables, base_suite)
+
+
+def _complete_scenario_suite_if_pending(
+    schedule_df: pd.DataFrame,
+    valuation_inputs: Dict[str, float],
+    supplementary_tables: Dict[str, pd.DataFrame],
+    full_scenario_suite: Dict[str, Dict[str, Any]],
+) -> None:
+    """Compute any scenarios not yet in all_scenario_results and merge them in."""
+    if not st.session_state.get(_FULL_SUITE_PENDING_KEY):
+        return
+    existing = set((st.session_state.get("all_scenario_results") or {}).keys())
+    remaining = {
+        name: config
+        for name, config in full_scenario_suite.items()
+        if name not in existing
+    }
+    if not remaining:
+        st.session_state[_FULL_SUITE_PENDING_KEY] = False
+        return
+    _, _, new_results = _execute_scenario_suite(
+        schedule_df, valuation_inputs, supplementary_tables, remaining
+    )
+    merged = dict(st.session_state.get("all_scenario_results") or {})
+    merged.update(new_results)
+    st.session_state.all_scenario_results = merged
+    if st.session_state.get("selected_scenario_name") not in merged:
+        st.session_state.selected_scenario_name = next(iter(merged))
+    st.session_state.results = merged[st.session_state.selected_scenario_name]
+    st.session_state[_FULL_SUITE_PENDING_KEY] = False
+
+
 def _ensure_active_scenario_selection() -> None:
     scenario_results = st.session_state.get("all_scenario_results") or {}
     if not scenario_results:
@@ -4069,12 +4124,46 @@ def _calculate_lactation_curve_yield(
     return max(0.0, yield_per_day * parity_factor)
 
 
+_BIO_SCHEDULE_CACHE_KEY = "_bio_schedule_cache"
+
+
+def _hash_bio_inputs(schedule_df: pd.DataFrame, assumptions: Optional[Dict[str, pd.DataFrame]]) -> str:
+    """Stable hash of the inputs that drive biological schedule derivation."""
+    h = hashlib.md5()
+    try:
+        h.update(pd.util.hash_pandas_object(schedule_df.index.to_series(), index=False).values.tobytes())
+    except Exception:
+        h.update(repr(list(schedule_df.index)).encode())
+    bio_tables = [
+        "System Settings",
+        "Breeding & Reproduction",
+        "Lactation",
+        "Finishing & Slaughter",
+        "Opening Herd Cohorts",
+        "Cohort Allocation Rules",
+        "Herd Plan",
+    ]
+    for tname in bio_tables:
+        df = (assumptions or {}).get(tname)
+        if df is not None and isinstance(df, pd.DataFrame):
+            try:
+                h.update(pd.util.hash_pandas_object(df, index=True).values.tobytes())
+            except Exception:
+                h.update(repr(df.values.tolist()).encode())
+    return h.hexdigest()
+
+
 def _derive_biological_schedules(
     schedule_df: pd.DataFrame,
     assumptions: Optional[Dict[str, pd.DataFrame]],
 ) -> Dict[str, pd.DataFrame]:
     if schedule_df is None or schedule_df.empty:
         return {}
+
+    _cache_key = _hash_bio_inputs(schedule_df, assumptions)
+    _bio_cache = st.session_state.setdefault(_BIO_SCHEDULE_CACHE_KEY, {})
+    if _cache_key in _bio_cache:
+        return _bio_cache[_cache_key]
 
     work_index = pd.to_datetime(schedule_df.index, errors="coerce")
     work_index = pd.DatetimeIndex(work_index[work_index.notna()]).sort_values()
@@ -4734,6 +4823,7 @@ def _derive_biological_schedules(
                 outputs,
             )
         )
+    _bio_cache[_cache_key] = outputs
     return outputs
 
 
@@ -10167,6 +10257,7 @@ def _reset_cached_results() -> None:
     _safe_session_state_set("excel_bytes_map", {})
     _safe_session_state_set(MODEL_VIEW_CACHE_KEY, {})
     _safe_session_state_set(MODEL_VALIDATION_CACHE_KEY, {})
+    st.session_state.pop(_BIO_SCHEDULE_CACHE_KEY, None)
 
 
 def _sync_production_horizon(start_year: int, end_year: int) -> None:
@@ -14926,21 +15017,24 @@ def main() -> None:
             )
             scenario_suite = _build_scenario_suite(custom_label, custom_adjustments)
 
+        if run_feedback_slot is not None:
+            run_feedback_slot.info("Building base case…")
         try:
-            model, _, scenario_results = _execute_scenario_suite(
-                schedule_df,
-                valuation_inputs,
-                combined_supplementary,
-                scenario_suite,
-            )
+            with st.spinner("Running model — computing base case…"):
+                model, _, scenario_results = _run_base_case_only(
+                    schedule_df,
+                    valuation_inputs,
+                    combined_supplementary,
+                    scenario_suite,
+                )
         except ValueError as exc:
             _show_run_validation_error(str(exc))
             return
 
         if run_feedback_slot is not None:
-            run_feedback_slot.success("Scenario suite complete. Opening Dashboard...")
+            run_feedback_slot.success("Base case complete. Opening Dashboard…")
         else:
-            st.success("Scenario suite complete")
+            st.success("Base case complete")
         st.session_state["model_last_run_at"] = pd.Timestamp.utcnow().strftime(
             "%Y-%m-%d %H:%M UTC"
         )
@@ -14960,10 +15054,15 @@ def main() -> None:
             payload["detail_tables"] = detail_snapshot
 
         st.session_state.all_scenario_results = scenario_results
+        st.session_state[_FULL_SUITE_PENDING_KEY] = True
+        st.session_state["_pending_full_scenario_suite"] = scenario_suite
+        st.session_state["_pending_schedule_df"] = schedule_df
+        st.session_state["_pending_valuation_inputs"] = valuation_inputs
+        st.session_state["_pending_supplementary"] = combined_supplementary
 
         previous_selection = st.session_state.get("selected_scenario_name")
         if previous_selection not in scenario_results:
-            previous_selection = "Base Case Scenario"
+            previous_selection = _BASE_CASE_SCENARIO_NAME
             if previous_selection not in scenario_results:
                 previous_selection = next(iter(scenario_results))
 
@@ -15043,6 +15142,15 @@ def main() -> None:
             st.info("Supplementary schedules will appear once the model has been run.")
         else:
             _render_stale_results_notice()
+            if st.session_state.get(_FULL_SUITE_PENDING_KEY):
+                with st.spinner("Computing remaining scenarios in the background…"):
+                    _complete_scenario_suite_if_pending(
+                        st.session_state.get("_pending_schedule_df"),
+                        st.session_state.get("_pending_valuation_inputs"),
+                        st.session_state.get("_pending_supplementary"),
+                        st.session_state.get("_pending_full_scenario_suite") or {},
+                    )
+                st.rerun()
             reporting_context = _cached_result_view(
                 "reporting_views",
                 results.get("selected_scenario", "Scenario"),
@@ -15286,7 +15394,12 @@ def main() -> None:
                 "Model Audit Summary",
                 "Model Audit Findings",
             ]:
-                _render_table(name, supplementary_render.get(name))
+                with st.expander(name, expanded=False):
+                    table = supplementary_render.get(name)
+                    if table is None:
+                        st.info(f"No **{name}** data was provided.")
+                    else:
+                        st.dataframe(table)
 
     if active_main_section == "Advanced Analytics":
         st.subheader("Advanced Analytics")
