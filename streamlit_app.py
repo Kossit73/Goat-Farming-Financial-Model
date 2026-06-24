@@ -427,7 +427,7 @@ def _render_model_hero() -> None:
         f"""
         <section class="designer-hero">
             <p class="designer-kicker">Livestock finance planning</p>
-            <h1 class="designer-title">Goat Farm Financial Model</h1>
+            <h1 class="designer-title">Goat Farm</h1>
             <p class="designer-copy">
                 Build a cleaner decision environment for herd growth, pricing, costs, financing, and
                 investor reporting with a structured dashboard and polished export pack.
