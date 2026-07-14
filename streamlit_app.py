@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import lru_cache
 from importlib.util import find_spec
 from io import BytesIO
 import hashlib
@@ -31,6 +33,7 @@ from pandas.tseries.offsets import MonthEnd, QuarterEnd
 from streamlit.delta_generator import DeltaGenerator
 
 _APP_ROOT = Path(__file__).resolve().parent
+_HERO_IMAGE_PATH = _APP_ROOT / "assets" / "livestock.jpg"
 _SRC_ROOT = _APP_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
@@ -332,14 +335,45 @@ def _inject_app_theme() -> None:
             max-width: 1440px;
         }
         .designer-hero {
+            --goat-hero-overlay: linear-gradient(
+                90deg,
+                rgba(247, 252, 250, 0.97) 0%,
+                rgba(247, 252, 250, 0.93) 44%,
+                rgba(247, 252, 250, 0.66) 72%,
+                rgba(15, 23, 42, 0.16) 100%
+            );
+            position: relative;
+            overflow: hidden;
             margin-bottom: 1.2rem;
+            min-height: 19rem;
             padding: 1.7rem 1.8rem;
             border-radius: 28px;
             border: 1px solid rgba(15, 118, 110, 0.12);
-            background:
-                linear-gradient(135deg, rgba(232, 247, 243, 0.95), rgba(255, 255, 255, 0.94)),
-                linear-gradient(135deg, rgba(15, 118, 110, 0.05), rgba(59, 130, 246, 0.07));
+            background: linear-gradient(135deg, #e8f7f3, #ffffff);
             box-shadow: 0 24px 48px rgba(15, 23, 42, 0.08);
+        }
+        .designer-hero-image {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: center 54%;
+            pointer-events: none;
+        }
+        .designer-hero::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            background: var(--goat-hero-overlay);
+            pointer-events: none;
+        }
+        .designer-hero-content {
+            position: relative;
+            z-index: 2;
+            width: 100%;
         }
         .designer-kicker {
             margin: 0 0 0.45rem 0;
@@ -377,6 +411,7 @@ def _inject_app_theme() -> None:
             color: var(--goat-brand);
             font-size: 0.82rem;
             font-weight: 700;
+            backdrop-filter: blur(8px);
         }
         div[data-baseweb="tab-list"] {
             gap: 0.55rem;
@@ -407,13 +442,37 @@ def _inject_app_theme() -> None:
             padding: 0.6rem 0.7rem;
             box-shadow: 0 12px 28px rgba(15, 23, 42, 0.05);
         }
+        @media (max-width: 760px) {
+            .designer-hero {
+                --goat-hero-overlay: linear-gradient(
+                    180deg,
+                    rgba(247, 252, 250, 0.97) 0%,
+                    rgba(247, 252, 250, 0.91) 70%,
+                    rgba(247, 252, 250, 0.76) 100%
+                );
+                min-height: 22rem;
+                padding: 1.35rem 1.25rem;
+            }
+            .designer-hero-image {
+                object-position: 58% center;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
+@lru_cache(maxsize=1)
+def _hero_image_data_uri() -> str:
+    """Return the bundled livestock image as an embeddable JPEG URI."""
+
+    encoded = base64.b64encode(_HERO_IMAGE_PATH.read_bytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
 def _render_model_hero() -> None:
+    image_data_uri = _hero_image_data_uri()
     badges = "".join(
         f'<span class="designer-badge">{label}</span>'
         for label in (
@@ -426,13 +485,21 @@ def _render_model_hero() -> None:
     st.markdown(
         f"""
         <section class="designer-hero">
-            <p class="designer-kicker">Livestock finance planning</p>
-            <h1 class="designer-title">Goat Farm Financial Model</h1>
-            <p class="designer-copy">
-                Build a cleaner decision environment for herd growth, pricing, costs, financing, and
-                investor reporting with a structured dashboard and polished export pack.
-            </p>
-            <div class="designer-badges">{badges}</div>
+            <img
+                class="designer-hero-image"
+                src="{image_data_uri}"
+                alt=""
+                aria-hidden="true"
+            />
+            <div class="designer-hero-content">
+                <p class="designer-kicker">Livestock finance planning</p>
+                <h1 class="designer-title">Goat Farm Financial Model</h1>
+                <p class="designer-copy">
+                    Build a cleaner decision environment for herd growth, pricing, costs, financing, and
+                    investor reporting with a structured dashboard and polished export pack.
+                </p>
+                <div class="designer-badges">{badges}</div>
+            </div>
         </section>
         """,
         unsafe_allow_html=True,
