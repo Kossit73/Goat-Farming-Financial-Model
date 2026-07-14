@@ -80,6 +80,7 @@ MODEL_RESULTS_STALE_KEY = "model_results_stale"
 MODEL_RUN_SIGNATURE_KEY = "model_last_run_signature"
 MODEL_INPUT_VERSION_KEY = "model_input_version"
 MODEL_LAST_RUN_VERSION_KEY = "model_last_run_version"
+MODEL_RUN_BUNDLE_KEY = "model_run_bundle"
 MODEL_VIEW_CACHE_KEY = "model_view_cache"
 MODEL_VALIDATION_CACHE_KEY = "model_validation_cache"
 
@@ -235,6 +236,151 @@ def _cached_result_view(cache_name: str, scenario_name: str, builder: Callable[[
         cache[key] = builder()
         _safe_session_state_set(MODEL_VIEW_CACHE_KEY, cache)
     return cache[key]
+
+
+def _run_bundle_scenario_results(bundle: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(bundle, dict):
+        return {}
+    scenario_results = bundle.get("scenario_results")
+    if not isinstance(scenario_results, dict):
+        return {}
+    return {
+        str(name): payload
+        for name, payload in scenario_results.items()
+        if isinstance(payload, dict)
+    }
+
+
+def _current_run_bundle() -> Optional[dict[str, Any]]:
+    """Return the canonical post-run bundle, seeding it from legacy state when needed."""
+
+    bundle = _safe_session_state_get(MODEL_RUN_BUNDLE_KEY)
+    scenario_results = _run_bundle_scenario_results(bundle)
+    if scenario_results:
+        selected = bundle.get("selected_scenario_name") if isinstance(bundle, dict) else None
+        normalized_bundle = {
+            "scenario_results": scenario_results,
+            "selected_scenario_name": selected,
+        }
+        if bundle != normalized_bundle:
+            _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, normalized_bundle)
+        return normalized_bundle
+
+    legacy_results = _safe_session_state_get("all_scenario_results", {})
+    if isinstance(legacy_results, dict) and legacy_results:
+        seeded_bundle = {
+            "scenario_results": {
+                str(name): payload
+                for name, payload in legacy_results.items()
+                if isinstance(payload, dict)
+            },
+            "selected_scenario_name": _safe_session_state_get("selected_scenario_name"),
+        }
+        if seeded_bundle["scenario_results"]:
+            _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, seeded_bundle)
+            return seeded_bundle
+
+    selected_payload = _safe_session_state_get("results")
+    if isinstance(selected_payload, dict):
+        selected_name = str(
+            selected_payload.get("selected_scenario")
+            or _safe_session_state_get("selected_scenario_name")
+            or "Scenario"
+        )
+        seeded_bundle = {
+            "scenario_results": {selected_name: selected_payload},
+            "selected_scenario_name": selected_name,
+        }
+        _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, seeded_bundle)
+        return seeded_bundle
+
+    return None
+
+
+def _current_scenario_results() -> dict[str, dict[str, Any]]:
+    bundle = _current_run_bundle()
+    return _run_bundle_scenario_results(bundle)
+
+
+def _current_selected_result() -> Optional[dict[str, Any]]:
+    bundle = _current_run_bundle()
+    scenario_results = _run_bundle_scenario_results(bundle)
+    if not scenario_results:
+        return None
+    selected = bundle.get("selected_scenario_name") if isinstance(bundle, dict) else None
+    if selected not in scenario_results:
+        selected = next(iter(scenario_results))
+    payload = scenario_results.get(str(selected))
+    return payload if isinstance(payload, dict) else None
+
+
+def _sync_legacy_run_state(bundle: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+    """Keep existing session keys aligned with the canonical run bundle."""
+
+    bundle = bundle or _current_run_bundle()
+    if bundle is None:
+        _safe_session_state_set("all_scenario_results", {})
+        _safe_session_state_set("results", None)
+        return None
+
+    scenario_results = _run_bundle_scenario_results(bundle)
+    selected = bundle.get("selected_scenario_name") if isinstance(bundle, dict) else None
+    if scenario_results and selected not in scenario_results:
+        selected = next(iter(scenario_results))
+        bundle = {
+            "scenario_results": scenario_results,
+            "selected_scenario_name": selected,
+        }
+        _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, bundle)
+
+    _safe_session_state_set("all_scenario_results", scenario_results)
+    _safe_session_state_set("selected_scenario_name", selected)
+    _safe_session_state_set(
+        "results",
+        scenario_results.get(str(selected)) if scenario_results and selected is not None else None,
+    )
+    return bundle
+
+
+def _store_run_bundle(
+    scenario_results: dict[str, dict[str, Any]],
+    *,
+    selected_scenario_name: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Persist the canonical post-run scenario bundle and sync compatibility keys."""
+
+    normalized_results = {
+        str(name): payload
+        for name, payload in (scenario_results or {}).items()
+        if isinstance(payload, dict)
+    }
+    if not normalized_results:
+        _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, None)
+        return _sync_legacy_run_state(None)
+
+    if selected_scenario_name not in normalized_results:
+        selected_scenario_name = next(iter(normalized_results))
+    bundle = {
+        "scenario_results": normalized_results,
+        "selected_scenario_name": selected_scenario_name,
+    }
+    _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, bundle)
+    return _sync_legacy_run_state(bundle)
+
+
+def _select_run_bundle_scenario(selected_scenario_name: str) -> Optional[dict[str, Any]]:
+    """Switch the active scenario without recomputing the run outputs."""
+
+    bundle = _current_run_bundle()
+    scenario_results = _run_bundle_scenario_results(bundle)
+    if selected_scenario_name not in scenario_results:
+        return _sync_legacy_run_state(bundle)
+    next_bundle = {
+        "scenario_results": scenario_results,
+        "selected_scenario_name": selected_scenario_name,
+    }
+    _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, next_bundle)
+    return _sync_legacy_run_state(next_bundle)
 
 
 def _section_selector(
@@ -2483,87 +2629,33 @@ def _execute_scenario_suite(
 
 
 _BASE_CASE_SCENARIO_NAME = "Base Case Scenario"
-_FULL_SUITE_PENDING_KEY = "_full_suite_pending"
-
-
-def _run_base_case_only(
-    schedule_df: pd.DataFrame,
-    valuation_inputs: Dict[str, float],
-    supplementary_tables: Dict[str, pd.DataFrame],
-    full_scenario_suite: Dict[str, Dict[str, Any]],
-) -> Tuple[GoatModel, pd.DataFrame, Dict[str, Dict[str, Any]]]:
-    """Run only the Base Case scenario for a fast first response.
-
-    The full suite is deferred until the user opens a multi-scenario view.
-    """
-    base_suite = {
-        name: config
-        for name, config in full_scenario_suite.items()
-        if name == _BASE_CASE_SCENARIO_NAME
-    }
-    if not base_suite:
-        base_suite = {_BASE_CASE_SCENARIO_NAME: next(iter(full_scenario_suite.values()))}
-    return _execute_scenario_suite(schedule_df, valuation_inputs, supplementary_tables, base_suite)
-
-
-def _complete_scenario_suite_if_pending(
-    schedule_df: pd.DataFrame,
-    valuation_inputs: Dict[str, float],
-    supplementary_tables: Dict[str, pd.DataFrame],
-    full_scenario_suite: Dict[str, Dict[str, Any]],
-) -> None:
-    """Compute any scenarios not yet in all_scenario_results and merge them in."""
-    if not st.session_state.get(_FULL_SUITE_PENDING_KEY):
-        return
-    existing = set((st.session_state.get("all_scenario_results") or {}).keys())
-    remaining = {
-        name: config
-        for name, config in full_scenario_suite.items()
-        if name not in existing
-    }
-    if not remaining:
-        st.session_state[_FULL_SUITE_PENDING_KEY] = False
-        return
-    _, _, new_results = _execute_scenario_suite(
-        schedule_df, valuation_inputs, supplementary_tables, remaining
-    )
-    merged = dict(st.session_state.get("all_scenario_results") or {})
-    merged.update(new_results)
-    st.session_state.all_scenario_results = merged
-    if st.session_state.get("selected_scenario_name") not in merged:
-        st.session_state.selected_scenario_name = next(iter(merged))
-    st.session_state.results = merged[st.session_state.selected_scenario_name]
-    st.session_state[_FULL_SUITE_PENDING_KEY] = False
 
 
 def _ensure_active_scenario_selection() -> None:
-    scenario_results = st.session_state.get("all_scenario_results") or {}
+    scenario_results = _current_scenario_results()
     if not scenario_results:
+        _sync_legacy_run_state(None)
         return
 
-    selected = st.session_state.get("selected_scenario_name")
+    selected = _safe_session_state_get("selected_scenario_name")
     if selected not in scenario_results:
         selected = next(iter(scenario_results))
-        st.session_state.selected_scenario_name = selected
-
-    current = st.session_state.get("results")
-    if not isinstance(current, dict) or current.get("selected_scenario") != selected:
-        st.session_state.results = scenario_results[selected]
+    _select_run_bundle_scenario(str(selected))
 
 
 def _render_scenario_selector(prefix: str = "main") -> None:
-    scenario_results = st.session_state.get("all_scenario_results") or {}
+    scenario_results = _current_scenario_results()
     if not scenario_results:
         st.info("Run the scenario suite to enable comparisons.")
         return
 
     options = list(scenario_results.keys())
-    selected_name = st.session_state.get("selected_scenario_name")
+    selected_name = _safe_session_state_get("selected_scenario_name")
     try:
         default_index = options.index(selected_name)
     except ValueError:
         default_index = 0
-        st.session_state.selected_scenario_name = options[0]
+        _safe_session_state_set("selected_scenario_name", options[0])
         selected_name = options[0]
 
     selected = st.selectbox(
@@ -2574,8 +2666,7 @@ def _render_scenario_selector(prefix: str = "main") -> None:
     )
 
     if selected != selected_name:
-        st.session_state.selected_scenario_name = selected
-        st.session_state.results = scenario_results[selected]
+        _select_run_bundle_scenario(selected)
         selected_name = selected
 
     description = scenario_results[selected_name].get("preset_description")
@@ -10769,7 +10860,7 @@ def _results_detail_tables(results: Optional[dict[str, Any]]) -> dict[str, pd.Da
     }
 
 
-def _reporting_views_for_result(
+def _build_reporting_views_for_result(
     result_payload: dict[str, Any],
 ) -> dict[str, Any]:
     assumptions = _results_assumption_tables(result_payload)
@@ -10811,6 +10902,15 @@ def _reporting_views_for_result(
         "base_schedules": base_views,
         "scenario_schedules": scenario_views,
     }
+
+
+def _reporting_views_for_result(result_payload: dict[str, Any]) -> dict[str, Any]:
+    scenario_name = str(result_payload.get("selected_scenario", "Scenario"))
+    return _cached_result_view(
+        "reporting_views",
+        scenario_name,
+        lambda: _build_reporting_views_for_result(result_payload),
+    )
 
 
 def _reporting_schedule_for_entity(
@@ -10887,7 +10987,7 @@ def _reporting_scenario_viability_table(
     return comparison.set_index("Scenario")
 
 
-def _dashboard_outputs_for_entity(
+def _build_dashboard_outputs_for_entity(
     result_payload: dict[str, Any],
     entity: str,
 ) -> dict[str, Any]:
@@ -10961,6 +11061,39 @@ def _dashboard_outputs_for_entity(
         "product_qty_summary": product_qty_summary,
         "supplementary": supplementary,
     }
+
+
+def _dashboard_outputs_for_entity(
+    result_payload: dict[str, Any],
+    entity: str,
+) -> dict[str, Any]:
+    scenario_name = str(result_payload.get("selected_scenario", "Scenario"))
+    return _cached_result_view(
+        "dashboard_outputs",
+        scenario_name,
+        lambda: _build_dashboard_outputs_for_entity(result_payload, entity),
+        extra=entity,
+    )
+
+
+def _advanced_analytics_for_result(result_payload: dict[str, Any]) -> dict[str, object]:
+    scenario_name = str(result_payload.get("selected_scenario", "Scenario"))
+    model = result_payload["model"]
+    scenario = result_payload["scenario"]
+    return _cached_result_view(
+        "advanced_analytics",
+        scenario_name,
+        lambda: model.advanced_analytics(scenario, window=3, annual=True),
+    )
+
+
+def _scenario_viability_for_entity(entity: str) -> pd.DataFrame:
+    return _cached_result_view(
+        "scenario_viability",
+        "__all__",
+        lambda: _reporting_scenario_viability_table(_current_scenario_results(), entity),
+        extra=entity,
+    )
 
 
 def _computed_default_valuation_inputs() -> Dict[str, float]:
@@ -11141,6 +11274,7 @@ def _ensure_default_results_loaded() -> None:
     _safe_session_state_setdefault(MODEL_RUN_SIGNATURE_KEY, None)
     _safe_session_state_setdefault(MODEL_INPUT_VERSION_KEY, 0)
     _safe_session_state_setdefault(MODEL_LAST_RUN_VERSION_KEY, None)
+    _safe_session_state_setdefault(MODEL_RUN_BUNDLE_KEY, None)
     _safe_session_state_setdefault(MODEL_VIEW_CACHE_KEY, {})
     _safe_session_state_setdefault(MODEL_VALIDATION_CACHE_KEY, {})
 
@@ -11208,7 +11342,7 @@ def _refresh_results_stale_state() -> None:
 
     current_version = int(_safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0)
     last_run_version = _safe_session_state_get(MODEL_LAST_RUN_VERSION_KEY)
-    has_results = isinstance(_safe_session_state_get("results"), dict)
+    has_results = isinstance(_current_selected_result(), dict)
     is_stale = (not has_results) or (last_run_version is None) or (current_version != last_run_version)
     _safe_session_state_set(MODEL_RESULTS_STALE_KEY, is_stale)
 
@@ -11415,7 +11549,7 @@ def _render_workflow_status_strip() -> None:
     assumptions_ready = isinstance(st.session_state.get("assumptions"), dict)
     schedule_ready = isinstance(st.session_state.get("core_schedule"), pd.DataFrame)
     last_run = st.session_state.get("model_last_run_at")
-    results = st.session_state.get("results")
+    results = _current_selected_result()
     results_stale = bool(st.session_state.get(MODEL_RESULTS_STALE_KEY, True))
     if results is None:
         results_status = "Not run"
@@ -11432,7 +11566,7 @@ def _render_stale_results_notice() -> None:
 
     if not st.session_state.get(MODEL_RESULTS_STALE_KEY):
         return
-    if st.session_state.get("results") is None:
+    if _current_selected_result() is None:
         return
     st.warning(
         "Inputs have changed since the last model run. The displayed outputs are from the previous run. "
@@ -12984,7 +13118,7 @@ def main() -> None:
     _refresh_results_stale_state()
 
     _ensure_active_scenario_selection()
-    _sync_shared_model_context(st.session_state.get("results"))
+    _sync_shared_model_context(_current_selected_result())
 
     excel_download_container = st.container()
 
@@ -14859,17 +14993,13 @@ def main() -> None:
 
     if active_main_section == "Financials":
         st.subheader("Financial Statements")
-        if st.session_state.results is None:
+        if _current_selected_result() is None:
             st.info("Run the model to generate the financial statements.")
         else:
             _render_stale_results_notice()
-            results = st.session_state.results
+            results = _current_selected_result()
             scenario_label = results.get("selected_scenario", "Scenario")
-            reporting_context = _cached_result_view(
-                "reporting_views",
-                scenario_label,
-                lambda: _reporting_views_for_result(results),
-            )
+            reporting_context = _reporting_views_for_result(results)
             entity_options = reporting_context.get("entity_options", ["Consolidated"])
             default_entity = reporting_context.get("default_entity", entity_options[0])
             if st.session_state.get("reporting_entity_selector") not in entity_options:
@@ -15085,10 +15215,10 @@ def main() -> None:
             scenario_suite = _build_scenario_suite(custom_label, custom_adjustments)
 
         if run_feedback_slot is not None:
-            run_feedback_slot.info("Building base case…")
+            run_feedback_slot.info("Running scenario suite...")
         try:
-            with st.spinner("Running model — computing base case…"):
-                model, _, scenario_results = _run_base_case_only(
+            with st.spinner("Running model..."):
+                model, _, scenario_results = _execute_scenario_suite(
                     schedule_df,
                     valuation_inputs,
                     combined_supplementary,
@@ -15099,9 +15229,9 @@ def main() -> None:
             return
 
         if run_feedback_slot is not None:
-            run_feedback_slot.success("Base case complete. Opening Dashboard…")
+            run_feedback_slot.success("Scenario suite complete. Opening Dashboard...")
         else:
-            st.success("Base case complete")
+            st.success("Scenario suite complete")
         st.session_state["model_last_run_at"] = pd.Timestamp.utcnow().strftime(
             "%Y-%m-%d %H:%M UTC"
         )
@@ -15120,21 +15250,16 @@ def main() -> None:
             payload["assumption_tables"] = assumptions_snapshot
             payload["detail_tables"] = detail_snapshot
 
-        st.session_state.all_scenario_results = scenario_results
-        st.session_state[_FULL_SUITE_PENDING_KEY] = True
-        st.session_state["_pending_full_scenario_suite"] = scenario_suite
-        st.session_state["_pending_schedule_df"] = schedule_df
-        st.session_state["_pending_valuation_inputs"] = valuation_inputs
-        st.session_state["_pending_supplementary"] = combined_supplementary
-
         previous_selection = st.session_state.get("selected_scenario_name")
         if previous_selection not in scenario_results:
             previous_selection = _BASE_CASE_SCENARIO_NAME
             if previous_selection not in scenario_results:
                 previous_selection = next(iter(scenario_results))
 
-        st.session_state.selected_scenario_name = previous_selection
-        st.session_state.results = scenario_results[previous_selection]
+        _store_run_bundle(
+            scenario_results,
+            selected_scenario_name=str(previous_selection),
+        )
         st.session_state.excel_bytes_map = {}
         st.session_state[MODEL_VIEW_CACHE_KEY] = {}
         st.session_state[MODEL_VALIDATION_CACHE_KEY] = {}
@@ -15145,7 +15270,7 @@ def main() -> None:
         st.session_state["_pending_main_section_selector"] = "Dashboard"
         _maybe_rerun()
 
-    results = st.session_state.results
+    results = _current_selected_result()
     results_stale = bool(st.session_state.get(MODEL_RESULTS_STALE_KEY, True))
     _render_excel_download_panel(excel_download_container, results, results_stale)
 
@@ -15209,20 +15334,7 @@ def main() -> None:
             st.info("Supplementary schedules will appear once the model has been run.")
         else:
             _render_stale_results_notice()
-            if st.session_state.get(_FULL_SUITE_PENDING_KEY):
-                with st.spinner("Computing remaining scenarios in the background…"):
-                    _complete_scenario_suite_if_pending(
-                        st.session_state.get("_pending_schedule_df"),
-                        st.session_state.get("_pending_valuation_inputs"),
-                        st.session_state.get("_pending_supplementary"),
-                        st.session_state.get("_pending_full_scenario_suite") or {},
-                    )
-                st.rerun()
-            reporting_context = _cached_result_view(
-                "reporting_views",
-                results.get("selected_scenario", "Scenario"),
-                lambda: _reporting_views_for_result(results),
-            )
+            reporting_context = _reporting_views_for_result(results)
             entity_options = reporting_context.get("entity_options", ["Consolidated"])
             default_entity = reporting_context.get("default_entity", entity_options[0])
             if st.session_state.get("reporting_entity_selector") not in entity_options:
@@ -15232,11 +15344,9 @@ def main() -> None:
                 options=entity_options,
                 key="reporting_entity_selector",
             )
-            dashboard_outputs = _cached_result_view(
-                "dashboard_outputs",
-                results.get("selected_scenario", "Scenario"),
-                lambda: _dashboard_outputs_for_entity(results, selected_reporting_entity),
-                extra=selected_reporting_entity,
+            dashboard_outputs = _dashboard_outputs_for_entity(
+                results,
+                selected_reporting_entity,
             )
             scenario = dashboard_outputs["scenario"]
             valuation_summary = dashboard_outputs["valuation_summary"]
@@ -15247,14 +15357,8 @@ def main() -> None:
             kpis = dashboard_outputs["kpis"]
             break_even = dashboard_outputs["break_even"]
             pricing_assumptions = dashboard_outputs["pricing_assumptions"]
-            scenario_comparison = _cached_result_view(
-                "scenario_viability",
-                results.get("selected_scenario", "Scenario"),
-                lambda: _reporting_scenario_viability_table(
-                    st.session_state.get("all_scenario_results", {}),
-                    selected_reporting_entity,
-                ),
-                extra=selected_reporting_entity,
+            scenario_comparison = _scenario_viability_for_entity(
+                selected_reporting_entity
             )
 
             st.markdown("#### Investor Viability Snapshot")
@@ -15482,11 +15586,7 @@ def main() -> None:
             scenario = results["scenario"]
             model = results["model"]
             try:
-                adv_annual = _cached_result_view(
-                    "advanced_analytics",
-                    results.get("selected_scenario", "Scenario"),
-                    lambda: model.advanced_analytics(scenario, window=3, annual=True),
-                )
+                adv_annual = _advanced_analytics_for_result(results)
 
                 def _render_analytics(
                     block_name: str, payload: Dict[str, object], scenario_label: str
@@ -15697,6 +15797,8 @@ def set_state(state: dict) -> None:
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
