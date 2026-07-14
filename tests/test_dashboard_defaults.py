@@ -1972,3 +1972,23 @@ def test_excel_download_panel_shows_prepare_action_when_results_exist(monkeypatc
     )
 
     assert "Prepare Excel Model" in fake_st.button_labels
+
+
+def test_model_input_fingerprint_is_stable_for_equivalent_tables():
+    payload_a = {
+        "schedule": pd.DataFrame({"Year": [2026, 2027], "Revenue": [10.0, 12.0]}),
+        "settings": {"scenario": "Base", "enabled": True},
+    }
+    payload_b = {
+        "settings": {"enabled": True, "scenario": "Base"},
+        "schedule": pd.DataFrame({"Year": [2026, 2027], "Revenue": [10.0, 12.0]}),
+    }
+
+    assert streamlit_app._model_input_fingerprint(payload_a) == streamlit_app._model_input_fingerprint(payload_b)
+
+
+def test_model_input_fingerprint_changes_when_a_model_input_changes():
+    base = {"schedule": pd.DataFrame({"Revenue": [10.0, 12.0]})}
+    changed = {"schedule": pd.DataFrame({"Revenue": [10.0, 13.0]})}
+
+    assert streamlit_app._model_input_fingerprint(base) != streamlit_app._model_input_fingerprint(changed)

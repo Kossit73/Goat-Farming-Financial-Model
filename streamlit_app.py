@@ -81,6 +81,7 @@ MODEL_RUN_SIGNATURE_KEY = "model_last_run_signature"
 MODEL_INPUT_VERSION_KEY = "model_input_version"
 MODEL_LAST_RUN_VERSION_KEY = "model_last_run_version"
 MODEL_RUN_BUNDLE_KEY = "model_run_bundle"
+MODEL_RESULT_CACHE_KEY = "goat_model_result_cache"
 MODEL_VIEW_CACHE_KEY = "model_view_cache"
 MODEL_VALIDATION_CACHE_KEY = "model_validation_cache"
 
@@ -236,6 +237,51 @@ def _cached_result_view(cache_name: str, scenario_name: str, builder: Callable[[
         cache[key] = builder()
         _safe_session_state_set(MODEL_VIEW_CACHE_KEY, cache)
     return cache[key]
+
+
+def _normalize_model_fingerprint_value(value: Any) -> Any:
+    """Return a deterministic JSON-safe representation of model inputs."""
+
+    if isinstance(value, pd.DataFrame):
+        return {
+            "columns": [_normalize_model_fingerprint_value(item) for item in value.columns.tolist()],
+            "index": [_normalize_model_fingerprint_value(item) for item in value.index.tolist()],
+            "data": [
+                [_normalize_model_fingerprint_value(item) for item in row]
+                for row in value.itertuples(index=False, name=None)
+            ],
+        }
+    if isinstance(value, pd.Series):
+        return {
+            "name": _normalize_model_fingerprint_value(value.name),
+            "index": [_normalize_model_fingerprint_value(item) for item in value.index.tolist()],
+            "data": [_normalize_model_fingerprint_value(item) for item in value.tolist()],
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_model_fingerprint_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_model_fingerprint_value(item) for item in value]
+    if isinstance(value, set):
+        normalized = [_normalize_model_fingerprint_value(item) for item in value]
+        return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    if isinstance(value, np.generic):
+        return _normalize_model_fingerprint_value(value.item())
+    if isinstance(value, (pd.Timestamp, pd.Period)):
+        return str(value)
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _model_input_fingerprint(payload: Any) -> str:
+    normalized = _normalize_model_fingerprint_value(payload)
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _run_bundle_scenario_results(bundle: Any) -> dict[str, dict[str, Any]]:
@@ -15214,6 +15260,34 @@ def main() -> None:
             )
             scenario_suite = _build_scenario_suite(custom_label, custom_adjustments)
 
+        run_fingerprint = _model_input_fingerprint(
+            {
+                "schedule": schedule_df,
+                "valuation_inputs": valuation_inputs,
+                "supplementary": combined_supplementary,
+                "scenario_suite": scenario_suite,
+            }
+        )
+        run_cache = _safe_session_state_setdefault(MODEL_RESULT_CACHE_KEY, {})
+        cached_run_bundle = deepcopy(run_cache.get(run_fingerprint))
+        if isinstance(cached_run_bundle, dict):
+            _safe_session_state_set(MODEL_RUN_BUNDLE_KEY, cached_run_bundle)
+            _sync_legacy_run_state(cached_run_bundle)
+            _safe_session_state_set(MODEL_RUN_SIGNATURE_KEY, run_fingerprint)
+            _safe_session_state_set(
+                MODEL_LAST_RUN_VERSION_KEY,
+                int(_safe_session_state_get(MODEL_INPUT_VERSION_KEY, 0) or 0),
+            )
+            _safe_session_state_set(MODEL_RESULTS_STALE_KEY, False)
+            _safe_session_state_set("excel_bytes_map", {})
+            _safe_session_state_set(MODEL_VIEW_CACHE_KEY, {})
+            _safe_session_state_set(MODEL_VALIDATION_CACHE_KEY, {})
+            st.session_state["_pending_main_section_selector"] = "Dashboard"
+            if run_feedback_slot is not None:
+                run_feedback_slot.success("Cached scenario suite activated. Opening Dashboard...")
+            _maybe_rerun()
+            return
+
         if run_feedback_slot is not None:
             run_feedback_slot.info("Running scenario suite...")
         try:
@@ -15256,10 +15330,14 @@ def main() -> None:
             if previous_selection not in scenario_results:
                 previous_selection = next(iter(scenario_results))
 
-        _store_run_bundle(
+        stored_bundle = _store_run_bundle(
             scenario_results,
             selected_scenario_name=str(previous_selection),
         )
+        if stored_bundle is not None:
+            run_cache[run_fingerprint] = deepcopy(stored_bundle)
+            _safe_session_state_set(MODEL_RESULT_CACHE_KEY, run_cache)
+        _safe_session_state_set(MODEL_RUN_SIGNATURE_KEY, run_fingerprint)
         st.session_state.excel_bytes_map = {}
         st.session_state[MODEL_VIEW_CACHE_KEY] = {}
         st.session_state[MODEL_VALIDATION_CACHE_KEY] = {}
