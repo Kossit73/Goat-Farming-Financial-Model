@@ -281,10 +281,13 @@ def test_refresh_results_stale_state_tracks_input_changes():
 def test_reset_cached_results_marks_outputs_stale_but_keeps_last_run():
     _reset_local_state()
 
-    streamlit_app._LOCAL_SESSION_STATE["results"] = {"selected_scenario": "Base Case Scenario"}
-    streamlit_app._LOCAL_SESSION_STATE["all_scenario_results"] = {
+    scenario_results = {
         "Base Case Scenario": {"selected_scenario": "Base Case Scenario"}
     }
+    streamlit_app._store_run_bundle(
+        scenario_results,
+        selected_scenario_name="Base Case Scenario",
+    )
     streamlit_app._LOCAL_SESSION_STATE["excel_bytes_map"] = {"Base Case Scenario": b"test"}
     streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_INPUT_VERSION_KEY] = 8
     streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_LAST_RUN_VERSION_KEY] = 7
@@ -296,6 +299,15 @@ def test_reset_cached_results_marks_outputs_stale_but_keeps_last_run():
     }
     assert "Base Case Scenario" in streamlit_app._LOCAL_SESSION_STATE.get(
         "all_scenario_results", {}
+    )
+    assert (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_RUN_BUNDLE_KEY, {})
+        .get("selected_scenario_name")
+        == "Base Case Scenario"
+    )
+    assert "Base Case Scenario" in (
+        streamlit_app._LOCAL_SESSION_STATE.get(streamlit_app.MODEL_RUN_BUNDLE_KEY, {})
+        .get("scenario_results", {})
     )
     assert streamlit_app._LOCAL_SESSION_STATE.get("excel_bytes_map") == {}
     assert (
@@ -348,6 +360,120 @@ def test_cached_result_view_reuses_values_within_same_run_version():
 
     assert third == {"count": 2}
     assert call_count["value"] == 2
+
+    _reset_local_state()
+
+
+def test_store_run_bundle_aligns_selected_result_and_legacy_keys():
+    _reset_local_state()
+
+    scenario_results = {
+        "Base Case Scenario": {"selected_scenario": "Base Case Scenario", "value": 1},
+        "Downside Scenario": {"selected_scenario": "Downside Scenario", "value": 2},
+    }
+
+    bundle = streamlit_app._store_run_bundle(
+        scenario_results,
+        selected_scenario_name="Downside Scenario",
+    )
+
+    assert bundle == streamlit_app._LOCAL_SESSION_STATE.get(
+        streamlit_app.MODEL_RUN_BUNDLE_KEY
+    )
+    assert streamlit_app._LOCAL_SESSION_STATE.get("all_scenario_results") == scenario_results
+    assert streamlit_app._LOCAL_SESSION_STATE.get("selected_scenario_name") == (
+        "Downside Scenario"
+    )
+    assert streamlit_app._LOCAL_SESSION_STATE.get("results") == scenario_results[
+        "Downside Scenario"
+    ]
+    assert streamlit_app._current_selected_result() == scenario_results[
+        "Downside Scenario"
+    ]
+
+    _reset_local_state()
+
+
+def test_reporting_views_cache_by_run_version_and_scenario(monkeypatch: pytest.MonkeyPatch):
+    _reset_local_state()
+
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_LAST_RUN_VERSION_KEY] = 4
+    call_log: list[str] = []
+
+    def _fake_builder(result_payload: dict[str, object]) -> dict[str, object]:
+        scenario_name = str(result_payload.get("selected_scenario", "Scenario"))
+        call_log.append(scenario_name)
+        return {
+            "entity_options": ["Consolidated"],
+            "default_entity": "Consolidated",
+            "assumptions": {},
+            "base_schedules": {},
+            "scenario_schedules": {
+                "Consolidated": pd.DataFrame({"Scenario": [scenario_name]})
+            },
+        }
+
+    monkeypatch.setattr(streamlit_app, "_build_reporting_views_for_result", _fake_builder)
+
+    base_payload = {"selected_scenario": "Base Case Scenario"}
+    downside_payload = {"selected_scenario": "Downside Scenario"}
+
+    first = streamlit_app._reporting_views_for_result(base_payload)
+    second = streamlit_app._reporting_views_for_result(base_payload)
+    third = streamlit_app._reporting_views_for_result(downside_payload)
+
+    assert call_log == ["Base Case Scenario", "Downside Scenario"]
+    assert first["scenario_schedules"]["Consolidated"].equals(
+        second["scenario_schedules"]["Consolidated"]
+    )
+    assert third["scenario_schedules"]["Consolidated"].iloc[0, 0] == "Downside Scenario"
+
+    _reset_local_state()
+
+
+def test_dashboard_outputs_cache_by_run_version_scenario_and_entity(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _reset_local_state()
+
+    streamlit_app._LOCAL_SESSION_STATE[streamlit_app.MODEL_LAST_RUN_VERSION_KEY] = 6
+    call_log: list[tuple[str, str]] = []
+
+    def _fake_builder(
+        result_payload: dict[str, object],
+        entity: str,
+    ) -> dict[str, object]:
+        scenario_name = str(result_payload.get("selected_scenario", "Scenario"))
+        call_log.append((scenario_name, entity))
+        return {
+            "scenario": pd.DataFrame({"Entity": [entity], "Scenario": [scenario_name]}),
+            "valuation_summary": {"entity": entity},
+            "model_audit": {},
+            "working_capital_annual": pd.DataFrame(),
+            "debt_capacity_annual": pd.DataFrame(),
+            "ufcf_schedule_annual": pd.DataFrame(),
+            "kpis": pd.DataFrame(),
+            "break_even": pd.DataFrame(),
+            "pricing_assumptions": pd.DataFrame(),
+            "product_revenue_summary": pd.DataFrame(),
+            "product_qty_summary": pd.DataFrame(),
+            "supplementary": {},
+        }
+
+    monkeypatch.setattr(streamlit_app, "_build_dashboard_outputs_for_entity", _fake_builder)
+
+    payload = {"selected_scenario": "Base Case Scenario"}
+
+    first = streamlit_app._dashboard_outputs_for_entity(payload, "Consolidated")
+    second = streamlit_app._dashboard_outputs_for_entity(payload, "Consolidated")
+    third = streamlit_app._dashboard_outputs_for_entity(payload, "Breeding")
+
+    assert call_log == [
+        ("Base Case Scenario", "Consolidated"),
+        ("Base Case Scenario", "Breeding"),
+    ]
+    assert first["scenario"].equals(second["scenario"])
+    assert third["scenario"].iloc[0]["Entity"] == "Breeding"
 
     _reset_local_state()
 
@@ -1846,3 +1972,23 @@ def test_excel_download_panel_shows_prepare_action_when_results_exist(monkeypatc
     )
 
     assert "Prepare Excel Model" in fake_st.button_labels
+
+
+def test_model_input_fingerprint_is_stable_for_equivalent_tables():
+    payload_a = {
+        "schedule": pd.DataFrame({"Year": [2026, 2027], "Revenue": [10.0, 12.0]}),
+        "settings": {"scenario": "Base", "enabled": True},
+    }
+    payload_b = {
+        "settings": {"enabled": True, "scenario": "Base"},
+        "schedule": pd.DataFrame({"Year": [2026, 2027], "Revenue": [10.0, 12.0]}),
+    }
+
+    assert streamlit_app._model_input_fingerprint(payload_a) == streamlit_app._model_input_fingerprint(payload_b)
+
+
+def test_model_input_fingerprint_changes_when_a_model_input_changes():
+    base = {"schedule": pd.DataFrame({"Revenue": [10.0, 12.0]})}
+    changed = {"schedule": pd.DataFrame({"Revenue": [10.0, 13.0]})}
+
+    assert streamlit_app._model_input_fingerprint(base) != streamlit_app._model_input_fingerprint(changed)
